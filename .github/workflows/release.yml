@@ -29,14 +29,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           version="${tag#v}"
-          cargo_version="$(
-            python - <<'PY'
-            import tomllib
-
-            with open("Cargo.toml", "rb") as handle:
-                print(tomllib.load(handle)["package"]["version"])
-            PY
-          )"
+          cargo_version="$(python3 -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"])')"
 
           if [[ "${tag}" != "v${cargo_version}" ]]; then
             echo "Tag ${tag} does not match Cargo.toml version ${cargo_version}" >&2
@@ -204,7 +197,7 @@ jobs:
           export SHA256_AARCH64_UNKNOWN_LINUX_GNU="$(awk '/airlock-'"${version}"'-aarch64-unknown-linux-gnu.tar.gz$/ { print $1 }' "${sums_path}")"
           export SHA256_X86_64_UNKNOWN_LINUX_GNU="$(awk '/airlock-'"${version}"'-x86_64-unknown-linux-gnu.tar.gz$/ { print $1 }' "${sums_path}")"
 
-          python - <<'PY'
+          python3 -c '
           import os
           from pathlib import Path
 
@@ -224,7 +217,7 @@ jobs:
               rendered = rendered.replace(placeholder, value)
 
           Path("dist/archives/airlock.rb").write_text(rendered)
-          PY
+          '
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

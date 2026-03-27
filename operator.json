@@ -1,6 +1,6 @@
 {
   "name": "airlock",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Prove what crossed the model boundary",
   "pipeline_position": {
     "upstream": [

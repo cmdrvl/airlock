@@ -45,14 +45,14 @@ brew install cmdrvl/tap/airlock
 ### From Source
 
 ```bash
-cargo install --git https://github.com/cmdrvl/airlock --tag v0.1.2
+cargo install --git https://github.com/cmdrvl/airlock --tag v0.1.3
 ```
 
 ### Verify
 
 ```bash
 airlock --version
-# airlock 0.1.2
+# airlock 0.1.3
 ```
 
 ## Quick Start
@@ -374,7 +374,7 @@ evidence patterns, and real model-boundary sensitivity.
 
 ## Roadmap
 
-v0.1.2 is the current foundational release. Next:
+v0.1.3 is the current foundational release. Next:
 
 1. Seal integration with `pack` for immutable manifest bundles
 2. Register Airlock proofs in catalog

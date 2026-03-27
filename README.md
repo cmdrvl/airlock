@@ -35,23 +35,11 @@ to:
 
 ## Install
 
-### From GitHub Releases
-
-Download the latest binary for your platform from
-[Releases](https://github.com/cmdrvl/airlock/releases).
+### Homebrew (Recommended)
 
 ```bash
-# macOS (Apple Silicon)
-curl -sL https://github.com/cmdrvl/airlock/releases/latest/download/airlock-0.1.0-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv airlock /usr/local/bin/
-
-# macOS (Intel)
-curl -sL https://github.com/cmdrvl/airlock/releases/latest/download/airlock-0.1.0-x86_64-apple-darwin.tar.gz | tar xz
-sudo mv airlock /usr/local/bin/
-
-# Linux (x86_64)
-curl -sL https://github.com/cmdrvl/airlock/releases/latest/download/airlock-0.1.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv airlock /usr/local/bin/
+brew tap cmdrvl/tap
+brew install cmdrvl/tap/airlock
 ```
 
 ### From Source

@@ -145,6 +145,8 @@ jobs:
       - verify-version
       - build
     runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
     steps:
       - name: Checkout
@@ -237,29 +239,29 @@ jobs:
             dist/archives/airlock.rb
 
       - name: Warn when Homebrew tap token is missing
-        if: ${{ secrets.HOMEBREW_TAP_TOKEN == '' }}
+        if: ${{ env.HOMEBREW_TAP_TOKEN == '' }}
         run: echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping cmdrvl/homebrew-tap update."
 
       - name: Checkout Homebrew tap
-        if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         uses: actions/checkout@v4
         with:
           repository: cmdrvl/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          token: ${{ env.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
       - name: Update Homebrew formula
-        if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail
           cp dist/archives/airlock.rb homebrew-tap/Formula/airlock.rb
 
       - name: Open Homebrew tap PR
-        if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         uses: peter-evans/create-pull-request@v7
         with:
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          token: ${{ env.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
           commit-message: "airlock v${{ needs.verify-version.outputs.version }}"
           branch: "release/airlock-v${{ needs.verify-version.outputs.version }}"

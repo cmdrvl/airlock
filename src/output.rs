@@ -1,4 +1,9 @@
+use std::io::{self, Write};
+
 use serde_json::{Map, Value};
+
+const OPERATOR_JSON: &str = include_str!("../operator.json");
+const OUTPUT_SCHEMA: &str = include_str!("../schemas/airlock.v0.schema.json");
 
 /// Recursively sort all object keys in a JSON value.
 ///
@@ -33,9 +38,28 @@ pub fn canonical_json_bytes(v: &Value) -> Vec<u8> {
     canonical_json(v).into_bytes()
 }
 
+pub fn emit_describe(w: &mut impl Write) -> io::Result<()> {
+    w.write_all(OPERATOR_JSON.as_bytes())
+}
+
+pub fn emit_schema(w: &mut impl Write) -> io::Result<()> {
+    w.write_all(OUTPUT_SCHEMA.as_bytes())
+}
+
+pub fn emit_version(w: &mut impl Write) -> io::Result<()> {
+    writeln!(w, "airlock {}", env!("CARGO_PKG_VERSION"))
+}
+
+pub fn format_jsonl_line(v: &Value) -> String {
+    let mut line = canonical_json(v);
+    line.push('\n');
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonschema::validator_for;
     use serde_json::json;
 
     #[test]
@@ -113,5 +137,43 @@ mod tests {
         assert_eq!(sort_value(json!("hello")), json!("hello"));
         assert_eq!(sort_value(json!(true)), json!(true));
         assert_eq!(sort_value(json!(null)), json!(null));
+    }
+
+    #[test]
+    fn emit_describe_writes_embedded_operator_json() {
+        let mut buf = Vec::new();
+        emit_describe(&mut buf).unwrap();
+        let value: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(value["name"], "airlock");
+        assert_eq!(value["output_schema"], "airlock.v0.schema.json");
+    }
+
+    #[test]
+    fn emit_schema_writes_valid_json_schema() {
+        let mut buf = Vec::new();
+        emit_schema(&mut buf).unwrap();
+        let schema: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(
+            schema["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        validator_for(&schema).unwrap();
+    }
+
+    #[test]
+    fn emit_version_writes_airlock_semver() {
+        let mut buf = Vec::new();
+        emit_version(&mut buf).unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            format!("airlock {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn format_jsonl_line_returns_single_canonical_line() {
+        let line = format_jsonl_line(&json!({"z": 1, "a": 2}));
+        assert_eq!(line, "{\"a\":2,\"z\":1}\n");
+        assert_eq!(line.matches('\n').count(), 1);
     }
 }

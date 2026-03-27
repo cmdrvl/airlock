@@ -1,0 +1,12 @@
+version: airlock.v0
+allowed_keys:
+  - key_path: family_id
+    boundary_class: TELEMETRY
+forbidden_keys:
+  - html_path
+forbidden_patterns:
+  - pattern: sec\.gov/Archives
+    artifact_class: sec_archive_url
+derived_text_paths: []
+claim_levels:
+  - BOUNDARY_FAILED

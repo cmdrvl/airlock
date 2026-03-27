@@ -1,0 +1,56 @@
+policy_id: tournament_baseline
+version: airlock.v0
+allowed_keys:
+  - key_path: family_id
+    description: Filing family identifier
+    boundary_class: TELEMETRY
+  - key_path: current_strategy
+    description: Current deterministic strategy selection
+    boundary_class: TELEMETRY
+  - key_path: allowed_toggles
+    description: Operator-approved mutator toggles
+    boundary_class: TELEMETRY
+  - key_path: max_proposals
+    description: Proposal budget for the current round
+    boundary_class: TELEMETRY
+  - key_path: benchmark_summary
+    description: Frozen benchmark summary for the active filing
+    boundary_class: TELEMETRY
+  - key_path: unresolved_failure_fields
+    description: Unresolved benchmark failures
+    boundary_class: TELEMETRY
+  - key_path: recent_lineage_rows
+    description: Recent lineage telemetry rows
+    boundary_class: TELEMETRY
+  - key_path: heuristic_reference
+    description: Heuristic reference bundle
+    boundary_class: TELEMETRY
+  - key_path: mutator_context.challenge_observation
+    description: Structural challenge summary for annotated mode
+    boundary_class: DERIVED_TEXT
+  - key_path: mutator_context.challenge_profile.header_surfaces
+    description: Header surface observations for annotated mode
+    boundary_class: DERIVED_TEXT
+  - key_path: mutator_context.challenge_profile.layout_notes
+    description: Layout note observations for annotated mode
+    boundary_class: DERIVED_TEXT
+forbidden_keys:
+  - html_path
+  - section_html
+  - pdf_path
+  - page_images
+forbidden_patterns:
+  - pattern: "<[a-z][^>]*>"
+    description: Raw HTML markup must not cross the model boundary
+    artifact_class: raw_html
+  - pattern: sec\.gov/Archives
+    description: SEC archive URLs must not cross the model boundary
+    artifact_class: sec_archive_url
+derived_text_paths:
+  - mutator_context.challenge_observation
+  - mutator_context.challenge_profile.header_surfaces
+  - mutator_context.challenge_profile.layout_notes
+claim_levels:
+  - BOUNDARY_FAILED
+  - RAW_DOCUMENT_ABSENT
+  - STRICT_TELEMETRY_ONLY

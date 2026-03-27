@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmdrvl.com/schemas/prompt_provenance.schema.json",
+  "title": "prompt provenance schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": "airlock.v0"
+    },
+    "policy_hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "prompt_payload_hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "boundary_mode": {
+      "type": "string",
+      "enum": [
+        "ANNOTATED",
+        "TELEMETRY_ONLY"
+      ]
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "prompt_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "emitted_value_hash": {
+            "type": "string",
+            "pattern": "^blake3:[0-9a-f]{64}$"
+          },
+          "source_artifact_hash": {
+            "type": "string",
+            "pattern": "^blake3:[0-9a-f]{64}$"
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "transformation_kind": {
+            "type": "string",
+            "enum": [
+              "COPY",
+              "NORMALIZE",
+              "AGGREGATE",
+              "TEMPLATE",
+              "DERIVED_ANNOTATION"
+            ]
+          },
+          "policy_rule_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "boundary_class": {
+            "type": "string",
+            "enum": [
+              "TELEMETRY",
+              "DERIVED_TEXT",
+              "FORBIDDEN"
+            ]
+          },
+          "admitted_boundary_modes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "enum": [
+                "ANNOTATED",
+                "TELEMETRY_ONLY"
+              ]
+            }
+          }
+        },
+        "required": [
+          "prompt_path",
+          "emitted_value_hash",
+          "source_artifact_hash",
+          "source_path",
+          "transformation_kind",
+          "policy_rule_id",
+          "boundary_class",
+          "admitted_boundary_modes"
+        ]
+      }
+    }
+  },
+  "required": [
+    "version",
+    "policy_hash",
+    "prompt_payload_hash",
+    "boundary_mode",
+    "records"
+  ]
+}

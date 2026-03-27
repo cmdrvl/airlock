@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmdrvl.com/schemas/airlock.v0.schema.json",
+  "title": "airlock manifest schema",
+  "description": "Schema for the primary airlock proof artifact emitted by verify.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "manifest_version": {
+      "type": "string",
+      "const": "airlock.v0"
+    },
+    "boundary_mode": {
+      "$ref": "#/$defs/boundaryMode"
+    },
+    "policy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "policy_hash": {
+      "$ref": "#/$defs/blake3Hash"
+    },
+    "claim_levels_evaluated": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/claimLevel"
+      }
+    },
+    "achieved_claim": {
+      "$ref": "#/$defs/claimLevel"
+    },
+    "upstream_artifact_inventory": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/upstreamArtifact"
+      }
+    },
+    "system_prompt_hash": {
+      "$ref": "#/$defs/blake3Hash"
+    },
+    "prompt_payload_hash": {
+      "$ref": "#/$defs/blake3Hash"
+    },
+    "prompt_provenance_hash": {
+      "$ref": "#/$defs/blake3Hash"
+    },
+    "prompt_provenance_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_payload_hash": {
+      "$ref": "#/$defs/blake3Hash"
+    },
+    "replay_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "adapter": {
+      "type": "string",
+      "minLength": 1
+    },
+    "raw_document_present": {
+      "type": "boolean"
+    },
+    "filing_derived_text_present": {
+      "type": "boolean"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "blocked_reasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/blockedReason"
+      }
+    },
+    "provenance_summary": {
+      "$ref": "#/$defs/provenanceSummary"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "manifest_version",
+    "boundary_mode",
+    "policy_id",
+    "policy_hash",
+    "claim_levels_evaluated",
+    "achieved_claim",
+    "upstream_artifact_inventory",
+    "system_prompt_hash",
+    "prompt_payload_hash",
+    "prompt_provenance_hash",
+    "prompt_provenance_ref",
+    "request_payload_hash",
+    "replay_ref",
+    "model_id",
+    "adapter",
+    "raw_document_present",
+    "filing_derived_text_present",
+    "findings",
+    "blocked_reasons",
+    "provenance_summary",
+    "timestamp"
+  ],
+  "$defs": {
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "boundaryMode": {
+      "type": "string",
+      "enum": [
+        "ANNOTATED",
+        "TELEMETRY_ONLY"
+      ]
+    },
+    "claimLevel": {
+      "type": "string",
+      "enum": [
+        "BOUNDARY_FAILED",
+        "RAW_DOCUMENT_ABSENT",
+        "STRICT_TELEMETRY_ONLY"
+      ]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sample_value": {
+          "type": "string"
+        },
+        "artifact_class": {
+          "type": "string",
+          "minLength": 1
+        },
+        "matched_rule": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "key_path",
+        "artifact_class",
+        "matched_rule"
+      ]
+    },
+    "blockedReason": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "claim_attempted": {
+          "$ref": "#/$defs/claimLevel"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "offending_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "claim_attempted",
+        "reason",
+        "offending_paths"
+      ]
+    },
+    "upstreamArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_hash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "artifact_class": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "path",
+        "content_hash",
+        "artifact_class"
+      ]
+    },
+    "provenanceSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "total_fragments": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "by_boundary_class": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "total_fragments",
+        "by_boundary_class"
+      ]
+    }
+  }
+}

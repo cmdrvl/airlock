@@ -1,0 +1,271 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  verify-version:
+    name: Verify release version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate tag matches Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          cargo_version="$(
+            python - <<'PY'
+            import tomllib
+
+            with open("Cargo.toml", "rb") as handle:
+                print(tomllib.load(handle)["package"]["version"])
+            PY
+          )"
+
+          if [[ "${tag}" != "v${cargo_version}" ]]; then
+            echo "Tag ${tag} does not match Cargo.toml version ${cargo_version}" >&2
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify-version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+            binary_name: airlock
+            use_cross: false
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive_ext: tar.gz
+            binary_name: airlock
+            use_cross: true
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+            binary_name: airlock
+            use_cross: false
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+            binary_name: airlock
+            use_cross: false
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+            binary_name: airlock.exe
+            use_cross: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cross
+        if: ${{ matrix.use_cross }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --locked --release --target "${{ matrix.target }}"
+          else
+            cargo build --locked --release --target "${{ matrix.target }}"
+          fi
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify-version.outputs.version }}"
+          target="${{ matrix.target }}"
+          binary_name="${{ matrix.binary_name }}"
+          archive_base="airlock-${version}-${target}"
+          stage_dir="${RUNNER_TEMP}/${archive_base}"
+          archive_dir="${GITHUB_WORKSPACE}/dist"
+
+          mkdir -p "${stage_dir}" "${archive_dir}"
+          cp "target/${target}/release/${binary_name}" "${stage_dir}/${binary_name}"
+          cp README.md LICENSE "${stage_dir}/"
+
+          if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
+            (
+              cd "${stage_dir}"
+              7z a "${archive_dir}/${archive_base}.zip" "${binary_name}" README.md LICENSE
+            )
+          else
+            tar -C "${stage_dir}" -czf "${archive_dir}/${archive_base}.tar.gz" "${binary_name}" README.md LICENSE
+          fi
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/airlock-${{ needs.verify-version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs:
+      - verify-version
+      - build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/archives
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd dist/archives
+            shasum -a 256 airlock-* > SHA256SUMS
+          )
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cosign sign-blob \
+            --yes \
+            --output-signature dist/archives/SHA256SUMS.sig \
+            --output-certificate dist/archives/SHA256SUMS.pem \
+            dist/archives/SHA256SUMS
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SPDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify-version.outputs.version }}"
+          syft dir:. -o "spdx-json=dist/archives/airlock-${version}.spdx.json"
+
+      - name: Render Homebrew formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify-version.outputs.version }}"
+          sums_path="dist/archives/SHA256SUMS"
+
+          export AIRLOCK_VERSION="${version}"
+          export SHA256_AARCH64_APPLE_DARWIN="$(awk '/airlock-'"${version}"'-aarch64-apple-darwin.tar.gz$/ { print $1 }' "${sums_path}")"
+          export SHA256_X86_64_APPLE_DARWIN="$(awk '/airlock-'"${version}"'-x86_64-apple-darwin.tar.gz$/ { print $1 }' "${sums_path}")"
+          export SHA256_AARCH64_UNKNOWN_LINUX_GNU="$(awk '/airlock-'"${version}"'-aarch64-unknown-linux-gnu.tar.gz$/ { print $1 }' "${sums_path}")"
+          export SHA256_X86_64_UNKNOWN_LINUX_GNU="$(awk '/airlock-'"${version}"'-x86_64-unknown-linux-gnu.tar.gz$/ { print $1 }' "${sums_path}")"
+
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          template = Path("packaging/homebrew/airlock.rb").read_text()
+          replacements = {
+              "__VERSION__": os.environ["AIRLOCK_VERSION"],
+              "__SHA256_AARCH64_APPLE_DARWIN__": os.environ["SHA256_AARCH64_APPLE_DARWIN"],
+              "__SHA256_X86_64_APPLE_DARWIN__": os.environ["SHA256_X86_64_APPLE_DARWIN"],
+              "__SHA256_AARCH64_UNKNOWN_LINUX_GNU__": os.environ["SHA256_AARCH64_UNKNOWN_LINUX_GNU"],
+              "__SHA256_X86_64_UNKNOWN_LINUX_GNU__": os.environ["SHA256_X86_64_UNKNOWN_LINUX_GNU"],
+          }
+
+          rendered = template
+          for placeholder, value in replacements.items():
+              if not value:
+                  raise SystemExit(f"missing checksum for {placeholder}")
+              rendered = rendered.replace(placeholder, value)
+
+          Path("dist/archives/airlock.rb").write_text(rendered)
+          PY
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/archives/*.tar.gz
+            dist/archives/*.zip
+            dist/archives/SHA256SUMS
+            dist/archives/SHA256SUMS.sig
+            dist/archives/SHA256SUMS.pem
+            dist/archives/*.spdx.json
+            dist/archives/airlock.rb
+
+      - name: Warn when Homebrew tap token is missing
+        if: ${{ secrets.HOMEBREW_TAP_TOKEN == '' }}
+        run: echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping cmdrvl/homebrew-tap update."
+
+      - name: Checkout Homebrew tap
+        if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: cmdrvl/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update Homebrew formula
+        if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp dist/archives/airlock.rb homebrew-tap/Formula/airlock.rb
+
+      - name: Open Homebrew tap PR
+        if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+          commit-message: "airlock v${{ needs.verify-version.outputs.version }}"
+          branch: "release/airlock-v${{ needs.verify-version.outputs.version }}"
+          delete-branch: true
+          title: "airlock v${{ needs.verify-version.outputs.version }}"
+          body: |
+            Update `Formula/airlock.rb` for `airlock` v${{ needs.verify-version.outputs.version }}.
+          add-paths: |
+            Formula/airlock.rb

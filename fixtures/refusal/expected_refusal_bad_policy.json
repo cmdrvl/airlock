@@ -1,0 +1,1 @@
+{"outcome":"REFUSAL","refusal":{"code":"E_BAD_POLICY","detail":{"error":"did not find expected ',' or ']' at line 2 column 1, while parsing a flow sequence at line 1 column 12","path":"fixtures/refusal/bad_policy.yaml"},"message":"policy file failed YAML parsing","next_command":"airlock --schema"},"version":"airlock.v0"}

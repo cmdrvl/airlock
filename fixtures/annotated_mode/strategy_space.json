@@ -1,0 +1,42 @@
+{
+  "allowed_toggles": [
+    "layout_retry",
+    "footnote_scan"
+  ],
+  "benchmark_summary": {
+    "coverage": 0.94,
+    "open_failures": 2,
+    "score": 91
+  },
+  "current_strategy": "table_merge_v2",
+  "family_id": "bdc_schedule_of_investments",
+  "heuristic_reference": {
+    "bundle_id": "heur-2026-03-26",
+    "version": "v2"
+  },
+  "max_proposals": 4,
+  "mutator_context": {
+    "challenge_observation": "Dense footnotes in note disclosures require careful row grouping.",
+    "challenge_profile": {
+      "header_surfaces": [
+        "Schedule of investments header spans three visual rows."
+      ],
+      "layout_notes": [
+        "Totals appear in a right-aligned stub column after each sector break."
+      ]
+    }
+  },
+  "recent_lineage_rows": [
+    {
+      "field": "net_assets",
+      "status": "matched"
+    },
+    {
+      "field": "dividend_income",
+      "status": "review"
+    }
+  ],
+  "unresolved_failure_fields": [
+    "dividend_income"
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmdrvl.com/schemas/airlock_policy.schema.json",
+  "title": "airlock policy schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "policy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "const": "airlock.v0"
+    },
+    "allowed_keys": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string"
+          },
+          "boundary_class": {
+            "type": "string",
+            "enum": [
+              "TELEMETRY",
+              "DERIVED_TEXT"
+            ]
+          }
+        },
+        "required": [
+          "key_path"
+        ]
+      }
+    },
+    "forbidden_keys": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "forbidden_patterns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string"
+          },
+          "artifact_class": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    },
+    "derived_text_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "claim_levels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "BOUNDARY_FAILED",
+          "RAW_DOCUMENT_ABSENT",
+          "STRICT_TELEMETRY_ONLY"
+        ]
+      }
+    }
+  },
+  "required": [
+    "policy_id",
+    "version",
+    "allowed_keys",
+    "forbidden_keys",
+    "forbidden_patterns",
+    "derived_text_paths",
+    "claim_levels"
+  ]
+}

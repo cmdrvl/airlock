@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmdrvl.com/schemas/refusal.schema.json",
+  "title": "refusal envelope schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": "airlock.v0"
+    },
+    "outcome": {
+      "const": "REFUSAL"
+    },
+    "refusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "E_BAD_POLICY",
+            "E_BAD_INPUT",
+            "E_BAD_PROMPT",
+            "E_BAD_REQUEST",
+            "E_BAD_PROVENANCE",
+            "E_BAD_MANIFEST",
+            "E_MISSING_FILE",
+            "E_WITNESS_ERROR",
+            "E_INTERNAL"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "detail": {},
+        "next_command": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "detail"
+      ]
+    }
+  },
+  "required": [
+    "version",
+    "outcome",
+    "refusal"
+  ]
+}

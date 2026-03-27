@@ -1,0 +1,78 @@
+{
+  "name": "airlock",
+  "version": "0.1.0",
+  "description": "Prove what crossed the model boundary",
+  "pipeline_position": {
+    "upstream": [
+      "vacuum",
+      "hash",
+      "fingerprint",
+      "benchmark",
+      "assess"
+    ],
+    "downstream": [
+      "lock",
+      "pack",
+      "catalog"
+    ]
+  },
+  "subcommands": {
+    "assemble": {
+      "description": "Assemble a deterministic prompt payload plus prompt provenance.",
+      "usage": "airlock assemble --policy <POLICY> --input <FILE>... --out <PROMPT> --provenance-out <PROVENANCE>"
+    },
+    "verify": {
+      "description": "Verify a request boundary and emit an airlock manifest.",
+      "usage": "airlock verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out <MANIFEST> [--require-claim <LEVEL>]"
+    },
+    "explain": {
+      "description": "Render a human-readable explanation of an airlock manifest.",
+      "usage": "airlock explain --manifest <MANIFEST>"
+    },
+    "witness": {
+      "description": "Query the local witness ledger without recording witness entries.",
+      "usage": "airlock witness <query|last|count> [filters] [--json]"
+    }
+  },
+  "common_flags": [
+    "--describe",
+    "--schema",
+    "--version",
+    "--no-witness"
+  ],
+  "exit_semantics": {
+    "0": "VERIFY_PASS",
+    "1": "VERIFY_PARTIAL",
+    "2": "REFUSAL"
+  },
+  "refusal_codes": [
+    "E_BAD_POLICY",
+    "E_BAD_INPUT",
+    "E_BAD_PROMPT",
+    "E_BAD_REQUEST",
+    "E_BAD_PROVENANCE",
+    "E_BAD_MANIFEST",
+    "E_MISSING_FILE",
+    "E_WITNESS_ERROR",
+    "E_INTERNAL"
+  ],
+  "witness": {
+    "tool_name": "airlock",
+    "recording_commands": [
+      "assemble",
+      "verify"
+    ],
+    "non_recording_commands": [
+      "explain",
+      "witness"
+    ],
+    "outcomes": [
+      "ASSEMBLED",
+      "VERIFIED",
+      "VERIFY_PARTIAL",
+      "REFUSAL"
+    ]
+  },
+  "output_mode": "json",
+  "output_schema": "airlock.v0.schema.json"
+}

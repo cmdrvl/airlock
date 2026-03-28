@@ -1294,6 +1294,11 @@ enforcement, sandbox restrictions) is adjacent to boundary attestation. If a
 Airlock can reference in its manifest (e.g., `execution_guard_policy_hash`)
 but does not own. See Non-goals.
 
+The same applies to raw-read / exfiltration guards such as `veil`: they live
+upstream of Airlock, preventing sensitive local files from entering agent
+context before prompt assembly. Airlock may later reference their policy hashes
+or verdict artifacts, but it does not subsume them.
+
 ---
 
 ## Summary

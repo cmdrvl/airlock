@@ -4,4 +4,10 @@
 *~
 .DS_Store
 .claude/
+
+# Standard noise-drop (per-machine state, OS noise, agent caches)
 .ntm/
+.bv/
+.beads/.br_history/
+.codex_write_probe
+.regret/

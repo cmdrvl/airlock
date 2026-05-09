@@ -88,6 +88,7 @@ fn dispatch<W: Write, E: Write>(cli: Cli, stdout: &mut W, stderr: &mut E) -> u8 
         Some(Commands::Assemble(args)) => commands::assemble::run(args),
         Some(Commands::Verify(args)) => commands::verify::run(args),
         Some(Commands::Explain(args)) => commands::explain::run(args),
+        Some(Commands::Doctor(args)) => commands::doctor::run(args),
         Some(Commands::Witness(cmd)) => commands::witness::run(cmd),
         None => {
             let _ = writeln!(

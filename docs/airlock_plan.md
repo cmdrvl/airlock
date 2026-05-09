@@ -842,6 +842,10 @@ debug artifact.
 airlock assemble --policy policy.yaml --input strategy_space.json [--input heuristic.json ...] --out prompt_payload.json --provenance-out prompt_provenance.json
 airlock verify  --policy policy.yaml --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json [--require-claim RAW_DOCUMENT_ABSENT]
 airlock explain --manifest airlock_manifest.json
+airlock doctor health [--json]
+airlock doctor capabilities --json
+airlock doctor robot-docs
+airlock doctor --robot-triage
 airlock witness query [--tool airlock] [--since <iso8601>] [--until <iso8601>] [--outcome <ASSEMBLED|VERIFIED|VERIFY_PARTIAL|REFUSAL>] [--input-hash <substring>] [--limit <n>] [--json]
 airlock witness last [--json]
 airlock witness count [--tool airlock] [--since <iso8601>] [--until <iso8601>] [--outcome <ASSEMBLED|VERIFIED|VERIFY_PARTIAL|REFUSAL>] [--input-hash <substring>] [--json]
@@ -1058,7 +1062,7 @@ should include:
 - invocation usage strings
 - output mode and output schema
 - common flags (`--describe`, `--schema`, `--version`, `--no-witness`)
-- subcommands (`assemble`, `verify`, `explain`, `witness`)
+- subcommands (`assemble`, `verify`, `explain`, `doctor`, `witness`)
 - exit semantics
 - refusal map
 - witness capabilities

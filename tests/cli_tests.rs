@@ -21,6 +21,13 @@ fn airlock_cmd() -> Command {
     cmd
 }
 
+fn airlock_cmd_in(dir: &Path, witness_path: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("airlock").unwrap();
+    cmd.current_dir(dir);
+    cmd.env("EPISTEMIC_WITNESS", witness_path);
+    cmd
+}
+
 fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
@@ -66,6 +73,14 @@ fn write_witness_ledger(path: &Path, records: &[WitnessRecord]) {
     fs::write(path, contents).unwrap();
 }
 
+fn assert_doctor_side_effects_absent(dir: &Path, witness_path: &Path) {
+    assert!(!witness_path.exists());
+    if let Some(parent) = witness_path.parent() {
+        assert!(!parent.exists());
+    }
+    assert!(!dir.join(".doctor").exists());
+}
+
 #[test]
 fn test_describe_emits_operator_json() {
     let output = airlock_cmd()
@@ -83,6 +98,10 @@ fn test_describe_emits_operator_json() {
         .as_str()
         .unwrap()
         .contains("airlock assemble"));
+    assert!(describe["subcommands"]["doctor"]["usage"]
+        .as_str()
+        .unwrap()
+        .contains("airlock doctor"));
 }
 
 #[test]
@@ -114,6 +133,130 @@ fn test_version_emits_semver() {
         String::from_utf8(output).unwrap(),
         format!("airlock {}\n", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn test_doctor_health_json_is_read_only() {
+    let dir = tempdir().unwrap();
+    let witness_path = dir.path().join("witness").join("ledger.jsonl");
+
+    let output = airlock_cmd_in(dir.path(), &witness_path)
+        .args(["doctor", "health", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_doctor_side_effects_absent(dir.path(), &witness_path);
+    let payload = read_json_output(&output);
+    assert_eq!(payload["schema"], "airlock.doctor.health.v1");
+    assert_eq!(payload["tool"], "airlock");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["read_only"], true);
+    assert_eq!(payload["witness"]["opened"], false);
+    assert_eq!(payload["witness"]["appended"], false);
+    assert_eq!(payload["witness"]["directory_created"], false);
+    assert_eq!(payload["side_effects"]["appends_witness_ledger"], false);
+}
+
+#[test]
+fn test_doctor_capabilities_json_has_no_fixers_or_side_effects() {
+    let dir = tempdir().unwrap();
+    let witness_path = dir.path().join("witness").join("ledger.jsonl");
+
+    let output = airlock_cmd_in(dir.path(), &witness_path)
+        .args(["doctor", "capabilities", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_doctor_side_effects_absent(dir.path(), &witness_path);
+    let payload = read_json_output(&output);
+    assert_eq!(payload["schema"], "airlock.doctor.capabilities.v1");
+    assert_eq!(payload["fixers"].as_array().map(Vec::len), Some(0));
+
+    let side_effects = payload["side_effects"].as_object().unwrap();
+    assert!(side_effects
+        .values()
+        .all(|enabled| enabled.as_bool() == Some(false)));
+}
+
+#[test]
+fn test_doctor_robot_triage_json_is_machine_readable() {
+    let dir = tempdir().unwrap();
+    let witness_path = dir.path().join("witness").join("ledger.jsonl");
+
+    let output = airlock_cmd_in(dir.path(), &witness_path)
+        .args(["doctor", "--robot-triage"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_doctor_side_effects_absent(dir.path(), &witness_path);
+    let payload = read_json_output(&output);
+    assert_eq!(payload["schema"], "airlock.doctor.triage.v1");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["summary"]["failed_checks"], 0);
+    assert_eq!(payload["findings"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn test_doctor_robot_docs_is_plain_text_and_read_only() {
+    let dir = tempdir().unwrap();
+    let witness_path = dir.path().join("witness").join("ledger.jsonl");
+
+    let output = airlock_cmd_in(dir.path(), &witness_path)
+        .args(["doctor", "robot-docs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_doctor_side_effects_absent(dir.path(), &witness_path);
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("airlock doctor robot docs"));
+    assert!(stdout.contains("airlock doctor health [--json]"));
+    assert!(stdout.contains("No `doctor --fix` mode exists"));
+}
+
+#[test]
+fn test_doctor_help_is_available() {
+    let output = airlock_cmd()
+        .args(["doctor", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("health"));
+    assert!(stdout.contains("capabilities"));
+    assert!(stdout.contains("robot-docs"));
+}
+
+#[test]
+fn test_doctor_fix_is_not_available() {
+    let dir = tempdir().unwrap();
+    let witness_path = dir.path().join("witness").join("ledger.jsonl");
+
+    let output = airlock_cmd_in(dir.path(), &witness_path)
+        .args(["doctor", "--fix"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+
+    assert!(output.stdout.is_empty());
+    assert_doctor_side_effects_absent(dir.path(), &witness_path);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--fix"));
 }
 
 #[test]

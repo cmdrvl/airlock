@@ -45,14 +45,14 @@ brew install cmdrvl/tap/airlock
 ### From Source
 
 ```bash
-cargo install --git https://github.com/cmdrvl/airlock --tag v0.1.3
+cargo install --git https://github.com/cmdrvl/airlock --tag v0.2.0
 ```
 
 ### Verify
 
 ```bash
 airlock --version
-# airlock 0.1.3
+# airlock 0.2.0
 ```
 
 ## Quick Start
@@ -76,6 +76,20 @@ airlock verify \
 # 3. Explain the manifest in human-readable form
 airlock explain --manifest airlock_manifest.json
 ```
+
+### Doctor
+
+```bash
+airlock doctor health
+airlock doctor health --json
+airlock doctor capabilities --json
+airlock doctor robot-docs
+airlock doctor --robot-triage
+```
+
+The doctor surface is read-only. It does not read policy, prompt, provenance,
+request, or manifest files; it does not open or append witness ledgers; and it
+does not expose `doctor --fix`.
 
 Example output from `airlock explain`:
 
@@ -235,6 +249,17 @@ Human-readable manifest rendering.
 airlock explain --manifest <PATH>
 ```
 
+### `airlock doctor`
+
+Read-only health, capability, and robot triage checks for agents.
+
+```bash
+airlock doctor health [--json]
+airlock doctor capabilities --json
+airlock doctor robot-docs
+airlock doctor --robot-triage
+```
+
 ### `airlock witness`
 
 Query the spine-standard witness ledger.
@@ -374,7 +399,7 @@ evidence patterns, and real model-boundary sensitivity.
 
 ## Roadmap
 
-v0.1.3 is the current foundational release. Next:
+v0.2.0 is the current foundational release. Next:
 
 1. Seal integration with `pack` for immutable manifest bundles
 2. Register Airlock proofs in catalog

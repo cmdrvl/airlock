@@ -33,6 +33,7 @@ pub enum Commands {
     Assemble(AssembleArgs),
     Verify(VerifyArgs),
     Explain(ExplainArgs),
+    Doctor(DoctorArgs),
     #[command(subcommand)]
     Witness(WitnessCommands),
 }
@@ -93,6 +94,32 @@ pub struct VerifyArgs {
 pub struct ExplainArgs {
     #[arg(long)]
     pub manifest: PathBuf,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct DoctorArgs {
+    #[arg(long = "robot-triage")]
+    pub robot_triage: bool,
+
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(subcommand)]
+    pub command: Option<DoctorCommands>,
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+pub enum DoctorCommands {
+    Health(DoctorJsonArgs),
+    Capabilities(DoctorJsonArgs),
+    #[command(name = "robot-docs")]
+    RobotDocs,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct DoctorJsonArgs {
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
@@ -194,8 +221,10 @@ mod tests {
         ])
         .unwrap();
 
-        let Commands::Assemble(args) = cli.command.unwrap() else {
-            panic!("expected assemble command");
+        let command = cli.command.unwrap();
+        assert!(matches!(&command, Commands::Assemble(_)));
+        let Commands::Assemble(args) = command else {
+            return;
         };
         assert_eq!(args.policy, PathBuf::from("policy.yaml"));
         assert_eq!(args.input, vec![PathBuf::from("strategy.json")]);
@@ -224,8 +253,10 @@ mod tests {
         ])
         .unwrap();
 
-        let Commands::Verify(args) = cli.command.unwrap() else {
-            panic!("expected verify command");
+        let command = cli.command.unwrap();
+        assert!(matches!(&command, Commands::Verify(_)));
+        let Commands::Verify(args) = command else {
+            return;
         };
         assert_eq!(args.require_claim, Some(ClaimLevel::RawDocumentAbsent));
         assert!(args.no_witness);
@@ -253,8 +284,13 @@ mod tests {
         ])
         .unwrap();
 
-        let Commands::Witness(WitnessCommands::Query(args)) = cli.command.unwrap() else {
-            panic!("expected witness query command");
+        let command = cli.command.unwrap();
+        assert!(matches!(
+            &command,
+            Commands::Witness(WitnessCommands::Query(_))
+        ));
+        let Commands::Witness(WitnessCommands::Query(args)) = command else {
+            return;
         };
         assert_eq!(args.filters.tool.as_deref(), Some("airlock"));
         assert_eq!(args.filters.limit, Some(10));
@@ -262,11 +298,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_doctor_health_json() {
+        let cli = Cli::try_parse_from(["airlock", "doctor", "health", "--json"]).unwrap();
+
+        let command = cli.command.unwrap();
+        assert!(matches!(&command, Commands::Doctor(_)));
+        let Commands::Doctor(args) = command else {
+            return;
+        };
+        assert!(matches!(&args.command, Some(DoctorCommands::Health(_))));
+        let Some(DoctorCommands::Health(format)) = args.command else {
+            return;
+        };
+        assert!(format.json);
+        assert!(!args.robot_triage);
+    }
+
+    #[test]
+    fn parses_doctor_robot_triage() {
+        let cli = Cli::try_parse_from(["airlock", "doctor", "--robot-triage"]).unwrap();
+
+        let command = cli.command.unwrap();
+        assert!(matches!(&command, Commands::Doctor(_)));
+        let Commands::Doctor(args) = command else {
+            return;
+        };
+        assert!(args.robot_triage);
+        assert!(args.command.is_none());
+    }
+
+    #[test]
     fn parses_witness_last_json_flag() {
         let cli = Cli::try_parse_from(["airlock", "witness", "last", "--json"]).unwrap();
 
-        let Commands::Witness(WitnessCommands::Last(args)) = cli.command.unwrap() else {
-            panic!("expected witness last command");
+        let command = cli.command.unwrap();
+        assert!(matches!(
+            &command,
+            Commands::Witness(WitnessCommands::Last(_))
+        ));
+        let Commands::Witness(WitnessCommands::Last(args)) = command else {
+            return;
         };
         assert!(args.json);
     }

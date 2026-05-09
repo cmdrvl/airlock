@@ -8,7 +8,6 @@ on:
 permissions:
   contents: write
   id-token: write
-  pull-requests: write
 
 jobs:
   verify-version:
@@ -243,24 +242,27 @@ jobs:
           token: ${{ env.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
-      - name: Update Homebrew formula
+      - name: Land Homebrew formula in tap
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail
+          version="${{ needs.verify-version.outputs.version }}"
+
+          # Spine release policy: the release tag is the review gate, so tap
+          # updates land directly instead of opening a follow-up Homebrew PR.
+          mkdir -p homebrew-tap/Formula
           cp dist/archives/airlock.rb homebrew-tap/Formula/airlock.rb
 
-      - name: Open Homebrew tap PR
-        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
-        uses: peter-evans/create-pull-request@v7
-        with:
-          token: ${{ env.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
-          commit-message: "airlock v${{ needs.verify-version.outputs.version }}"
-          branch: "release/airlock-v${{ needs.verify-version.outputs.version }}"
-          delete-branch: true
-          title: "airlock v${{ needs.verify-version.outputs.version }}"
-          body: |
-            Update `Formula/airlock.rb` for `airlock` v${{ needs.verify-version.outputs.version }}.
-          add-paths: |
-            Formula/airlock.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/airlock.rb
+
+          if git diff --cached --quiet; then
+            echo "Formula unchanged. No-op."
+            exit 0
+          fi
+
+          git commit -m "airlock v${version}"
+          git push origin HEAD:main

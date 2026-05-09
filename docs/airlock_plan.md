@@ -1084,6 +1084,9 @@ Airlock should ship with the same release posture as the mature spine tools:
 - keyless signing / attestation for release checksums
 - published SBOM artifact
 - Homebrew tap update in `cmdrvl/homebrew-tap`
+- generated Homebrew formula lands directly on the tap default branch when
+  `HOMEBREW_TAP_TOKEN` is configured; Airlock follows the spine-tool policy
+  that the release tag is the review gate, not a follow-up tap PR
 
 The release workflow should validate that the requested release version matches
 `Cargo.toml` before publishing immutable artifacts.
@@ -1289,6 +1292,8 @@ Airlock follows the same pattern:
 - Versioning: independent semver via `Cargo.toml`
 - Interop: `operator.json` declaring pipeline position
 - CI: `.github/workflows/release.yml` matching existing spine release template
+- Tap landing: direct-push `Formula/airlock.rb` into the `main` branch of
+  `cmdrvl/homebrew-tap` during release, instead of opening a tap PR
 
 ### Execution guardrails live outside this repo
 

@@ -1,5 +1,9 @@
 # airlock
 
+![airlock: model boundary attestation. A painterly dashboard with a literal two-door airlock: LOCAL SIDE on the left holding four derived artifacts (schema_summary.json, shape_report.v0.json, rvl_report.v0.json, canon_mapping.v0.json) plus six raw files marked LOCAL ONLY, and MODEL SIDE on the right showing the model endpoint, tokens crossed, and request id. The chamber between the doors records the manifest assembly with bytes, prompt text length, endpoint, and timestamp. A what-crossed and what-did-NOT-cross split panel sits to the right. A customs declaration form on the desk lists every artifact that crossed with operator signature and a DECLARED rubber stamp.](docs/images/airlock.webp)
+
+> *You can tell people the model never saw the document. Airlock lets you prove it.*
+
 <div align="center">
 
 [![CI](https://github.com/cmdrvl/airlock/actions/workflows/ci.yml/badge.svg)](https://github.com/cmdrvl/airlock/actions/workflows/ci.yml)
@@ -420,3 +424,7 @@ If README and plan disagree, the plan wins.
 ## License
 
 MIT
+
+---
+
+*`airlock` is part of the open-source toolchain from the [CMD+RVL](https://cmdrvl.com) lineage and AI enablement practice. MIT-licensed. Contributions welcome from any practice or stack.*

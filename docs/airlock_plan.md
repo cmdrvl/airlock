@@ -1018,7 +1018,12 @@ Airlock should follow the spine witness protocol:
 
 - default: append one `witness.v0` record per eligible invocation
 - opt-out: `--no-witness`
-- path: `EPISTEMIC_WITNESS` or `~/.epistemic/witness.jsonl`
+- path: `EPISTEMIC_WITNESS` or `~/.cmdrvl/state/witness/witness.jsonl`
+- first-run path migration: copy `~/.epistemic/witness.jsonl` or
+  `.epistemic/witness.jsonl` into the canonical ledger when no explicit override
+  is set, leave the legacy file in place, and write path-only records to
+  `~/.cmdrvl/migrations/applied.jsonl` and
+  `~/.cmdrvl/notices/deprecated-paths.jsonl`
 - append failure never changes domain exit semantics
 
 Recording policy in v0:

@@ -267,7 +267,10 @@ Airlock should follow the mature spine witness protocol:
 
 - ambient recording on eligible commands by default
 - `--no-witness` opt-out
-- ledger path from `EPISTEMIC_WITNESS` or `~/.epistemic/witness.jsonl`
+- ledger path from `EPISTEMIC_WITNESS` or `~/.cmdrvl/state/witness/witness.jsonl`
+- copy-only first-run migration from `~/.epistemic/witness.jsonl` or
+  `.epistemic/witness.jsonl`; never delete legacy ledgers or record contents in
+  migration notices
 - append failures must not change domain exit semantics
 - query subcommands: `query`, `last`, `count`
 

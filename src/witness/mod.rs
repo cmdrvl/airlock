@@ -1,5 +1,3 @@
-use std::env;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -10,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::output::canonical_json;
+use crate::paths;
 
 pub const WITNESS_VERSION: &str = "witness.v0";
 pub const TOOL_NAME: &str = "airlock";
@@ -155,42 +154,13 @@ impl From<std::io::Error> for WitnessError {
 
 /// Resolve the default witness ledger path.
 pub fn default_witness_path() -> PathBuf {
-    default_witness_path_from(
-        env::var_os("EPISTEMIC_WITNESS"),
-        env::var_os("HOME"),
-        env::var_os("USERPROFILE"),
-    )
-}
-
-fn default_witness_path_from(
-    epistemic_witness: Option<OsString>,
-    home: Option<OsString>,
-    userprofile: Option<OsString>,
-) -> PathBuf {
-    if let Some(path) = non_empty_path(epistemic_witness) {
-        return path;
-    }
-
-    if let Some(path) = non_empty_path(home) {
-        return path.join(".epistemic/witness.jsonl");
-    }
-
-    if let Some(path) = non_empty_path(userprofile) {
-        return path.join(".epistemic/witness.jsonl");
-    }
-
-    PathBuf::from(".epistemic/witness.jsonl")
-}
-
-fn non_empty_path(value: Option<OsString>) -> Option<PathBuf> {
-    value
-        .filter(|candidate| !candidate.is_empty())
-        .map(PathBuf::from)
+    paths::default_witness_path()
 }
 
 /// Append a witness record to the default ledger path.
 pub fn append_witness(record: WitnessRecord) -> Result<(), WitnessError> {
-    append_witness_at(&default_witness_path(), &record)
+    let path = paths::prepare_witness_path_for_append()?;
+    append_witness_at(&path, &record)
 }
 
 /// Append a witness record to the given ledger path.
@@ -213,13 +183,17 @@ pub fn maybe_append_witness(
     domain_exit: u8,
     stderr: &mut impl Write,
 ) -> u8 {
-    maybe_append_witness_at(
-        &default_witness_path(),
-        &record,
-        enabled,
-        domain_exit,
-        stderr,
-    )
+    if !enabled {
+        return domain_exit;
+    }
+
+    match paths::prepare_witness_path_for_append() {
+        Ok(path) => maybe_append_witness_at(&path, &record, true, domain_exit, stderr),
+        Err(error) => {
+            let _ = writeln!(stderr, "airlock: witness append failed: {error}");
+            domain_exit
+        }
+    }
 }
 
 /// Best-effort append to an explicit path that preserves the original domain exit code.
@@ -234,7 +208,23 @@ pub fn maybe_append_witness_at(
         return domain_exit;
     }
 
-    if let Err(error) = append_witness_at(path, record) {
+    let prepared_path;
+    let append_path = if path == paths::default_witness_path() {
+        match paths::prepare_witness_path_for_append() {
+            Ok(path) => {
+                prepared_path = path;
+                prepared_path.as_path()
+            }
+            Err(error) => {
+                let _ = writeln!(stderr, "airlock: witness append failed: {error}");
+                return domain_exit;
+            }
+        }
+    } else {
+        path
+    };
+
+    if let Err(error) = append_witness_at(append_path, record) {
         let _ = writeln!(stderr, "airlock: witness append failed: {error}");
     }
 
@@ -243,7 +233,8 @@ pub fn maybe_append_witness_at(
 
 /// Query witness records from the default ledger path.
 pub fn query(filters: &WitnessFilters) -> Result<Vec<WitnessRecord>, WitnessError> {
-    query_at(&default_witness_path(), filters)
+    let path = paths::prepare_witness_path_for_query()?;
+    query_at(&path, filters)
 }
 
 /// Query witness records from an explicit ledger path.
@@ -269,7 +260,8 @@ pub fn query_at(path: &Path, filters: &WitnessFilters) -> Result<Vec<WitnessReco
 
 /// Return the most recent witness record from the default ledger path.
 pub fn last() -> Result<Option<WitnessRecord>, WitnessError> {
-    last_at(&default_witness_path())
+    let path = paths::prepare_witness_path_for_query()?;
+    last_at(&path)
 }
 
 /// Return the most recent witness record from an explicit ledger path.
@@ -281,7 +273,8 @@ pub fn last_at(path: &Path) -> Result<Option<WitnessRecord>, WitnessError> {
 
 /// Count witness records matching the filters from the default ledger path.
 pub fn count(filters: &WitnessFilters) -> Result<usize, WitnessError> {
-    count_at(&default_witness_path(), filters)
+    let path = paths::prepare_witness_path_for_query()?;
+    count_at(&path, filters)
 }
 
 /// Count witness records matching the filters from an explicit ledger path.
@@ -385,24 +378,6 @@ mod tests {
             128,
             timestamp,
         )
-    }
-
-    #[test]
-    fn default_witness_path_prefers_epistemic_witness_env() {
-        let path = default_witness_path_from(
-            Some(OsString::from("/tmp/custom-witness.jsonl")),
-            Some(OsString::from("/tmp/home")),
-            None,
-        );
-
-        assert_eq!(path, PathBuf::from("/tmp/custom-witness.jsonl"));
-    }
-
-    #[test]
-    fn default_witness_path_uses_home_when_env_missing() {
-        let path = default_witness_path_from(None, Some(OsString::from("/tmp/home")), None);
-
-        assert_eq!(path, PathBuf::from("/tmp/home/.epistemic/witness.jsonl"));
     }
 
     #[test]

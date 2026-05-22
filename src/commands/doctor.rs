@@ -4,6 +4,7 @@ use serde_json::{json, Map, Value};
 
 use crate::cli::{DoctorArgs, DoctorCommands, DoctorJsonArgs, REFUSAL, VERIFY_PASS};
 use crate::output::canonical_json;
+use crate::paths;
 use crate::witness;
 
 const HEALTH_SCHEMA: &str = "airlock.doctor.health.v1";
@@ -24,6 +25,10 @@ const SIDE_EFFECTS: &[&str] = &[
     "opens_witness_ledger",
     "appends_witness_ledger",
     "creates_witness_directory",
+    "reads_config_files",
+    "writes_config_files",
+    "writes_migration_logs",
+    "writes_deprecation_notices",
     "writes_prompt_payload",
     "writes_prompt_provenance",
     "writes_manifest",
@@ -171,6 +176,11 @@ fn collect_diagnostics() -> Diagnostics {
             detail: witness_ledger_path.clone(),
         },
         Check {
+            name: "config_footprint_declared",
+            ok: true,
+            detail: "implicit witness state is rooted under ~/.cmdrvl/state/witness".to_owned(),
+        },
+        Check {
             name: "fix_mode_disabled",
             ok: true,
             detail: "no doctor --fix argument or fixer registry is exposed".to_owned(),
@@ -235,6 +245,7 @@ fn health_value(diagnostics: &Diagnostics) -> Value {
             "appended": false,
             "directory_created": false
         },
+        "config_footprint": paths::config_footprint(),
         "side_effects": side_effects_value(),
         "fixers": [],
         "checks": checks_value(&diagnostics.checks)
@@ -279,6 +290,7 @@ fn capabilities_value() -> Value {
             "capabilities": CAPABILITIES_SCHEMA,
             "triage": TRIAGE_SCHEMA
         },
+        "config_footprint": paths::config_footprint(),
         "side_effects": side_effects_value(),
         "fixers": []
     })
@@ -307,6 +319,7 @@ fn robot_triage_value(diagnostics: &Diagnostics) -> Value {
         } else {
             json!(["inspect embedded operator manifest, schema, and doctor dispatch wiring"])
         },
+        "config_footprint": paths::config_footprint(),
         "side_effects": side_effects_value(),
         "fixers": []
     })
@@ -401,6 +414,7 @@ fn robot_docs() -> String {
         "- The doctor surface does not read policy, prompt, provenance, request, or manifest files.",
         "- The doctor surface does not run boundary scanners, adapters, assemble, verify, explain, or witness queries.",
         "- The doctor surface does not open, append, or create witness ledger files.",
+        "- The implicit witness ledger fallback is `~/.cmdrvl/state/witness/witness.jsonl`; `EPISTEMIC_WITNESS` remains an explicit operator override.",
         "- No `doctor --fix` mode exists in this slice.",
         "",
         "Exit codes:",
@@ -454,5 +468,9 @@ mod tests {
         assert_eq!(value["tool"], witness::TOOL_NAME);
         assert_eq!(value["contract"], DOCTOR_CONTRACT);
         assert_eq!(value["read_only"], true);
+        assert_eq!(
+            value["config_footprint"]["managed_state_paths"][0],
+            paths::CANONICAL_WITNESS
+        );
     }
 }

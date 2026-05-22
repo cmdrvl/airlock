@@ -95,6 +95,19 @@ The doctor surface is read-only. It does not read policy, prompt, provenance,
 request, or manifest files; it does not open or append witness ledgers; and it
 does not expose `doctor --fix`.
 
+### Configuration Footprint
+
+Airlock has no durable config file, cache, lock, or local secret store. Its only
+implicit managed home path is the shared spine witness ledger:
+`~/.cmdrvl/state/witness/witness.jsonl`.
+
+`EPISTEMIC_WITNESS` remains an explicit operator override. When the override is
+not set, first use copies a legacy `~/.epistemic/witness.jsonl` or
+`.epistemic/witness.jsonl` ledger into the canonical path, leaves the legacy file
+in place, and records path-only migration/deprecation events under
+`~/.cmdrvl/migrations/applied.jsonl` and
+`~/.cmdrvl/notices/deprecated-paths.jsonl`.
+
 Example output from `airlock explain`:
 
 ```text
@@ -267,6 +280,8 @@ airlock doctor --robot-triage
 ### `airlock witness`
 
 Query the spine-standard witness ledger.
+By default this is `~/.cmdrvl/state/witness/witness.jsonl`; set
+`EPISTEMIC_WITNESS` to use an explicit operator-supplied ledger path.
 
 ```bash
 airlock witness query [--tool T] [--since T] [--until T] [--outcome O] [--input-hash H] [--limit N] [--json]

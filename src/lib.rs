@@ -5,6 +5,7 @@ pub mod commands;
 pub mod hash;
 pub mod manifest;
 pub mod output;
+pub mod paths;
 pub mod policy;
 pub mod refusal;
 pub mod scanner;

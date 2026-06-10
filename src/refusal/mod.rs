@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cli::REFUSAL;
 use crate::output::canonical_json;
@@ -119,6 +119,14 @@ impl RefusalEnvelope {
         )
     }
 
+    pub fn bad_input_with_next_command(
+        message: impl Into<String>,
+        detail: Value,
+        next_command: impl Into<String>,
+    ) -> Self {
+        Self::new(RefusalCode::EBadInput, message, detail, Some(next_command))
+    }
+
     pub fn bad_prompt(message: impl Into<String>, detail: Value) -> Self {
         Self::new(
             RefusalCode::EBadPrompt,
@@ -161,7 +169,7 @@ impl RefusalEnvelope {
             RefusalCode::EMissingFile,
             format!("required file does not exist: {path}"),
             json!({ "path": path }),
-            None::<String>,
+            Some("airlock capabilities --json"),
         )
     }
 
@@ -268,7 +276,10 @@ mod tests {
     fn convenience_constructors_set_expected_defaults() {
         let missing = RefusalEnvelope::missing_file("missing.json");
         assert_eq!(missing.refusal.code, RefusalCode::EMissingFile);
-        assert_eq!(missing.refusal.next_command, None);
+        assert_eq!(
+            missing.refusal.next_command.as_deref(),
+            Some("airlock capabilities --json")
+        );
         assert_eq!(missing.refusal.detail, json!({"path": "missing.json"}));
 
         let witness = RefusalEnvelope::witness_error("ledger failed", json!({"path": "w.jsonl"}));

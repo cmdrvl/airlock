@@ -53,20 +53,22 @@ Related tools:
 
 ## Current Repository State
 
-The repository is currently **spec-first and docs-heavy**.
+The repository is currently a **foundational implemented Rust CLI** with
+spec-backed fixtures and tests.
 
 At the moment:
 
 - [docs/airlock_plan.md](./docs/airlock_plan.md) is the implementation-grade spec
 - [README.md](./README.md) is the operator-facing contract and vision
-- the Rust CLI is not yet fully implemented
+- the Rust CLI implements the core assemble / verify / explain / witness /
+  doctor surfaces for the v0 boundary proof contract
 
 Implications for new work:
 
 - do not invent architecture beyond the plan
-- do not imply released functionality that does not exist yet
+- keep released behavior, README, and plan aligned
 - keep docs honest about what is planned vs. landed
-- when implementation starts, preserve the repo's standalone spine-tool shape
+- preserve the repo's standalone spine-tool shape
 
 ---
 
@@ -92,8 +94,11 @@ Planned operator surface:
 ```bash
 airlock assemble --policy airlock_policy.yaml --input strategy_space.json --out prompt_payload.json --provenance-out prompt_provenance.json
 airlock verify --policy airlock_policy.yaml --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json
-airlock explain --manifest airlock_manifest.json
+airlock explain --manifest airlock_manifest.json [--json]
 airlock witness <query|last|count> [--json]
+airlock --robot-triage
+airlock capabilities --json
+airlock robot-docs guide
 airlock --describe
 airlock --schema
 airlock --version
@@ -153,8 +158,11 @@ Planned command family:
 
 - `airlock assemble --policy <POLICY> --input <FILE>... --out <PROMPT> --provenance-out <PROVENANCE>`
 - `airlock verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out <MANIFEST> [--require-claim <LEVEL>]`
-- `airlock explain --manifest <MANIFEST>`
+- `airlock explain --manifest <MANIFEST> [--json]`
 - `airlock witness <query|last|count> [--json]`
+- `airlock --robot-triage`
+- `airlock capabilities --json`
+- `airlock robot-docs guide`
 - `airlock --describe`
 - `airlock --schema`
 - `airlock --version`
@@ -171,6 +179,7 @@ Critical output rules:
 
 - `assemble` emits deterministic JSON artifacts only
 - `verify` emits a manifest even for `BOUNDARY_FAILED`
+- `explain --json` emits deterministic machine-readable manifest summaries
 - refusal envelopes are structured JSON on stdout for exit `2`
 - witness query subcommands may support human output and `--json`
 - stderr is for process diagnostics only
@@ -311,6 +320,8 @@ Do not let docs and release automation drift apart.
 Once implementation begins, treat these as required:
 
 - CLI precedence tests for `--describe`, `--schema`, and `--version`
+- agent-discovery tests for `--robot-triage`, `capabilities --json`,
+  `robot-docs guide`, and `explain --json`
 - refusal path coverage
 - witness append / `--no-witness` / query coverage
 - witness failure preserves domain outcome

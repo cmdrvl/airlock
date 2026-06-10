@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::cli::ExplainArgs;
 use crate::manifest::AirlockManifest;
+use crate::output::canonical_json;
 use crate::refusal::RefusalEnvelope;
 use crate::types::{BlockedReason, ClaimLevel, Finding};
 
@@ -19,7 +20,7 @@ fn run_with_writer(args: ExplainArgs, stdout: &mut impl Write) -> u8 {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return RefusalEnvelope::missing_file(args.manifest.display().to_string())
-                .write_to(stdout)
+                .write_to(stdout);
         }
         Err(err) => {
             return RefusalEnvelope::bad_manifest(
@@ -29,7 +30,7 @@ fn run_with_writer(args: ExplainArgs, stdout: &mut impl Write) -> u8 {
                     "error": err.to_string(),
                 }),
             )
-            .write_to(stdout)
+            .write_to(stdout);
         }
     };
 
@@ -43,14 +44,56 @@ fn run_with_writer(args: ExplainArgs, stdout: &mut impl Write) -> u8 {
                     "error": err.to_string(),
                 }),
             )
-            .write_to(stdout)
+            .write_to(stdout);
         }
     };
 
-    let rendered = render_manifest(&manifest);
+    let rendered = if args.json {
+        canonical_json(&json_explanation(
+            &manifest,
+            &args.manifest.display().to_string(),
+        ))
+    } else {
+        render_manifest(&manifest)
+    };
     let _ = stdout.write_all(rendered.as_bytes());
+    let _ = stdout.write_all(b"\n");
     let _ = stdout.flush();
     0
+}
+
+fn json_explanation(manifest: &AirlockManifest, manifest_ref: &str) -> Value {
+    json!({
+        "schema": "airlock.explain.v1",
+        "tool": "airlock",
+        "manifest_ref": manifest_ref,
+        "manifest_hash": manifest.hash(),
+        "claim": {
+            "achieved": manifest.achieved_claim,
+            "boundary_mode": manifest.boundary_mode,
+            "raw_document_present": manifest.raw_document_present,
+            "filing_derived_text_present": manifest.filing_derived_text_present
+        },
+        "proof": {
+            "policy_id": manifest.policy_id,
+            "policy_hash": manifest.policy_hash,
+            "prompt_payload_hash": manifest.prompt_payload_hash,
+            "prompt_provenance_hash": manifest.prompt_provenance_hash,
+            "prompt_provenance_ref": manifest.prompt_provenance_ref,
+            "request_payload_hash": manifest.request_payload_hash,
+            "replay_ref": manifest.replay_ref,
+            "model_id": manifest.model_id,
+            "adapter": manifest.adapter
+        },
+        "provenance_summary": manifest.provenance_summary,
+        "blocked_paths": blocked_paths(&manifest.blocked_reasons),
+        "blocked_reasons": manifest.blocked_reasons,
+        "findings": manifest.findings,
+        "next_commands": {
+            "human_explain": format!("airlock explain --manifest {manifest_ref}"),
+            "verify_again": "airlock verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out airlock_manifest.json"
+        }
+    })
 }
 
 fn render_manifest(manifest: &AirlockManifest) -> String {
@@ -124,11 +167,7 @@ fn render_manifest(manifest: &AirlockManifest) -> String {
 }
 
 fn presence_word(is_present: bool) -> &'static str {
-    if is_present {
-        "present"
-    } else {
-        "absent"
-    }
+    if is_present { "present" } else { "absent" }
 }
 
 fn blocked_paths(blocked_reasons: &[BlockedReason]) -> Vec<String> {
@@ -168,7 +207,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::manifest::{ProvenanceSummary, AIRLOCK_MANIFEST_VERSION};
+    use crate::manifest::{AIRLOCK_MANIFEST_VERSION, ProvenanceSummary};
     use crate::refusal::REFUSAL_OUTCOME;
     use crate::types::{BoundaryMode, UpstreamArtifact};
 
@@ -256,7 +295,13 @@ mod tests {
         let path = write_manifest_file(&tempdir, &manifest);
         let mut stdout = Vec::new();
 
-        let exit_code = run_with_writer(ExplainArgs { manifest: path }, &mut stdout);
+        let exit_code = run_with_writer(
+            ExplainArgs {
+                manifest: path,
+                json: false,
+            },
+            &mut stdout,
+        );
 
         assert_eq!(exit_code, 0);
         let rendered = String::from_utf8(stdout).unwrap();
@@ -296,7 +341,13 @@ mod tests {
         let path = write_manifest_file(&tempdir, &manifest);
         let mut stdout = Vec::new();
 
-        let exit_code = run_with_writer(ExplainArgs { manifest: path }, &mut stdout);
+        let exit_code = run_with_writer(
+            ExplainArgs {
+                manifest: path,
+                json: false,
+            },
+            &mut stdout,
+        );
 
         assert_eq!(exit_code, 0);
         let rendered = String::from_utf8(stdout).unwrap();
@@ -319,7 +370,13 @@ mod tests {
         let path = write_manifest_file(&tempdir, &manifest);
         let mut stdout = Vec::new();
 
-        let exit_code = run_with_writer(ExplainArgs { manifest: path }, &mut stdout);
+        let exit_code = run_with_writer(
+            ExplainArgs {
+                manifest: path,
+                json: false,
+            },
+            &mut stdout,
+        );
 
         assert_eq!(exit_code, 0);
         let rendered = String::from_utf8(stdout).unwrap();
@@ -334,7 +391,13 @@ mod tests {
         let path = tempdir.path().join("missing.json");
         let mut stdout = Vec::new();
 
-        let exit_code = run_with_writer(ExplainArgs { manifest: path }, &mut stdout);
+        let exit_code = run_with_writer(
+            ExplainArgs {
+                manifest: path,
+                json: false,
+            },
+            &mut stdout,
+        );
 
         assert_eq!(exit_code, 2);
         let refusal: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
@@ -349,11 +412,59 @@ mod tests {
         std::fs::write(&path, b"{not valid json").unwrap();
         let mut stdout = Vec::new();
 
-        let exit_code = run_with_writer(ExplainArgs { manifest: path }, &mut stdout);
+        let exit_code = run_with_writer(
+            ExplainArgs {
+                manifest: path,
+                json: false,
+            },
+            &mut stdout,
+        );
 
         assert_eq!(exit_code, 2);
         let refusal: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(refusal["outcome"], REFUSAL_OUTCOME);
         assert_eq!(refusal["refusal"]["code"], "E_BAD_MANIFEST");
+    }
+
+    #[test]
+    fn explain_json_is_machine_readable() {
+        let manifest = sample_manifest(
+            ClaimLevel::RawDocumentAbsent,
+            false,
+            true,
+            vec![],
+            vec![BlockedReason {
+                claim_attempted: ClaimLevel::StrictTelemetryOnly,
+                reason: "derived text present".to_string(),
+                offending_paths: vec!["mutator_context.challenge_observation".to_string()],
+            }],
+        );
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = write_manifest_file(&tempdir, &manifest);
+        let mut stdout = Vec::new();
+
+        let exit_code = run_with_writer(
+            ExplainArgs {
+                manifest: path,
+                json: true,
+            },
+            &mut stdout,
+        );
+
+        assert_eq!(exit_code, 0);
+        let explanation: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(explanation["schema"], "airlock.explain.v1");
+        assert_eq!(explanation["claim"]["achieved"], "RAW_DOCUMENT_ABSENT");
+        assert_eq!(
+            explanation["blocked_paths"][0],
+            "mutator_context.challenge_observation"
+        );
+        assert_eq!(explanation["proof"]["policy_id"], "tournament_baseline");
+        assert!(
+            explanation["next_commands"]["human_explain"]
+                .as_str()
+                .unwrap()
+                .starts_with("airlock explain --manifest ")
+        );
     }
 }

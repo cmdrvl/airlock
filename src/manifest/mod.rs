@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,7 @@ use crate::output::{canonical_json, canonical_json_bytes};
 use crate::types::{BlockedReason, BoundaryMode, ClaimLevel, Finding, UpstreamArtifact};
 
 pub const AIRLOCK_MANIFEST_VERSION: &str = "airlock.v0";
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Aggregate provenance counts used by explain output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,22 +75,39 @@ impl AirlockManifest {
         blake3_hash(&canonical_json_bytes(&self.as_json_value()))
     }
 
-    pub fn write_to(&self, path: &Path) -> Result<(), std::io::Error> {
+    pub fn write_to(&self, path: &Path) -> Result<(), io::Error> {
         let json = self.to_canonical_json();
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let filename = path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("airlock_manifest.json");
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let temp_path = parent.join(format!(".{filename}.{}.tmp", nonce));
 
-        std::fs::write(&temp_path, json.as_bytes())?;
-        std::fs::rename(&temp_path, path)?;
-        Ok(())
+        for _ in 0..16 {
+            let suffix = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let temp_path =
+                parent.join(format!(".{filename}.{}.{}.tmp", std::process::id(), suffix));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+            {
+                Ok(mut file) => {
+                    file.write_all(json.as_bytes())?;
+                    file.sync_all()?;
+                    drop(file);
+                    std::fs::rename(&temp_path, path)?;
+                    return Ok(());
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate unique manifest temp path",
+        ))
     }
 
     fn as_json_value(&self) -> Value {
@@ -573,9 +593,11 @@ mod tests {
         let manifest = sample_manifest();
 
         assert_eq!(manifest.to_canonical_json(), manifest.to_canonical_json());
-        assert!(manifest
-            .to_canonical_json()
-            .contains("\"manifest_version\":\"airlock.v0\""));
+        assert!(
+            manifest
+                .to_canonical_json()
+                .contains("\"manifest_version\":\"airlock.v0\"")
+        );
     }
 
     #[test]

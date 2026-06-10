@@ -841,11 +841,14 @@ debug artifact.
 # Core subcommands
 airlock assemble --policy policy.yaml --input strategy_space.json [--input heuristic.json ...] --out prompt_payload.json --provenance-out prompt_provenance.json
 airlock verify  --policy policy.yaml --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json [--require-claim RAW_DOCUMENT_ABSENT]
-airlock explain --manifest airlock_manifest.json
+airlock explain --manifest airlock_manifest.json [--json]
 airlock doctor health [--json]
 airlock doctor capabilities --json
 airlock doctor robot-docs
 airlock doctor --robot-triage
+airlock --robot-triage
+airlock capabilities --json
+airlock robot-docs guide
 airlock witness query [--tool airlock] [--since <iso8601>] [--until <iso8601>] [--outcome <ASSEMBLED|VERIFIED|VERIFY_PARTIAL|REFUSAL>] [--input-hash <substring>] [--limit <n>] [--json]
 airlock witness last [--json]
 airlock witness count [--tool airlock] [--since <iso8601>] [--until <iso8601>] [--outcome <ASSEMBLED|VERIFIED|VERIFY_PARTIAL|REFUSAL>] [--input-hash <substring>] [--json]
@@ -854,6 +857,7 @@ airlock witness count [--tool airlock] [--since <iso8601>] [--until <iso8601>] [
 airlock --describe          # Emit operator.json (pipeline metadata)
 airlock --schema            # Emit output JSON schema
 airlock --version           # Emit version string
+airlock --robot-triage      # Emit read-only machine triage JSON
 ```
 
 Common flags (all subcommands):
@@ -861,6 +865,7 @@ Common flags (all subcommands):
 - `--describe`: print compiled `operator.json` and exit 0 before normal validation
 - `--schema`: print the output schema and exit 0 before normal validation
 - `--version`: print `airlock <semver>` and exit 0
+- `--robot-triage`: print read-only agent triage JSON and exit 0
 - `--no-witness`: suppress ambient witness ledger recording for eligible runs
 
 `assemble` accepts multiple `--input` files. Each input file becomes an entry in
@@ -885,6 +890,15 @@ airlock adapter openai --prompt prompt_payload.json --out request.json
 achieved claim is `BOUNDARY_FAILED`. `--require-claim` enables gated behavior:
 if the achieved claim is below the requested threshold, `verify` exits non-zero
 after writing the manifest.
+
+`explain --json` emits a deterministic `airlock.explain.v1` summary of an
+existing manifest. It does not re-run policy loading, prompt assembly, request
+scanning, or witness recording.
+
+The top-level `capabilities` and `robot-docs guide` commands are read-only
+agent-discovery aliases for the doctor contracts. They exist so the first
+machine-discovery command an agent guesses can succeed without remembering the
+doctor namespace.
 
 `witness` follows the standard spine ledger surface. Query subcommands do not
 append witness records themselves.

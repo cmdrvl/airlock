@@ -1,5 +1,5 @@
 use airlock::cli::REFUSAL;
-use airlock::refusal::{RefusalCode, RefusalEnvelope, AIRLOCK_VERSION, REFUSAL_OUTCOME};
+use airlock::refusal::{AIRLOCK_VERSION, REFUSAL_OUTCOME, RefusalCode, RefusalEnvelope};
 use serde_json::json;
 
 fn sample_envelopes() -> Vec<(RefusalCode, RefusalEnvelope, Option<&'static str>)> {
@@ -37,7 +37,7 @@ fn sample_envelopes() -> Vec<(RefusalCode, RefusalEnvelope, Option<&'static str>
         (
             RefusalCode::EMissingFile,
             RefusalEnvelope::missing_file("missing.json"),
-            None,
+            Some("airlock capabilities --json"),
         ),
         (
             RefusalCode::EWitnessError,
@@ -95,7 +95,7 @@ fn test_next_command_is_present_when_applicable() {
             .and_then(|value| value.as_str());
 
         match code {
-            RefusalCode::EMissingFile | RefusalCode::EInternal => {
+            RefusalCode::EInternal => {
                 assert_eq!(next_command, None);
             }
             _ => assert_eq!(next_command, expected_next_command),

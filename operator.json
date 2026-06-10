@@ -1,6 +1,6 @@
 {
   "name": "airlock",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Prove what crossed the model boundary",
   "pipeline_position": {
     "upstream": [
@@ -26,12 +26,24 @@
       "usage": "airlock verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out <MANIFEST> [--require-claim <LEVEL>]"
     },
     "explain": {
-      "description": "Render a human-readable explanation of an airlock manifest.",
-      "usage": "airlock explain --manifest <MANIFEST>"
+      "description": "Render a human-readable or machine-readable explanation of an airlock manifest.",
+      "usage": "airlock explain --manifest <MANIFEST> [--json]"
     },
     "doctor": {
       "description": "Inspect read-only CLI health, capabilities, and machine triage contracts without reading run artifacts or touching witness state.",
       "usage": "airlock doctor health [--json] | airlock doctor capabilities --json | airlock doctor robot-docs | airlock doctor --robot-triage"
+    },
+    "capabilities": {
+      "description": "Read-only top-level alias for the machine-readable command, side-effect, and config contract.",
+      "usage": "airlock capabilities --json"
+    },
+    "robot-docs": {
+      "description": "Read-only top-level alias for the compact agent-facing guide.",
+      "usage": "airlock robot-docs guide"
+    },
+    "robot-triage": {
+      "description": "Read-only top-level machine triage JSON.",
+      "usage": "airlock --robot-triage"
     },
     "witness": {
       "description": "Query the local witness ledger without recording witness entries.",
@@ -42,6 +54,7 @@
     "--describe",
     "--schema",
     "--version",
+    "--robot-triage",
     "--no-witness"
   ],
   "exit_semantics": {

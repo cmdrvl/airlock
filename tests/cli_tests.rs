@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use airlock::witness::WitnessRecord;
 use assert_cmd::Command;
 use jsonschema::validator_for;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::tempdir;
 
 fn repo_root() -> PathBuf {
@@ -94,14 +94,18 @@ fn test_describe_emits_operator_json() {
 
     assert_eq!(describe["name"], "airlock");
     assert_eq!(describe["output_schema"], "airlock.v0.schema.json");
-    assert!(describe["subcommands"]["assemble"]["usage"]
-        .as_str()
-        .unwrap()
-        .contains("airlock assemble"));
-    assert!(describe["subcommands"]["doctor"]["usage"]
-        .as_str()
-        .unwrap()
-        .contains("airlock doctor"));
+    assert!(
+        describe["subcommands"]["assemble"]["usage"]
+            .as_str()
+            .unwrap()
+            .contains("airlock assemble")
+    );
+    assert!(
+        describe["subcommands"]["doctor"]["usage"]
+            .as_str()
+            .unwrap()
+            .contains("airlock doctor")
+    );
 }
 
 #[test]
@@ -133,6 +137,92 @@ fn test_version_emits_semver() {
         String::from_utf8(output).unwrap(),
         format!("airlock {}\n", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn test_bare_invocation_prints_agent_entrypoints() {
+    let output = airlock_cmd().assert().success().get_output().stdout.clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("Usage: airlock"));
+    assert!(stdout.contains("airlock --robot-triage"));
+    assert!(stdout.contains("airlock capabilities --json"));
+    assert!(stdout.contains("airlock robot-docs guide"));
+}
+
+#[test]
+fn test_top_level_robot_triage_alias_is_json() {
+    let output = airlock_cmd()
+        .arg("--robot-triage")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value = read_json_output(&output);
+    assert_eq!(value["schema"], "airlock.doctor.triage.v1");
+    assert_eq!(
+        value["summary"]["capabilities"],
+        "airlock capabilities --json"
+    );
+    assert_eq!(value["side_effects"]["reads_manifest_files"], false);
+}
+
+#[test]
+fn test_top_level_capabilities_alias_is_json() {
+    let output = airlock_cmd()
+        .args(["capabilities", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value = read_json_output(&output);
+    assert_eq!(value["schema"], "airlock.doctor.capabilities.v1");
+    assert_eq!(
+        value["agent_entrypoints"]["robot_docs"],
+        "airlock robot-docs guide"
+    );
+    assert!(
+        value["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command["name"] == "explain --json")
+    );
+}
+
+#[test]
+fn test_top_level_robot_docs_guide_alias() {
+    let output = airlock_cmd()
+        .args(["robot-docs", "guide"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("airlock doctor robot docs"));
+    assert!(stdout.contains("airlock --robot-triage"));
+    assert!(stdout.contains("airlock explain --manifest <MANIFEST> --json"));
+}
+
+#[test]
+fn test_json_typo_has_agent_hint() {
+    let output = airlock_cmd()
+        .arg("--jsno")
+        .assert()
+        .code(2)
+        .get_output()
+        .stderr
+        .clone();
+
+    let stderr = String::from_utf8(output).unwrap();
+    assert!(stderr.contains("did you mean `--json`"));
+    assert!(stderr.contains("airlock --robot-triage"));
 }
 
 #[test]
@@ -190,9 +280,11 @@ fn test_doctor_capabilities_json_has_no_fixers_or_side_effects() {
     assert_eq!(payload["config_footprint"]["self_contained"], true);
 
     let side_effects = payload["side_effects"].as_object().unwrap();
-    assert!(side_effects
-        .values()
-        .all(|enabled| enabled.as_bool() == Some(false)));
+    assert!(
+        side_effects
+            .values()
+            .all(|enabled| enabled.as_bool() == Some(false))
+    );
 }
 
 #[test]
@@ -424,17 +516,21 @@ fn test_assemble_telemetry_only_strips_derived() {
 
     let prompt = read_json(&prompt_path);
     let provenance = read_json(&provenance_path);
-    assert!(prompt["messages"][1]["content"]
-        .as_object()
-        .unwrap()
-        .get("mutator_context")
-        .is_none());
+    assert!(
+        prompt["messages"][1]["content"]
+            .as_object()
+            .unwrap()
+            .get("mutator_context")
+            .is_none()
+    );
     assert_eq!(provenance["boundary_mode"], "TELEMETRY_ONLY");
-    assert!(provenance["records"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|record| record["boundary_class"] != "DERIVED_TEXT"));
+    assert!(
+        provenance["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record["boundary_class"] != "DERIVED_TEXT")
+    );
 }
 
 #[test]
@@ -647,11 +743,13 @@ fn test_verify_boundary_failed() {
     let expected = read_json(&fixture("fixtures/boundary_failed/expected_manifest.json"));
     assert_eq!(actual["achieved_claim"], "BOUNDARY_FAILED");
     assert_eq!(normalized_manifest(actual, &expected), expected);
-    assert!(read_json(&manifest_path)["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["artifact_class"] == "sec_archive_url"));
+    assert!(
+        read_json(&manifest_path)["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["artifact_class"] == "sec_archive_url")
+    );
 }
 
 #[test]
@@ -798,6 +896,34 @@ fn test_explain_boundary_failed() {
 }
 
 #[test]
+fn test_explain_json_output() {
+    let output = airlock_cmd()
+        .args([
+            "explain",
+            "--manifest",
+            "fixtures/annotated_mode/expected_manifest.json",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value = read_json_output(&output);
+
+    assert_eq!(value["schema"], "airlock.explain.v1");
+    assert_eq!(value["claim"]["achieved"], "RAW_DOCUMENT_ABSENT");
+    assert_eq!(value["proof"]["policy_id"], "annotated_mode");
+    assert!(
+        value["blocked_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "messages[1].content.mutator_context.challenge_observation")
+    );
+}
+
+#[test]
 fn test_explain_missing_manifest() {
     let dir = tempdir().unwrap();
     let output = airlock_cmd()
@@ -813,6 +939,24 @@ fn test_explain_missing_manifest() {
         .clone();
 
     assert_refusal_code(&output, "E_MISSING_FILE");
+}
+
+#[test]
+fn test_witness_bad_timestamp_names_corrected_command() {
+    let output = airlock_cmd()
+        .args(["witness", "query", "--since", "yesterday", "--json"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+
+    let refusal = read_json_output(&output);
+    assert_eq!(refusal["refusal"]["code"], "E_BAD_INPUT");
+    assert_eq!(
+        refusal["refusal"]["next_command"],
+        "airlock witness query --since 2026-01-15T00:00:00Z --json"
+    );
 }
 
 #[test]

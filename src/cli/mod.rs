@@ -12,96 +12,141 @@ pub use exit::{REFUSAL, VERIFY_PARTIAL, VERIFY_PASS};
 #[command(
     name = "airlock",
     about = "Prove what crossed the model boundary",
+    long_about = "Assemble proof-carrying model prompts, verify exactly what crossed the model boundary, and inspect local witness receipts.",
+    after_help = "Agent entry points:\n  airlock --robot-triage\n  airlock capabilities --json\n  airlock robot-docs guide\n\nCore flow:\n  airlock assemble --policy <POLICY> --input <JSON>... --out prompt_payload.json --provenance-out prompt_provenance.json\n  airlock verify --policy <POLICY> --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json\n  airlock explain --manifest airlock_manifest.json --json",
     disable_version_flag = true
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Emit embedded operator metadata as canonical JSON and exit"
+    )]
     pub describe: bool,
 
-    #[arg(long)]
+    #[arg(long, help = "Emit the airlock manifest JSON Schema and exit")]
     pub schema: bool,
 
-    #[arg(long = "version")]
+    #[arg(long = "version", help = "Emit 'airlock <version>' and exit")]
     pub print_version: bool,
+
+    #[arg(
+        long = "robot-triage",
+        help = "Emit read-only machine triage JSON without reading run artifacts or witness ledgers"
+    )]
+    pub robot_triage: bool,
 }
 
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
 pub enum Commands {
+    #[command(about = "Assemble deterministic prompt_payload.json and prompt_provenance.json")]
     Assemble(AssembleArgs),
+    #[command(about = "Verify a prompt/request boundary and emit airlock_manifest.json")]
     Verify(VerifyArgs),
+    #[command(about = "Render an airlock manifest as text or machine-readable explanation JSON")]
     Explain(ExplainArgs),
+    #[command(about = "Read-only health, capabilities, robot docs, and triage for agents")]
     Doctor(DoctorArgs),
-    #[command(subcommand)]
+    #[command(about = "Alias for 'airlock doctor capabilities'; use --json for machine output")]
+    Capabilities(DoctorJsonArgs),
+    #[command(
+        name = "robot-docs",
+        about = "Alias for 'airlock doctor robot-docs'; accepts optional 'guide'"
+    )]
+    RobotDocs(RobotDocsArgs),
+    #[command(subcommand, about = "Query the local witness ledger")]
     Witness(WitnessCommands),
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
+#[command(
+    after_help = "Example:\n  airlock assemble --policy rules/tournament_baseline.yaml --input strategy_space.json --out prompt_payload.json --provenance-out prompt_provenance.json --boundary-mode TELEMETRY_ONLY --no-witness"
+)]
 pub struct AssembleArgs {
-    #[arg(long)]
+    #[arg(long, help = "Boundary policy YAML file")]
     pub policy: PathBuf,
 
-    #[arg(long, required = true, num_args = 1..)]
+    #[arg(long, required = true, num_args = 1.., help = "Input JSON artifact; repeat for multiple upstream artifacts")]
     pub input: Vec<PathBuf>,
 
-    #[arg(long = "system-prompt")]
+    #[arg(
+        long = "system-prompt",
+        help = "Optional UTF-8 system prompt file included in provenance"
+    )]
     pub system_prompt: Option<PathBuf>,
 
     #[arg(
         long = "boundary-mode",
         default_value_t = BoundaryMode::Annotated,
-        value_parser = parse_boundary_mode
+        value_parser = parse_boundary_mode,
+        help = "Boundary exposure mode: ANNOTATED or TELEMETRY_ONLY"
     )]
     pub boundary_mode: BoundaryMode,
 
-    #[arg(long)]
+    #[arg(long, help = "Path to write prompt_payload.json")]
     pub out: PathBuf,
 
-    #[arg(long = "provenance-out")]
+    #[arg(long = "provenance-out", help = "Path to write prompt_provenance.json")]
     pub provenance_out: PathBuf,
 
-    #[arg(long = "no-witness")]
+    #[arg(long = "no-witness", help = "Skip ambient witness ledger recording")]
     pub no_witness: bool,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
+#[command(
+    after_help = "Example:\n  airlock verify --policy rules/tournament_baseline.yaml --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json --require-claim RAW_DOCUMENT_ABSENT"
+)]
 pub struct VerifyArgs {
-    #[arg(long)]
+    #[arg(long, help = "Boundary policy YAML used during assembly")]
     pub policy: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, help = "prompt_payload.json produced by airlock assemble")]
     pub prompt: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, help = "prompt_provenance.json produced by airlock assemble")]
     pub provenance: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, help = "Transport-wrapped model request JSON")]
     pub request: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, help = "Path to write airlock_manifest.json")]
     pub out: PathBuf,
 
-    #[arg(long = "require-claim", value_parser = parse_claim_level)]
+    #[arg(
+        long = "require-claim",
+        value_parser = parse_claim_level,
+        help = "Minimum acceptable claim: BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT, or STRICT_TELEMETRY_ONLY"
+    )]
     pub require_claim: Option<ClaimLevel>,
 
-    #[arg(long = "no-witness")]
+    #[arg(long = "no-witness", help = "Skip ambient witness ledger recording")]
     pub no_witness: bool,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
+#[command(
+    after_help = "Examples:\n  airlock explain --manifest airlock_manifest.json\n  airlock explain --manifest airlock_manifest.json --json"
+)]
 pub struct ExplainArgs {
-    #[arg(long)]
+    #[arg(long, help = "airlock_manifest.json to explain")]
     pub manifest: PathBuf,
+
+    #[arg(long, help = "Emit machine-readable explanation JSON")]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
+#[command(
+    after_help = "Read-only agent surfaces:\n  airlock doctor health --json\n  airlock doctor capabilities --json\n  airlock doctor robot-docs\n  airlock doctor --robot-triage"
+)]
 pub struct DoctorArgs {
-    #[arg(long = "robot-triage")]
+    #[arg(long = "robot-triage", help = "Emit read-only triage JSON for agents")]
     pub robot_triage: bool,
 
-    #[arg(long)]
+    #[arg(long, help = "Emit JSON where the selected doctor command supports it")]
     pub json: bool,
 
     #[command(subcommand)]
@@ -110,22 +155,39 @@ pub struct DoctorArgs {
 
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
 pub enum DoctorCommands {
+    #[command(about = "Read-only embedded health diagnostics")]
     Health(DoctorJsonArgs),
+    #[command(about = "Machine-readable command, side-effect, and config contract")]
     Capabilities(DoctorJsonArgs),
-    #[command(name = "robot-docs")]
+    #[command(name = "robot-docs", about = "Paste-ready agent operating guide")]
     RobotDocs,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct DoctorJsonArgs {
-    #[arg(long)]
+    #[arg(long, help = "Emit JSON")]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct RobotDocsArgs {
+    #[command(subcommand)]
+    pub command: Option<RobotDocsCommands>,
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+pub enum RobotDocsCommands {
+    #[command(about = "Print the agent operating guide")]
+    Guide,
 }
 
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
 pub enum WitnessCommands {
+    #[command(about = "List matching witness records")]
     Query(WitnessQueryArgs),
+    #[command(about = "Show the newest matching witness record")]
     Last(WitnessLastArgs),
+    #[command(about = "Count matching witness records")]
     Count(WitnessCountArgs),
 }
 
@@ -155,22 +217,28 @@ pub struct WitnessCountArgs {
 
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
 pub struct WitnessFilterArgs {
-    #[arg(long)]
+    #[arg(long, help = "Filter by witness tool name")]
     pub tool: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, help = "Filter records at or after an RFC3339 timestamp")]
     pub since: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, help = "Filter records at or before an RFC3339 timestamp")]
     pub until: Option<String>,
 
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Filter by witness outcome, such as VERIFIED or VERIFY_PARTIAL"
+    )]
     pub outcome: Option<String>,
 
-    #[arg(long = "input-hash")]
+    #[arg(
+        long = "input-hash",
+        help = "Filter by substring of an input content hash"
+    )]
     pub input_hash: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, help = "Maximum number of records to return")]
     pub limit: Option<usize>,
 }
 

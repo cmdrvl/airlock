@@ -4,7 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const TOOL_NAME: &str = "airlock";
 const WITNESS_ENV: &str = "EPISTEMIC_WITNESS";

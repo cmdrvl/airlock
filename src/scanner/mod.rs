@@ -550,9 +550,11 @@ mod tests {
             result.blocked_reasons[0].claim_attempted,
             ClaimLevel::StrictTelemetryOnly
         );
-        assert!(result.blocked_reasons[0]
-            .reason
-            .contains("boundary mode ANNOTATED"));
+        assert!(
+            result.blocked_reasons[0]
+                .reason
+                .contains("boundary mode ANNOTATED")
+        );
     }
 
     #[test]
@@ -577,14 +579,18 @@ mod tests {
 
         assert_eq!(result.achieved_claim, ClaimLevel::RawDocumentAbsent);
         assert!(result.filing_derived_text_present);
-        assert!(result
-            .findings
-            .iter()
-            .any(|finding| finding.artifact_class == "derived_text_field_hit"));
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|finding| finding.artifact_class == "derived_text_field_hit")
+        );
         assert_eq!(result.blocked_reasons.len(), 1);
-        assert!(result.blocked_reasons[0]
-            .reason
-            .contains("filing-derived text"));
+        assert!(
+            result.blocked_reasons[0]
+                .reason
+                .contains("filing-derived text")
+        );
     }
 
     #[test]
@@ -605,11 +611,13 @@ mod tests {
 
         assert_eq!(result.achieved_claim, ClaimLevel::BoundaryFailed);
         assert!(result.raw_document_present);
-        assert!(result
-            .findings
-            .iter()
-            .any(|finding| finding.key_path == "html_path"
-                && finding.artifact_class == "forbidden_key"));
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|finding| finding.key_path == "html_path"
+                    && finding.artifact_class == "forbidden_key")
+        );
     }
 
     #[test]
@@ -659,10 +667,12 @@ mod tests {
         );
 
         assert_eq!(result.achieved_claim, ClaimLevel::StrictTelemetryOnly);
-        assert!(result
-            .findings
-            .iter()
-            .any(|finding| finding.artifact_class == "provenance_gap"
-                && finding.key_path == "input.benchmark_summary.score"));
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|finding| finding.artifact_class == "provenance_gap"
+                    && finding.key_path == "input.benchmark_summary.score")
+        );
     }
 }

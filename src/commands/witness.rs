@@ -3,7 +3,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cli::{
     WitnessCommands, WitnessCountArgs, WitnessFilterArgs, WitnessLastArgs, WitnessQueryArgs,
@@ -49,11 +49,7 @@ fn run_query(args: WitnessQueryArgs, ledger_path: &Path, stdout: &mut impl Write
         }
     }
 
-    if records.is_empty() {
-        1
-    } else {
-        0
-    }
+    if records.is_empty() { 1 } else { 0 }
 }
 
 fn run_last(args: WitnessLastArgs, ledger_path: &Path, stdout: &mut impl Write) -> u8 {
@@ -107,11 +103,7 @@ fn run_count(args: WitnessCountArgs, ledger_path: &Path, stdout: &mut impl Write
         let _ = writeln!(stdout, "{count}");
     }
 
-    if count == 0 {
-        1
-    } else {
-        0
-    }
+    if count == 0 { 1 } else { 0 }
 }
 
 fn parse_filters(
@@ -142,13 +134,14 @@ fn parse_filter_timestamp(
         Some(value) => DateTime::parse_from_rfc3339(value)
             .map(|timestamp| Some(timestamp.with_timezone(&Utc)))
             .map_err(|error| {
-                RefusalEnvelope::bad_input(
+                RefusalEnvelope::bad_input_with_next_command(
                     format!("{flag} must be an ISO 8601 datetime"),
                     json!({
                         "flag": flag,
                         "value": value,
                         "error": error.to_string(),
                     }),
+                    format!("airlock witness query {flag} 2026-01-15T00:00:00Z --json"),
                 )
             }),
         None => Ok(None),

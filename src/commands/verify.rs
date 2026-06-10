@@ -3,11 +3,11 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::adapter::OPENAI_CHAT_COMPLETIONS_ADAPTER_NAME;
 use crate::assembler::PromptProvenance;
-use crate::cli::{VerifyArgs, VERIFY_PARTIAL, VERIFY_PASS};
+use crate::cli::{VERIFY_PARTIAL, VERIFY_PASS, VerifyArgs};
 use crate::hash::blake3_hash;
 use crate::manifest::ManifestBuilder;
 use crate::output::{canonical_json_bytes, sort_value};
@@ -138,7 +138,7 @@ fn run_with_writers(
                 "failed to build airlock manifest",
                 json!({ "error": error.to_string() }),
             )
-            .write_to(stdout)
+            .write_to(stdout);
         }
     };
 

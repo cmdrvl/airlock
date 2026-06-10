@@ -5,7 +5,7 @@ pub use provenance::{BoundaryClass, PromptProvenance, ProvenanceRecord, Transfor
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::hash::blake3_hash;
 use crate::output::{canonical_json_bytes, sort_value};
@@ -489,9 +489,10 @@ mod tests {
             annotated["messages"][1]["content"]["mutator_context"]["challenge_observation"],
             "Dense footnotes in note disclosures."
         );
-        assert!(telemetry_only["messages"][1]["content"]["mutator_context"]
-            ["challenge_observation"]
-            .is_null());
+        assert!(
+            telemetry_only["messages"][1]["content"]["mutator_context"]["challenge_observation"]
+                .is_null()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::cli::{DoctorArgs, DoctorCommands, DoctorJsonArgs, REFUSAL, VERIFY_PASS};
 use crate::output::canonical_json;
@@ -60,19 +60,11 @@ impl Diagnostics {
     }
 
     fn status(&self) -> &'static str {
-        if self.ok() {
-            "healthy"
-        } else {
-            "unhealthy"
-        }
+        if self.ok() { "healthy" } else { "unhealthy" }
     }
 
     fn exit_code(&self) -> u8 {
-        if self.ok() {
-            VERIFY_PASS
-        } else {
-            REFUSAL
-        }
+        if self.ok() { VERIFY_PASS } else { REFUSAL }
     }
 }
 
@@ -82,7 +74,7 @@ pub fn run(args: DoctorArgs) -> u8 {
     run_with_writer(args, &mut stdout, &mut stderr)
 }
 
-fn run_with_writer(args: DoctorArgs, stdout: &mut impl Write, stderr: &mut impl Write) -> u8 {
+pub fn run_with_writer(args: DoctorArgs, stdout: &mut impl Write, stderr: &mut impl Write) -> u8 {
     let diagnostics = collect_diagnostics();
 
     if args.robot_triage {
@@ -259,7 +251,45 @@ fn capabilities_value() -> Value {
         "version": env!("CARGO_PKG_VERSION"),
         "contract": DOCTOR_CONTRACT,
         "read_only": true,
+        "agent_entrypoints": {
+            "triage_json": "airlock --robot-triage",
+            "capabilities_json": "airlock capabilities --json",
+            "robot_docs": "airlock robot-docs guide",
+            "core_flow": [
+                "airlock assemble --policy <POLICY> --input <JSON>... --out prompt_payload.json --provenance-out prompt_provenance.json",
+                "airlock verify --policy <POLICY> --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json",
+                "airlock explain --manifest airlock_manifest.json --json"
+            ]
+        },
         "commands": [
+            {
+                "name": "assemble",
+                "json": true,
+                "purpose": "Assemble deterministic prompt_payload.json and prompt_provenance.json from policy-approved inputs.",
+                "writes": ["prompt_payload", "prompt_provenance"],
+                "records_witness": true
+            },
+            {
+                "name": "verify",
+                "json": true,
+                "purpose": "Verify a prompt/request boundary and emit airlock_manifest.json even when the boundary fails.",
+                "writes": ["manifest"],
+                "records_witness": true
+            },
+            {
+                "name": "explain --json",
+                "json": true,
+                "purpose": "Summarize an airlock manifest for machines without re-running boundary verification.",
+                "writes": [],
+                "records_witness": false
+            },
+            {
+                "name": "witness query|last|count --json",
+                "json": true,
+                "purpose": "Query the local witness ledger without appending new witness records.",
+                "writes": [],
+                "records_witness": false
+            },
             {
                 "name": "doctor health",
                 "json": true,
@@ -282,13 +312,27 @@ fn capabilities_value() -> Value {
             }
         ],
         "exit_codes": {
-            "0": "doctor check healthy or documentation rendered",
-            "2": "doctor check unhealthy or command-line refusal"
+            "0": "command completed; verify may still report BOUNDARY_FAILED as an honest manifest verdict",
+            "1": "VERIFY_PARTIAL: achieved claim is below --require-claim, or witness query/count found no matches",
+            "2": "REFUSAL: command-line, input, manifest, policy, provenance, request, witness, or internal error"
         },
+        "refusal_codes": [
+            "E_BAD_POLICY",
+            "E_BAD_INPUT",
+            "E_BAD_PROMPT",
+            "E_BAD_REQUEST",
+            "E_BAD_PROVENANCE",
+            "E_BAD_MANIFEST",
+            "E_MISSING_FILE",
+            "E_WITNESS_ERROR",
+            "E_INTERNAL"
+        ],
         "schemas": {
             "health": HEALTH_SCHEMA,
             "capabilities": CAPABILITIES_SCHEMA,
-            "triage": TRIAGE_SCHEMA
+            "triage": TRIAGE_SCHEMA,
+            "manifest": "airlock.v0.schema.json",
+            "explain": "airlock.explain.v1"
         },
         "config_footprint": paths::config_footprint(),
         "side_effects": side_effects_value(),
@@ -311,6 +355,8 @@ fn robot_triage_value(diagnostics: &Diagnostics) -> Value {
             } else {
                 "airlock doctor checks found unhealthy diagnostics"
             },
+            "capabilities": "airlock capabilities --json",
+            "robot_docs": "airlock robot-docs guide",
             "failed_checks": diagnostics.checks.iter().filter(|check| !check.ok).count()
         },
         "findings": failed_checks_value(&diagnostics.checks),
@@ -387,12 +433,20 @@ fn human_health(diagnostics: &Diagnostics) -> String {
 
 fn human_capabilities() -> String {
     [
-        "airlock doctor capabilities",
+        "airlock capabilities",
         "commands:",
+        "- assemble --policy <POLICY> --input <JSON>... --out <PROMPT> --provenance-out <PROVENANCE>",
+        "- verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out <MANIFEST>",
+        "- explain --manifest <MANIFEST> [--json]",
+        "- witness query|last|count [filters] [--json]",
         "- doctor health [--json]",
         "- doctor capabilities --json",
         "- doctor robot-docs",
         "- doctor --robot-triage",
+        "agent_entrypoints:",
+        "- airlock --robot-triage",
+        "- airlock capabilities --json",
+        "- airlock robot-docs guide",
         "read_only: true",
         "side_effects: none",
         "fixers: none",
@@ -405,10 +459,14 @@ fn robot_docs() -> String {
         "# airlock doctor robot docs",
         "",
         "Read-only commands:",
+        "- `airlock --robot-triage` emits `airlock.doctor.triage.v1` JSON.",
+        "- `airlock capabilities --json` reports command capabilities, side effects, and config footprint.",
+        "- `airlock robot-docs guide` prints this compact agent-facing reference.",
         "- `airlock doctor health [--json]` reports embedded manifest, schema, dispatch, and witness-path health.",
         "- `airlock doctor capabilities --json` reports command capabilities, side effects, and fixers.",
         "- `airlock doctor robot-docs` prints this compact agent-facing reference.",
         "- `airlock doctor --robot-triage` emits `airlock.doctor.triage.v1` JSON.",
+        "- `airlock explain --manifest <MANIFEST> --json` summarizes a manifest without re-verifying it.",
         "",
         "Safety contract:",
         "- The doctor surface does not read policy, prompt, provenance, request, or manifest files.",
@@ -453,10 +511,23 @@ mod tests {
         let effects = value["side_effects"].as_object().unwrap();
 
         assert!(!effects.is_empty());
-        assert!(effects
-            .values()
-            .all(|enabled| enabled.as_bool() == Some(false)));
+        assert!(
+            effects
+                .values()
+                .all(|enabled| enabled.as_bool() == Some(false))
+        );
         assert_eq!(value["fixers"].as_array().map(Vec::len), Some(0));
+        assert_eq!(
+            value["agent_entrypoints"]["capabilities_json"],
+            "airlock capabilities --json"
+        );
+        assert!(
+            value["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command["name"] == "explain --json")
+        );
     }
 
     #[test]

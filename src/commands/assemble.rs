@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::assembler::{self, InputArtifact, PromptProvenance};
 use crate::cli::{AssembleArgs, VERIFY_PASS};
@@ -313,14 +313,18 @@ claim_levels:
         let provenance: PromptProvenance = serde_json::from_slice(&provenance_bytes).unwrap();
         let strategy_hash = blake3_hash(strategy_raw.as_bytes());
         let heuristic_hash = blake3_hash(heuristic_raw.as_bytes());
-        assert!(provenance
-            .records
-            .iter()
-            .any(|record| record.source_artifact_hash == strategy_hash));
-        assert!(provenance
-            .records
-            .iter()
-            .any(|record| record.source_artifact_hash == heuristic_hash));
+        assert!(
+            provenance
+                .records
+                .iter()
+                .any(|record| record.source_artifact_hash == strategy_hash)
+        );
+        assert!(
+            provenance
+                .records
+                .iter()
+                .any(|record| record.source_artifact_hash == heuristic_hash)
+        );
 
         let witness_line = fs::read_to_string(&witness_path).unwrap();
         let witness: Value = serde_json::from_str(witness_line.trim()).unwrap();
@@ -459,8 +463,10 @@ claim_levels:
         let exit_code = run_with_writers(args, tempdir.path(), &mut stdout, &mut stderr);
 
         assert_eq!(exit_code, VERIFY_PASS);
-        assert!(String::from_utf8(stderr)
-            .unwrap()
-            .contains("witness append failed"));
+        assert!(
+            String::from_utf8(stderr)
+                .unwrap()
+                .contains("witness append failed")
+        );
     }
 }

@@ -17,7 +17,7 @@ use std::io::{self, Write};
 
 use clap::{CommandFactory, Parser};
 
-use crate::cli::{Cli, Commands, REFUSAL, VERIFY_PASS};
+use crate::cli::{Cli, Commands, DoctorArgs, DoctorCommands, REFUSAL, VERIFY_PASS};
 
 /// Entry point for the airlock CLI.
 ///
@@ -47,12 +47,15 @@ where
         return emit_introspection(output::emit_version(stdout), stderr);
     }
 
-    let cli = match Cli::try_parse_from(args) {
+    let cli = match Cli::try_parse_from(args.clone()) {
         Ok(cli) => cli,
         Err(err) => {
             let code = err.exit_code() as u8;
             let target: &mut dyn Write = if err.use_stderr() { stderr } else { stdout };
             let _ = write!(target, "{err}");
+            if code != VERIFY_PASS {
+                maybe_write_parse_hint(&args, target);
+            }
             return code;
         }
     };
@@ -84,23 +87,69 @@ fn dispatch<W: Write, E: Write>(cli: Cli, stdout: &mut W, stderr: &mut E) -> u8 
     if cli.print_version {
         return emit_introspection(output::emit_version(stdout), stderr);
     }
+    if cli.robot_triage {
+        return commands::doctor::run_with_writer(
+            DoctorArgs {
+                robot_triage: true,
+                json: false,
+                command: None,
+            },
+            stdout,
+            stderr,
+        );
+    }
 
     match cli.command {
         Some(Commands::Assemble(args)) => commands::assemble::run(args),
         Some(Commands::Verify(args)) => commands::verify::run(args),
         Some(Commands::Explain(args)) => commands::explain::run(args),
         Some(Commands::Doctor(args)) => commands::doctor::run(args),
+        Some(Commands::Capabilities(args)) => commands::doctor::run_with_writer(
+            DoctorArgs {
+                robot_triage: false,
+                json: args.json,
+                command: Some(DoctorCommands::Capabilities(args)),
+            },
+            stdout,
+            stderr,
+        ),
+        Some(Commands::RobotDocs(_args)) => commands::doctor::run_with_writer(
+            DoctorArgs {
+                robot_triage: false,
+                json: false,
+                command: Some(DoctorCommands::RobotDocs),
+            },
+            stdout,
+            stderr,
+        ),
         Some(Commands::Witness(cmd)) => commands::witness::run(cmd),
         None => {
-            let _ = writeln!(
-                stderr,
-                "error: no subcommand or introspection flag provided"
-            );
             let mut command = Cli::command();
-            let _ = command.write_long_help(stderr);
-            let _ = writeln!(stderr);
-            REFUSAL
+            let _ = command.write_long_help(stdout);
+            let _ = writeln!(stdout);
+            VERIFY_PASS
         }
+    }
+}
+
+fn maybe_write_parse_hint<W: Write + ?Sized>(args: &[OsString], target: &mut W) {
+    let saw_json_typo = args.iter().any(|arg| {
+        matches!(
+            arg.to_string_lossy().as_ref(),
+            "--jsno" | "--jason" | "--jsson" | "--josn"
+        )
+    });
+
+    if saw_json_typo {
+        let _ = writeln!(
+            target,
+            "\nhint: did you mean `--json`? For a read-only machine summary, run: `airlock --robot-triage`."
+        );
+    } else {
+        let _ = writeln!(
+            target,
+            "\nhint: for machine-readable command discovery, run: `airlock capabilities --json`."
+        );
     }
 }
 
@@ -167,10 +216,56 @@ mod tests {
 
         let code = run_with_args(["airlock"], &mut stdout, &mut stderr);
 
+        assert_eq!(code, VERIFY_PASS);
+        assert!(stderr.is_empty());
+        let help = String::from_utf8(stdout).unwrap();
+        assert!(help.contains("Usage: airlock"));
+        assert!(help.contains("airlock --robot-triage"));
+    }
+
+    #[test]
+    fn top_level_robot_triage_is_read_only_json() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_args(["airlock", "--robot-triage"], &mut stdout, &mut stderr);
+
+        assert_eq!(code, VERIFY_PASS);
+        assert!(stderr.is_empty());
+        let triage: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(triage["schema"], "airlock.doctor.triage.v1");
+        assert_eq!(triage["read_only"], true);
+    }
+
+    #[test]
+    fn top_level_capabilities_alias_returns_doctor_contract() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_args(
+            ["airlock", "capabilities", "--json"],
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(code, VERIFY_PASS);
+        assert!(stderr.is_empty());
+        let capabilities: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(capabilities["schema"], "airlock.doctor.capabilities.v1");
+        assert_eq!(capabilities["read_only"], true);
+    }
+
+    #[test]
+    fn json_typo_gets_agent_hint() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_args(["airlock", "--jsno"], &mut stdout, &mut stderr);
+
         assert_eq!(code, REFUSAL);
         assert!(stdout.is_empty());
-        let help = String::from_utf8(stderr).unwrap();
-        assert!(help.contains("Usage: airlock"));
-        assert!(help.contains("error: no subcommand or introspection flag provided"));
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("did you mean `--json`"));
+        assert!(stderr.contains("airlock --robot-triage"));
     }
 }

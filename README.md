@@ -49,14 +49,14 @@ brew install cmdrvl/tap/airlock
 ### From Source
 
 ```bash
-cargo install --git https://github.com/cmdrvl/airlock --tag v0.2.1
+cargo install --git https://github.com/cmdrvl/airlock --tag v0.3.0
 ```
 
 ### Verify
 
 ```bash
 airlock --version
-# airlock 0.2.1
+# airlock 0.3.0
 ```
 
 ## Quick Start
@@ -89,11 +89,19 @@ airlock doctor health --json
 airlock doctor capabilities --json
 airlock doctor robot-docs
 airlock doctor --robot-triage
+airlock --robot-triage
+airlock capabilities --json
+airlock robot-docs guide
 ```
 
 The doctor surface is read-only. It does not read policy, prompt, provenance,
 request, or manifest files; it does not open or append witness ledgers; and it
 does not expose `doctor --fix`.
+
+The top-level agent shortcuts are aliases for those same read-only doctor
+contracts. `airlock --robot-triage` is the quickest machine-readable discovery
+call; `airlock capabilities --json` returns the command and side-effect
+contract; `airlock robot-docs guide` prints the compact agent reference.
 
 ### Configuration Footprint
 
@@ -260,11 +268,15 @@ airlock verify \
 
 ### `airlock explain`
 
-Human-readable manifest rendering.
+Manifest rendering as human-readable text or deterministic explanation JSON.
 
 ```bash
-airlock explain --manifest <PATH>
+airlock explain --manifest <PATH> [--json]
 ```
+
+`--json` emits `airlock.explain.v1`, including the achieved claim, boundary
+mode, manifest hash, proof hashes, blocked paths, findings, provenance summary,
+and next commands.
 
 ### `airlock doctor`
 
@@ -275,6 +287,9 @@ airlock doctor health [--json]
 airlock doctor capabilities --json
 airlock doctor robot-docs
 airlock doctor --robot-triage
+airlock --robot-triage
+airlock capabilities --json
+airlock robot-docs guide
 ```
 
 ### `airlock witness`
@@ -295,9 +310,11 @@ airlock witness count [--tool T] [--since T] [--until T] [--outcome O] [--input-
 airlock --describe   # Emit operator.json (machine-readable metadata)
 airlock --schema     # Emit the manifest JSON Schema
 airlock --version    # Emit version string
+airlock --robot-triage # Emit read-only machine triage JSON
 ```
 
 Flag precedence: `--describe` > `--schema` > `--version` > subcommand.
+`--robot-triage` is read-only and has no witness side effects.
 
 ### Exit Codes
 
@@ -418,7 +435,7 @@ evidence patterns, and real model-boundary sensitivity.
 
 ## Roadmap
 
-v0.2.1 is the current foundational release. Next:
+v0.3.0 is the current foundational release. Next:
 
 1. Seal integration with `pack` for immutable manifest bundles
 2. Register Airlock proofs in catalog

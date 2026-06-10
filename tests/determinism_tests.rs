@@ -6,7 +6,7 @@ use airlock::assembler::PromptProvenance;
 use airlock::hash::blake3_hash;
 use airlock::output::{canonical_json, canonical_json_bytes};
 use assert_cmd::Command;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::tempdir;
 
 fn repo_root() -> PathBuf {

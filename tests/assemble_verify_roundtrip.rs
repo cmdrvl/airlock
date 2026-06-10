@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::tempdir;
 
 fn write_file(path: &Path, bytes: &[u8]) {

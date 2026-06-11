@@ -334,6 +334,34 @@ fn capabilities_value() -> Value {
             "manifest": "airlock.v0.schema.json",
             "explain": "airlock.explain.v1"
         },
+        "composition": {
+            "family": {
+                "name": "cmdrvl-boundary-attestation",
+                "siblings": [
+                    {"tool": "veil", "capabilities": "veil capabilities --json"},
+                    {"tool": "fingerprint", "capabilities": "fingerprint capabilities --json"},
+                    {"tool": "benchmark", "capabilities": "benchmark capabilities --json"},
+                    {"tool": "assess", "capabilities": "assess capabilities --json"},
+                    {"tool": "lock", "capabilities": "lock capabilities --json"},
+                    {"tool": "pack", "capabilities": "pack capabilities --json"}
+                ]
+            },
+            "role": "boundary attestation primitive between deterministic evidence and model execution",
+            "position": "after deterministic evidence preparation and before model request execution",
+            "accepts": ["airlock policy", "policy-approved JSON inputs", "prompt payload", "prompt provenance", "model request"],
+            "produces": ["prompt_payload.json", "prompt_provenance.json", "airlock_manifest.json"],
+            "canonical_chain": [
+                "airlock assemble --policy <POLICY> --input <JSON>... --out prompt_payload.json --provenance-out prompt_provenance.json",
+                "airlock verify --policy <POLICY> --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json",
+                "pack seal airlock_manifest.json prompt_provenance.json --output evidence/airlock/"
+            ],
+            "agent_rules": [
+                "Use veil before airlock to prevent raw sensitive reads from entering the agent context.",
+                "Use airlock when evidence-derived prompt material is about to cross a model boundary.",
+                "Use benchmark and assess after model execution when correctness scoring and action classification are needed.",
+                "Seal airlock manifests with pack alongside downstream reports."
+            ]
+        },
         "config_footprint": paths::config_footprint(),
         "side_effects": side_effects_value(),
         "fixers": []
@@ -474,6 +502,12 @@ fn robot_docs() -> String {
         "- The doctor surface does not open, append, or create witness ledger files.",
         "- The implicit witness ledger fallback is `~/.cmdrvl/state/witness/witness.jsonl`; `EPISTEMIC_WITNESS` remains an explicit operator override.",
         "- No `doctor --fix` mode exists in this slice.",
+        "",
+        "Composition:",
+        "- Use `veil` before airlock to keep raw sensitive files out of agent context.",
+        "- Assemble: `airlock assemble --policy <POLICY> --input <JSON>... --out prompt_payload.json --provenance-out prompt_provenance.json`.",
+        "- Verify: `airlock verify --policy <POLICY> --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json`.",
+        "- Seal: `pack seal airlock_manifest.json prompt_provenance.json --output evidence/airlock/`.",
         "",
         "Exit codes:",
         "- `0`: doctor checks or documentation completed.",

@@ -192,6 +192,24 @@ fn test_top_level_capabilities_alias_is_json() {
             .iter()
             .any(|command| command["name"] == "explain --json")
     );
+    assert_eq!(
+        value["composition"]["family"]["name"],
+        "cmdrvl-boundary-attestation"
+    );
+    assert_eq!(
+        value["composition"]["role"],
+        "boundary attestation primitive between deterministic evidence and model execution"
+    );
+    assert!(
+        value["composition"]["canonical_chain"][0]
+            .as_str()
+            .is_some_and(|command| command.contains("airlock assemble --policy <POLICY>"))
+    );
+    assert!(
+        value["composition"]["canonical_chain"][2]
+            .as_str()
+            .is_some_and(|command| command.contains("pack seal airlock_manifest.json"))
+    );
 }
 
 #[test]
@@ -208,6 +226,9 @@ fn test_top_level_robot_docs_guide_alias() {
     assert!(stdout.contains("airlock doctor robot docs"));
     assert!(stdout.contains("airlock --robot-triage"));
     assert!(stdout.contains("airlock explain --manifest <MANIFEST> --json"));
+    assert!(stdout.contains("Composition:"));
+    assert!(stdout.contains("airlock assemble --policy <POLICY>"));
+    assert!(stdout.contains("pack seal airlock_manifest.json prompt_provenance.json"));
 }
 
 #[test]

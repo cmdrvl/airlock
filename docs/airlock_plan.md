@@ -1345,3 +1345,74 @@ to:
 - "inspect the manifest for the exact request that crossed the boundary"
 
 That shift is the point.
+
+---
+
+## Gap Closure Plan — 2026-09-02 reality check
+
+### Where we actually are
+
+`assemble` / `verify` / `explain` are deterministic and well tested (171
+tests). Success criteria 1–4 and 6 are met. Criterion 5 ("demonstrate the full
+flow in a real workflow") is not: the witness ledger on the operator laptop has
+zero `airlock` entries, no manifest exists on disk, and the only wired caller
+(cmdrvl-gtm redaction cloud-OCR adapters) attests a synthetic
+"boundary-recorder" request built from metadata while the actual document goes
+to Textract / Document AI.
+
+Two defects block the core promise:
+
+1. **Verify does not bind the request to the prompt.** The scanner pattern-
+   scans `request.json` against the filing denylist only. A request with a full
+   PII record appended to the assembled messages still earns
+   `STRICT_TELEMETRY_ONLY` (reproduced 2026-09-02). Injected HTML / sec.gov
+   URLs are caught; anything else passes.
+2. **Nothing ties `request.json` to the bytes that leave the machine.** The
+   manifest hashes a file the caller chose. There is no proxy, shim, or send
+   path, so "the model never saw X" is a self-attestation.
+
+Collateral (cmdrvl-gtm `TSG_SKU_AI_AUDIT_READINESS.md`) also promises a
+"signed declaration", "bytes crossed", and a "what did NOT cross" list; the
+manifest has none of the three.
+
+### Plan
+
+**Phase A — make the manifest true (0.4)**
+
+- `verify` requires request ⊆ prompt: every request message must equal an
+  assembled prompt message (canonical JSON); extra or altered content is a new
+  finding class `REQUEST_UNBOUND` → `BOUNDARY_FAILED`. Transport keys are
+  validated against the adapter's declared allow-list.
+- Detector packs in policy (`detectors:`): secrets, PII (SSN, card/Luhn,
+  email, phone), tabular dumps, base64 blobs, filesystem paths. Deterministic
+  regex only. Findings class `DETECTED_SENSITIVE`.
+- Manifest gains `bytes_crossed` (canonical request bytes), `not_crossed[]`
+  (upstream fields stripped or forbidden during assemble, with hashes), and an
+  Ed25519 `signature` over the canonical manifest; `airlock verify-manifest`.
+
+**Phase B — put airlock on the wire (0.5)**
+
+- `airlock send`: verify + transmit in one process. Records the exact bytes
+  sent, response status and response hash as a `SENT` witness entry; refuses
+  to send below `--require-claim`.
+- `airlock gate`: localhost proxy for the vendor API. Forwards only requests
+  whose canonical body hash matches a manifest at or above the required claim;
+  otherwise 403 with a refusal. Deployment recipe: host egress firewall allows
+  only the gate.
+- Adapters: Anthropic Messages, plus a generic JSON adapter with declared
+  message paths.
+
+**Phase C — real workflow + roadmap (1.0)**
+
+- Honest cloud-OCR receipts in cmdrvl-gtm (the document *did* cross; the
+  airlock claim applies to the metadata sidecar only, and `explain` must say
+  so).
+- First real `airlock send` workflow (Cairn drafting or BDC tournament) with
+  manifests committed as receipts.
+- `seal` via lock/pack, catalog registration, witness rotation, default
+  witness recording on by callers.
+
+### Tracking
+
+Beads created 2026-09-02 under the epic "Airlock v1: content-bound egress
+gate".

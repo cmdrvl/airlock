@@ -1375,44 +1375,123 @@ Collateral (cmdrvl-gtm `TSG_SKU_AI_AUDIT_READINESS.md`) also promises a
 "signed declaration", "bytes crossed", and a "what did NOT cross" list; the
 manifest has none of the three.
 
-### Plan
+### Threat model, stated per adversary class
 
-**Phase A — make the manifest true (0.4)**
+| Adversary | Example | Today | After Phase A | After Phase B + host egress rule |
+|-----------|---------|-------|---------------|----------------------------------|
+| C0 honest, sloppy caller | wrapper appends a debug blob to the request after verify | not caught | caught (`REQUEST_UNBOUND`) if it re-verifies; not caught if it does not | caught: the gate sees the real bytes |
+| C1 prompt-injected wrapper | model output tells the wrapper to include a file | not caught | caught only if the wrapper re-verifies | caught |
+| C2 adversarial caller | bypasses airlock entirely | not caught | not caught | caught: nothing else can reach the vendor |
+| C3 vendor-side | model provider retains or leaks | out of scope | out of scope | out of scope; record the vendor and endpoint in the manifest |
 
-- `verify` requires request ⊆ prompt: every request message must equal an
-  assembled prompt message (canonical JSON); extra or altered content is a new
-  finding class `REQUEST_UNBOUND` → `BOUNDARY_FAILED`. Transport keys are
-  validated against the adapter's declared allow-list.
-- Detector packs in policy (`detectors:`): secrets, PII (SSN, card/Luhn,
-  email, phone), tabular dumps, base64 blobs, filesystem paths. Deterministic
-  regex only. Findings class `DETECTED_SENSITIVE`.
-- Manifest gains `bytes_crossed` (canonical request bytes), `not_crossed[]`
-  (upstream fields stripped or forbidden during assemble, with hashes), and an
-  Ed25519 `signature` over the canonical manifest; `airlock verify-manifest`.
+Today airlock mechanically defends against none of these because the caller
+chooses `request.json`. Phase A makes the manifest true for whatever it is
+shown; Phase B makes airlock the only path to the vendor.
 
-**Phase B — put airlock on the wire (0.5)**
+### Formal model (what the manifest commits to)
 
-- `airlock send`: verify + transmit in one process. Records the exact bytes
-  sent, response status and response hash as a `SENT` witness entry; refuses
-  to send below `--require-claim`.
-- `airlock gate`: localhost proxy for the vendor API. Forwards only requests
-  whose canonical body hash matches a manifest at or above the required claim;
-  otherwise 403 with a refusal. Deployment recipe: host egress firewall allows
-  only the gate.
-- Adapters: Anthropic Messages, plus a generic JSON adapter with declared
-  message paths.
+A manifest is a **commitment** to one boundary crossing:
 
-**Phase C — real workflow + roadmap (1.0)**
+- `prompt_payload_hash` = H(JCS(prompt)), `request_payload_hash` =
+  H(JCS(request)), where JCS is RFC 8785 canonical JSON so any third party can
+  recompute the hashes with a standard library rather than airlock's own
+  canonicalizer.
+- **Binding invariant:** `unwrap_adapter(request).messages ≡ prompt.messages`
+  under JCS, `system_prompt_hash` matches, and every other top-level request
+  key is in the adapter's declared transport set. Violation ⇒
+  `REQUEST_UNBOUND` ⇒ `BOUNDARY_FAILED`.
+- **Fragment Merkle tree.** Every prompt fragment (the unit `prompt_provenance`
+  already tracks) is a leaf `H(class ‖ path ‖ JCS(value))`; the manifest
+  carries the root. Each provenance entry carries its inclusion proof, so an
+  auditor can verify one fragment's provenance against the root **without
+  seeing the other fragments**. This is selective disclosure: a manifest can
+  be shared with a counterparty after redacting fragments and still verify.
+- **Boundary classes** grow from `{TELEMETRY, DERIVED_TEXT}` to
+  `{TELEMETRY, DERIVED_TEXT, MODEL_OUTPUT, TOOL_RESULT}`. Multi-turn agent
+  loops are chains of crossings: request *n* must equal prompt *n*, which
+  extends prompt *n−1* by response *n−1* (class `MODEL_OUTPUT`, hash recorded
+  in manifest *n−1*) and by tool results (class `TOOL_RESULT`, which must be
+  registered `derived` outputs from the veil broker). The chain is what lets a
+  whole agent session, not just one call, carry a claim.
+- **Verifiable witness log.** The witness ledger becomes an append-only
+  Merkle tree in the RFC 6962 style: each entry hashed, periodic signed
+  checkpoints, `airlock witness prove <manifest-hash>` emits an inclusion
+  proof and `airlock witness consistency <old> <new>` a consistency proof.
+  Tampering with history is detectable by anyone holding an old checkpoint.
+- **Signatures.** Ed25519 over `JCS(manifest \ signature)`. Key under
+  `~/.cmdrvl/secrets/airlock/` (already veil-protected). `airlock
+  verify-manifest` is standalone: public key + manifest, no policy needed.
 
-- Honest cloud-OCR receipts in cmdrvl-gtm (the document *did* cross; the
-  airlock claim applies to the metadata sidecar only, and `explain` must say
-  so).
-- First real `airlock send` workflow (Cairn drafting or BDC tournament) with
-  manifests committed as receipts.
-- `seal` via lock/pack, catalog registration, witness rotation, default
-  witness recording on by callers.
+### Phase A — make the manifest true (0.4)
+
+1. Binding invariant in `verify` (P0). New fixture reproducing the PII-append
+   case. Adapter trait gains `unwrap` and `transport_keys`.
+2. **Detector packs** in policy (`detectors:`), implemented in a shared
+   `boundary-detectors` crate so veil's broker can scan spine-tool output with
+   the same packs: secrets (key shapes, PEM headers, JWT, Shannon entropy ≥ 3.5
+   bits/char on 20+ char tokens), PII (SSN, Luhn-valid cards, email, E.164,
+   IBAN), tabular dumps (≥ N delimited lines), blobs (base64 runs, data URIs),
+   filesystem paths. Literal packs via Aho-Corasick, shapes via regex,
+   deterministic, values never echoed (matched spans are hashed). Findings
+   class `DETECTED_SENSITIVE`.
+3. Manifest v0.2: `bytes_crossed`, `not_crossed[]` (every input field dropped,
+   forbidden key stripped, or derived-text path excluded during assemble, with
+   hash and reason), `fragment_merkle_root`, `binding_status`, `signature`,
+   `signer`. `explain --auditor` prints the customs declaration: what crossed,
+   what did not, claim, signer, ledger inclusion.
+4. RFC 8785 canonicalization replaces the in-house canonical JSON, with a
+   cross-check test against a second implementation.
+5. Policy `extends:` with deterministic merge and `policy_hash` over the
+   resolved policy (roadmap item 4).
+
+### Phase B — put airlock on the wire (0.5)
+
+1. `airlock send`: verify → transmit → record. The bytes hashed are the bytes
+   sent. Manifest gains `transmission {endpoint_host, request_bytes,
+   response_status, response_hash, sent_at}`; witness outcome `SENT`. Refuses
+   below `--require-claim`; API key from env only.
+2. `airlock gate`: localhost proxy. Canonicalize body → hash → look up a
+   manifest at or above the required claim → forward with header passthrough
+   → record `GATED` with response hash (SSE streams hashed as they pass).
+   Unmatched requests get 403 and a manifest of the denial. The gate never
+   logs `Authorization` or `x-api-key`. Because the gate has no prompt to
+   bind against, callers must run assemble + verify first and drop the
+   manifest where the gate can find it; `send` remains the preferred path
+   and the gate exists for SDK-driven loops. For those loops the gate
+   reconstructs the conversation chain from the responses it forwarded, so
+   turn *n* is bound to turn *n−1* without caller cooperation.
+2a. **Attestation provenance in the manifest.** Every manifest states how it
+   was produced: `attestation: self_attested` (from `verify` on a caller-
+   supplied request), `transmitted` (from `send`), or `gated` (from `gate`).
+   `explain` prints it first. Consumers can then refuse self-attested
+   manifests for high-trust claims, and the tool stops implying more than it
+   saw. `airlock doctor` reports which modes are available on the host.
+3. **Host egress rule** so the gate is the only route: Linux Landlock ABI 4
+   network rules (`connect` restricted to the gate port) where available,
+   else a network namespace; macOS seatbelt `(deny network-outbound)` with a
+   single `remote tcp localhost:<gate>` exception. Shipped as
+   `veil sandbox --egress airlock` (veil Track D) and documented standalone.
+4. Adapters: Anthropic Messages; generic JSON adapter with declared pointers
+   for system, messages, and transport keys, so any vendor binds without a
+   bespoke adapter.
+
+### Phase C — real workflows and the rest of the roadmap (1.0)
+
+1. Honest cloud-OCR receipts in cmdrvl-gtm: the document *did* cross; the
+   claim applies to the metadata sidecar only and `explain` says so. Once the
+   gate exists, the OCR upload itself goes through it with the document hash
+   as `bytes_crossed`.
+2. First real workflow with committed manifests: Cairn drafting in
+   cmdrvl-cli (prompt from thread DataBook fields, policy forbids private
+   counterpart bodies) and the BDC SOI mutator chain (the original reference
+   app; fix the stale path in cmdrvl-soi docs).
+3. `LOCAL_READS_CLEAN`: manifest embeds the veil session attestation so the
+   claim covers prompt assembly, not only the request.
+4. `seal` via lock/pack, catalog registration, witness rotation with root
+   checkpoints, default witness recording on by callers, installed-version
+   drift fixed.
+5. Tamper-matrix e2e generating `docs/tamper-matrix.md`; CI fails on drift.
 
 ### Tracking
 
-Beads created 2026-09-02 under the epic "Airlock v1: content-bound egress
-gate".
+Beads under epic al-39t.

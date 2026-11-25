@@ -225,8 +225,10 @@ counts the connections it receives:
 What it does **not** give you:
 
 - It binds only processes started under the profile. A caller that is not
-  launched with `sandbox-exec -f egress.sb` is unconstrained, so the launcher has
-  to apply it. veil's `sandbox --egress airlock` is the intended launcher.
+  launched with `sandbox-exec -f egress.sb` is unconstrained, so whatever starts
+  the agent has to apply it. A unified launcher (`veil sandbox --egress airlock`)
+  is planned in veil's `docs/plan.md` but is not implemented as of 2026-11-25, and
+  that plan describes a pf rule on macOS, not this profile.
 - Services that fetch on a process's behalf over Mach/XPC (for example the system
   background-download daemon) are not covered by `(allow default)`. This was
   **not tested** and nothing here claims they are blocked.

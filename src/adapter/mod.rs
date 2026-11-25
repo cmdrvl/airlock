@@ -1022,7 +1022,13 @@ mod tests {
         let serialized = serde_json::to_string(&request).unwrap();
 
         assert_eq!(request, sort_value(request.clone()));
-        assert_eq!(serialized, canonical_json(&request));
+        // The canonical form is RFC 8785, which writes the double 0.0 as 0 where serde_json
+        // writes 0.0. That number is the only byte that differs.
+        assert!(serialized.contains("\"temperature\":0.0"));
+        assert_eq!(
+            serialized.replace("\"temperature\":0.0", "\"temperature\":0"),
+            canonical_json(&request)
+        );
     }
 
     // -----------------------------------------------------------------------------------------

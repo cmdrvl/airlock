@@ -7,9 +7,9 @@ use serde_json::{Value, json};
 use crate::adapter::{self, TransportDeclaration};
 use crate::assembler::PromptProvenance;
 use crate::cli::{VERIFY_PARTIAL, VERIFY_PASS, VerifyArgs};
-use crate::hash::blake3_hash;
+use crate::hash::{blake3_hash, jcs_blake3_hash};
 use crate::manifest::ManifestBuilder;
-use crate::output::{SOURCE_DATE_EPOCH_ENV, canonical_json_bytes, now_utc};
+use crate::output::{SOURCE_DATE_EPOCH_ENV, now_utc};
 use crate::policy::{self, AirlockPolicy};
 use crate::refusal::RefusalEnvelope;
 use crate::scanner;
@@ -85,7 +85,30 @@ fn run_with_writers(
         Err(refusal) => return refusal.write_to(stdout),
     };
 
-    let prompt_payload_hash = blake3_hash(&canonical_json_bytes(&prompt_value));
+    // Both payload hashes are blake3(RFC 8785 JCS(payload)) so a third party can recompute them
+    // with any standard JCS library. A payload JCS cannot represent interoperably (an integer
+    // beyond 2^53) is refused here instead of being hashed into something nobody else can
+    // reproduce.
+    let prompt_payload_hash = match jcs_blake3_hash(&prompt_value) {
+        Ok(hash) => hash,
+        Err(error) => {
+            return RefusalEnvelope::bad_prompt(
+                format!("prompt payload cannot be hashed as RFC 8785 canonical JSON: {error}"),
+                error.detail(),
+            )
+            .write_to(stdout);
+        }
+    };
+    let request_payload_hash = match jcs_blake3_hash(&request_value) {
+        Ok(hash) => hash,
+        Err(error) => {
+            return RefusalEnvelope::bad_request(
+                format!("request payload cannot be hashed as RFC 8785 canonical JSON: {error}"),
+                error.detail(),
+            )
+            .write_to(stdout);
+        }
+    };
     if prompt_provenance.prompt_payload_hash != prompt_payload_hash {
         return RefusalEnvelope::bad_provenance(
             "prompt provenance does not match prompt payload hash",
@@ -166,7 +189,7 @@ fn run_with_writers(
         .system_prompt_hash(system_prompt_hash)
         .prompt_payload_hash(prompt_payload_hash)
         .prompt_provenance(args.provenance.display().to_string(), &prompt_provenance)
-        .request_payload_hash(blake3_hash(&canonical_json_bytes(&request_value)))
+        .request_payload_hash(request_payload_hash)
         .replay_ref(args.request.display().to_string())
         .model_id(model_id)
         .adapter(adapter_name)
@@ -573,6 +596,78 @@ mod tests {
         assert_eq!(refusal["refusal"]["code"], "E_MISSING_FILE");
         assert!(!ledger_path.exists());
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn request_with_integer_beyond_two_to_the_53_is_refused_not_hashed() {
+        let dir = tempdir().unwrap();
+        let ledger_path = dir.path().join("witness.jsonl");
+        let (args, mut request) = setup_clean_case(&dir, BoundaryMode::TelemetryOnly);
+        // A legitimate OpenAI field whose value a double-based JCS library would round.
+        request["seed"] = json!(9_007_199_254_740_993_u64);
+        write_json(&args.request, &request);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_writers(args.clone(), &ledger_path, &mut stdout, &mut stderr);
+
+        assert_eq!(exit_code, crate::cli::REFUSAL);
+        let refusal: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(refusal["refusal"]["code"], "E_BAD_REQUEST");
+        assert_eq!(refusal["refusal"]["detail"]["pointer"], "/seed");
+        assert_eq!(refusal["refusal"]["detail"]["number"], "9007199254740993");
+        assert_eq!(
+            refusal["refusal"]["detail"]["max_integer_magnitude"],
+            9_007_199_254_740_992_u64
+        );
+        assert!(!args.out.exists(), "no manifest may be written");
+        assert!(!ledger_path.exists());
+    }
+
+    #[test]
+    fn prompt_with_integer_beyond_two_to_the_53_is_refused_not_hashed() {
+        let dir = tempdir().unwrap();
+        let ledger_path = dir.path().join("witness.jsonl");
+        let (args, _) = setup_clean_case(&dir, BoundaryMode::TelemetryOnly);
+        let mut prompt: Value =
+            serde_json::from_slice(&std::fs::read(&args.prompt).unwrap()).unwrap();
+        prompt["extra"] = json!({ "ids": [1, 18_446_744_073_709_551_615_u64] });
+        write_json(&args.prompt, &prompt);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_writers(args.clone(), &ledger_path, &mut stdout, &mut stderr);
+
+        assert_eq!(exit_code, crate::cli::REFUSAL);
+        let refusal: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(refusal["refusal"]["code"], "E_BAD_PROMPT");
+        assert_eq!(refusal["refusal"]["detail"]["pointer"], "/extra/ids/1");
+        assert_eq!(
+            refusal["refusal"]["detail"]["number"],
+            "18446744073709551615"
+        );
+        assert!(!args.out.exists(), "no manifest may be written");
+        assert!(!ledger_path.exists());
+    }
+
+    #[test]
+    fn request_with_integer_exactly_two_to_the_53_still_verifies() {
+        let dir = tempdir().unwrap();
+        let ledger_path = dir.path().join("witness.jsonl");
+        let (args, mut request) = setup_clean_case(&dir, BoundaryMode::TelemetryOnly);
+        request["seed"] = json!(9_007_199_254_740_992_u64);
+        write_json(&args.request, &request);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_writers(args, &ledger_path, &mut stdout, &mut stderr);
+
+        assert_eq!(exit_code, VERIFY_PASS);
+        let manifest: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            manifest["request_payload_hash"],
+            crate::hash::jcs_blake3_hash(&request).unwrap()
+        );
     }
 
     #[test]

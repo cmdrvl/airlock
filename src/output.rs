@@ -54,8 +54,10 @@ pub fn fixed_instant(value: &str) -> Result<DateTime<Utc>, InvalidSourceDateEpoc
 
 /// Recursively sort all object keys in a JSON value.
 ///
-/// This produces canonical JSON: deterministic key ordering at every nesting level.
-/// Arrays preserve element order; only object keys are sorted.
+/// This gives a deterministic key order at every nesting level (by UTF-8 bytes) for structural
+/// comparison of values. Arrays preserve element order; only object keys are sorted. It is not
+/// the canonical serialization: [`canonical_json`] sorts by UTF-16 code units as RFC 8785
+/// requires and does not depend on this function.
 pub fn sort_value(v: Value) -> Value {
     match v {
         Value::Object(map) => {
@@ -74,13 +76,17 @@ pub fn sort_value(v: Value) -> Value {
     }
 }
 
-/// Serialize a JSON value to canonical JSON (sorted keys, compact).
+/// Serialize a JSON value as RFC 8785 (JCS) canonical JSON.
+///
+/// Total: it never fails, so it is safe on any value. Integers outside ±2^53, which RFC 8785
+/// cannot represent, are written as exact decimal digits here; code that claims a hash is
+/// recomputable by a third party must call [`crate::hash::jcs::canonicalize`] (or
+/// [`crate::hash::jcs_blake3_hash`]) instead, which refuses them.
 pub fn canonical_json(v: &Value) -> String {
-    let sorted = sort_value(v.clone());
-    serde_json::to_string(&sorted).expect("canonical JSON serialization should not fail")
+    crate::hash::jcs::canonicalize_exact_integers(v)
 }
 
-/// Serialize a JSON value to canonical JSON bytes (for hashing).
+/// Serialize a JSON value to RFC 8785 canonical JSON bytes (for hashing).
 pub fn canonical_json_bytes(v: &Value) -> Vec<u8> {
     canonical_json(v).into_bytes()
 }

@@ -1,0 +1,38 @@
+{
+  "purpose": "Provenance and pinned hashes for the RFC 8785 test vectors in this directory; tests/jcs_conformance.rs checks every hash so a vector file cannot be edited to make a test pass.",
+  "cyberphone": {
+    "repository": "https://github.com/cyberphone/json-canonicalization",
+    "commit": "32a48195b9b20fe67b1795e39e4509f14d860b45",
+    "path": "testdata/input and testdata/output",
+    "license": "Apache-2.0, Copyright 2018 Anders Rundgren (notice in cyberphone/LICENSE)",
+    "files": {
+      "cyberphone/input/arrays.json": "blake3:916fa2245922f5ad00ebdf865b01b446189e33716fc685cd2655c272c0cd04a2",
+      "cyberphone/input/french.json": "blake3:449bfc023ed97c01f7eac16f3248df2a0b165de3ce0392febd481ad0d1446422",
+      "cyberphone/input/structures.json": "blake3:8372baf3d11833111744898594dfe3e05935b33431a59c4da68dafa66aa8ddfd",
+      "cyberphone/input/unicode.json": "blake3:09cd0216a332f0eb765317f82f50bcce12b1e4afff614bd0142d3bbd3d0e0677",
+      "cyberphone/input/values.json": "blake3:1209559ab905fe06331029e05dbaf3198b35bd7cb85ca9b04cabf61860f8697e",
+      "cyberphone/input/weird.json": "blake3:aaa4982ca1c8f0aa5ccf6fbb7df60a9ef011c4de3cad51a4b5d9f33143afa5ed",
+      "cyberphone/output/arrays.json": "blake3:cae57e23b8b115b3ced06afb46c20508462cfe52bdd46c60bc1f7b4606704aeb",
+      "cyberphone/output/french.json": "blake3:067cbabada16b29647402322cb1cd69ec0960d2c444e5ce1a6f9e21e6007eb57",
+      "cyberphone/output/structures.json": "blake3:df2f67e6687931323ff5927f20f4cabfa9b66fd445e3a256f791146b0ca486f1",
+      "cyberphone/output/unicode.json": "blake3:42481280343274e4d0c2dd0eee32e31397294a5b7f809e36edd951633929eee3",
+      "cyberphone/output/values.json": "blake3:5b3b80c51be7d32b5df2e507fa592a888faf3a4c98b39ef647fadffcd4ce73bd",
+      "cyberphone/output/weird.json": "blake3:39c4251bef0068ef5c8c95f616ad4b309c2ed07470732b7cc14245ee9105185d",
+      "cyberphone/LICENSE": "blake3:436d254910998ad9d965b97418cb34ea4e71ec0b9519ed721da54e0a67d8c201"
+    }
+  },
+  "es6_numbers": {
+    "url": "https://github.com/cyberphone/json-canonicalization/releases/download/es6testfile/es6testfile100m.txt.gz",
+    "gzip_bytes": 2081240993,
+    "gzip_sha256": "545455ec9e74b68042c22a2607fb9d4a5f5fdb3c79f883ce864c75189a70705f",
+    "format": "one line per sample: hex-ieee754-double,expected-serialization",
+    "sample_file": "es6_numbers_sample.txt",
+    "sample_rule": "awk 'NR<=40 || NR%1000000==0' over the decompressed file: the first 40 lines plus every 1,000,000th line",
+    "sample_file_hash": "blake3:229ebcebff01a1a747ee3d560b3f0b25b3cec54735415f979dd4d3b4e03d1803"
+  },
+  "rfc8785": {
+    "url": "https://www.rfc-editor.org/rfc/rfc8785.txt",
+    "inline_in_tests": "section 3.2.2/3.2.3/3.2.4 example and byte dump, section 3.2.3 sorting sample, Appendix B number table"
+  },
+  "golden_hashes": "golden_hashes.json was computed with PyPI jcs 0.3.0 (author titusz) and PyPI blake3 1.0.11, neither of which is airlock code"
+}

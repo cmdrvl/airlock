@@ -1,6 +1,20 @@
+pub mod jcs;
+
 use std::path::Path;
 
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+use self::jcs::JcsError;
+
+/// Hash a JSON value as `blake3(JCS(value))` with RFC 8785 canonicalization.
+///
+/// This is the computation a third party reproduces with any conforming JCS library:
+/// canonicalize, then BLAKE3 the UTF-8 bytes. Integers outside ±2^53, which RFC 8785 cannot
+/// represent interoperably, are refused instead of hashed (see [`jcs::canonicalize`]).
+pub fn jcs_blake3_hash(value: &Value) -> Result<String, JcsError> {
+    Ok(blake3_hash(jcs::canonicalize(value)?.as_bytes()))
+}
 
 /// Compute a BLAKE3 hash of the given bytes.
 ///
@@ -84,5 +98,21 @@ mod tests {
     fn hash_file_missing_returns_error() {
         let result = hash_file(Path::new("/nonexistent/path/file.txt"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn jcs_blake3_hashes_the_canonical_utf8_bytes() {
+        let value: Value = serde_json::from_str(r#"{ "b": [1.0, 2], "a": "é" }"#).unwrap();
+        assert_eq!(
+            jcs_blake3_hash(&value).unwrap(),
+            blake3_hash(r#"{"a":"é","b":[1,2]}"#.as_bytes())
+        );
+    }
+
+    #[test]
+    fn jcs_blake3_refuses_what_jcs_cannot_represent() {
+        let value: Value = serde_json::from_str(r#"{"id": 9007199254740993}"#).unwrap();
+        let error = jcs_blake3_hash(&value).unwrap_err();
+        assert_eq!(error.pointer, "/id");
     }
 }

@@ -5,8 +5,7 @@ use serde_json::{Value, json};
 
 use crate::assembler::{self, InputArtifact, PromptProvenance};
 use crate::cli::{AssembleArgs, VERIFY_PASS};
-use crate::hash::blake3_hash;
-use crate::output::canonical_json;
+use crate::hash::{blake3_hash, jcs};
 use crate::policy::{hash_policy, load_policy};
 use crate::refusal::{RefusalCode, RefusalEnvelope};
 use crate::witness::{self, WitnessInput, WitnessRecord};
@@ -55,7 +54,19 @@ fn run_with_writers(
         Err(refusal) => return refusal.write_to(stdout),
     };
 
-    let prompt_bytes = canonical_json(&assembly.prompt_payload).into_bytes();
+    // The prompt payload hash is recomputed by `verify` (and by third parties) as
+    // blake3(RFC 8785 JCS(payload)); refuse here a payload JCS cannot represent interoperably
+    // rather than write a prompt and provenance that `verify` would later refuse.
+    let prompt_bytes = match jcs::canonicalize(&assembly.prompt_payload) {
+        Ok(text) => text.into_bytes(),
+        Err(error) => {
+            return RefusalEnvelope::bad_input(
+                format!("prompt payload cannot be written as RFC 8785 canonical JSON: {error}"),
+                error.detail(),
+            )
+            .write_to(stdout);
+        }
+    };
     let provenance_bytes = assemble_provenance_bytes(assembly.prompt_provenance);
 
     if let Err(refusal) = write_output_file(&args.out, &prompt_bytes) {
@@ -385,6 +396,34 @@ claim_levels:
         assert!(stderr.is_empty());
         let refusal: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(refusal["refusal"]["code"], "E_BAD_POLICY");
+    }
+
+    #[test]
+    fn integer_beyond_two_to_the_53_in_the_prompt_is_refused_before_anything_is_written() {
+        let tempdir = tempdir().unwrap();
+        write_success_fixture_files(tempdir.path());
+        write_file(
+            &tempdir.path().join("strategy.json"),
+            br#"{"family_id":"family-001","benchmark_summary":{"score":9007199254740993}}"#,
+        );
+        let witness_path = tempdir.path().join("witness.jsonl");
+        let args = sample_assemble_args(tempdir.path());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_writers(args.clone(), &witness_path, &mut stdout, &mut stderr);
+
+        assert_eq!(exit_code, crate::cli::REFUSAL);
+        let refusal: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(refusal["refusal"]["code"], "E_BAD_INPUT");
+        assert_eq!(
+            refusal["refusal"]["detail"]["pointer"],
+            "/messages/1/content/benchmark_summary/score"
+        );
+        assert_eq!(refusal["refusal"]["detail"]["number"], "9007199254740993");
+        assert!(!args.out.exists());
+        assert!(!args.provenance_out.exists());
+        assert!(!witness_path.exists());
     }
 
     #[test]

@@ -1,0 +1,29 @@
+{
+  "computed_by": "PyPI jcs 0.3.0 (RFC 8785, author titusz) and PyPI blake3 1.0.11; no airlock code",
+  "goldens": [
+    {
+      "name": "request_with_integral_floats",
+      "input_json": "{\"model\": \"gpt-5\", \"temperature\": 1.0, \"top_p\": 0.95, \"max_tokens\": 1024, \"seed\": -0, \"stop\": null}",
+      "canonical": "{\"max_tokens\":1024,\"model\":\"gpt-5\",\"seed\":0,\"stop\":null,\"temperature\":1,\"top_p\":0.95}",
+      "blake3": "blake3:d6dd67204a854c663cdb6344f6d66d78ccc28b20db8dd494fb07eab5d678fbb8"
+    },
+    {
+      "name": "number_formats_and_precision",
+      "input_json": "{\"scores\": [0.8347261938472619, 1e-7, 1.5e300, 1.2345678901234568e20, 0.000001, 1e21, 2.5e-3, 100.0, 5e-324, 333333333.33333329, 4.50]}",
+      "canonical": "{\"scores\":[0.8347261938472619,1e-7,1.5e+300,123456789012345680000,0.000001,1e+21,0.0025,100,5e-324,333333333.3333333,4.5]}",
+      "blake3": "blake3:7c84f8818d8fe571d0ab439bda41f58219879468993dacb38756eeb159830805"
+    },
+    {
+      "name": "utf16_key_order",
+      "input_json": "{\"\\ud83d\\ude00\": \"emoji\", \"\\ufb33\": \"dalet\", \"\\u20ac\": \"euro\", \"\\u00e9\": \"e-acute\", \"z\": \"z\", \"\\u0080\": \"c1\", \"\\r\": \"cr\", \"10\": \"ten\", \"1\": \"one\", \"\": \"empty\"}",
+      "canonical": "{\"\":\"empty\",\"\\r\":\"cr\",\"1\":\"one\",\"10\":\"ten\",\"z\":\"z\",\"\u0080\":\"c1\",\"\u00e9\":\"e-acute\",\"\u20ac\":\"euro\",\"\ud83d\ude00\":\"emoji\",\"\ufb33\":\"dalet\"}",
+      "blake3": "blake3:a36c533c322587fd73f8d67c2ee1e450e0d9fd1705121d85e375b9a968d7dedb"
+    },
+    {
+      "name": "chat_messages_with_escapes",
+      "input_json": "{\"messages\": [{\"role\": \"system\", \"content\": \"be \\\"brief\\\"\\n\\ttabs\\u0001 and \\\\ slashes / done\"}, {\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"\\u00fcber \\ud83d\\ude80 \\u007f\"}]}], \"model\": \"gpt-5\", \"temperature\": 0.0}",
+      "canonical": "{\"messages\":[{\"content\":\"be \\\"brief\\\"\\n\\ttabs\\u0001 and \\\\ slashes / done\",\"role\":\"system\"},{\"content\":[{\"text\":\"\u00fcber \ud83d\ude80 \u007f\",\"type\":\"text\"}],\"role\":\"user\"}],\"model\":\"gpt-5\",\"temperature\":0}",
+      "blake3": "blake3:b21bd62f77c5610aa14e2d6abf6212353ed7f7c02bbabcd9c67209afdc7f71c3"
+    }
+  ]
+}

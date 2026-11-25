@@ -118,6 +118,12 @@ pub struct VerifyArgs {
 
     #[arg(
         long,
+        help = "Optional transport declaration JSON with an explicit adapter and, for generic_json, JSON pointers"
+    )]
+    pub transport: Option<PathBuf>,
+
+    #[arg(
+        long,
         visible_alias = "output",
         help = "Path to write airlock_manifest.json"
     )]

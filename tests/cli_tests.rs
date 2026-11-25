@@ -1527,6 +1527,14 @@ fn contains_escape(bytes: &[u8]) -> bool {
     bytes.contains(&0x1b)
 }
 
+/// One color-related environment a caller might run airlock under.
+struct ColorEnv {
+    label: &'static str,
+    no_color: Option<&'static str>,
+    term: Option<&'static str>,
+    clicolor_force: Option<&'static str>,
+}
+
 /// Every human and machine surface, run piped (non-TTY) under the color-related
 /// environment a caller might have, must contain no ANSI escape byte at all.
 #[test]
@@ -1562,32 +1570,42 @@ fn test_no_ansi_on_any_surface_under_color_environment() {
         &["witness", "last"],
         &["witness", "count", "--json"],
     ];
-    // (label, NO_COLOR, TERM, CLICOLOR_FORCE)
-    let environments: &[(&str, Option<&str>, Option<&str>, Option<&str>)] = &[
-        ("NO_COLOR=1 TERM=dumb", Some("1"), Some("dumb"), None),
-        ("neither NO_COLOR nor TERM", None, None, None),
-        (
-            "NO_COLOR=1 beats CLICOLOR_FORCE=1",
-            Some("1"),
-            None,
-            Some("1"),
-        ),
+    let environments = [
+        ColorEnv {
+            label: "NO_COLOR=1 TERM=dumb",
+            no_color: Some("1"),
+            term: Some("dumb"),
+            clicolor_force: None,
+        },
+        ColorEnv {
+            label: "neither NO_COLOR nor TERM",
+            no_color: None,
+            term: None,
+            clicolor_force: None,
+        },
+        ColorEnv {
+            label: "NO_COLOR=1 beats CLICOLOR_FORCE=1",
+            no_color: Some("1"),
+            term: None,
+            clicolor_force: Some("1"),
+        },
     ];
 
-    for (label, no_color, term, force) in environments {
+    for environment in &environments {
+        let label = environment.label;
         for args in surfaces {
             let mut cmd = airlock_cmd();
             cmd.env("EPISTEMIC_WITNESS", &witness_path)
                 .env_remove("NO_COLOR")
                 .env_remove("TERM")
                 .env_remove("CLICOLOR_FORCE");
-            if let Some(value) = no_color {
+            if let Some(value) = environment.no_color {
                 cmd.env("NO_COLOR", value);
             }
-            if let Some(value) = term {
+            if let Some(value) = environment.term {
                 cmd.env("TERM", value);
             }
-            if let Some(value) = force {
+            if let Some(value) = environment.clicolor_force {
                 cmd.env("CLICOLOR_FORCE", value);
             }
             let output = cmd.args(*args).output().unwrap();

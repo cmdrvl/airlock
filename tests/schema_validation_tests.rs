@@ -62,3 +62,82 @@ fn test_bad_manifest_fails_schema() {
 
     assert!(schema.validate(&manifest).is_err());
 }
+
+const GOLDEN_V0_3: [&str; 3] = [
+    "fixtures/clean_telemetry_only/expected_manifest_v0_3.json",
+    "fixtures/annotated_mode/expected_manifest_v0_3.json",
+    "fixtures/boundary_failed/expected_manifest_v0_3.json",
+];
+
+#[test]
+fn test_v0_3_manifests_validate_against_schema() {
+    let schema = compile_schema("schemas/airlock.v0.schema.json");
+
+    for path in GOLDEN_V0_3 {
+        let manifest = read_json(&repo_root().join(path));
+        assert_eq!(manifest["manifest_version"], "airlock.v0.3", "{path}");
+        assert!(
+            schema.is_valid(&manifest),
+            "{path} does not validate: {:?}",
+            schema
+                .validate(&manifest)
+                .err()
+                .map(|error| error.to_string())
+        );
+    }
+}
+
+#[test]
+fn test_v0_3_manifest_requires_bytes_crossed_and_attestation() {
+    let schema = compile_schema("schemas/airlock.v0.schema.json");
+
+    for field in ["bytes_crossed", "attestation"] {
+        let mut manifest = read_json(&repo_root().join(GOLDEN_V0_3[0]));
+        manifest.as_object_mut().unwrap().remove(field);
+        assert!(
+            schema.validate(&manifest).is_err(),
+            "a v0.3 manifest without {field} must not validate"
+        );
+    }
+}
+
+#[test]
+fn test_v0_2_manifest_may_not_carry_v0_3_fields() {
+    let schema = compile_schema("schemas/airlock.v0.schema.json");
+
+    for (field, value) in [
+        ("bytes_crossed", Value::from(632)),
+        ("attestation", Value::from("self_attested")),
+    ] {
+        let mut manifest =
+            read_json(&repo_root().join("fixtures/clean_telemetry_only/expected_manifest.json"));
+        assert_eq!(manifest["manifest_version"], "airlock.v0.2");
+        manifest[field] = value;
+        assert!(
+            schema.validate(&manifest).is_err(),
+            "a v0.2 manifest carrying {field} must not validate"
+        );
+    }
+}
+
+#[test]
+fn test_unknown_version_and_bad_v0_3_field_values_fail_schema() {
+    let schema = compile_schema("schemas/airlock.v0.schema.json");
+    let valid = read_json(&repo_root().join(GOLDEN_V0_3[0]));
+    assert!(schema.validate(&valid).is_ok());
+
+    for (field, value) in [
+        ("manifest_version", Value::from("airlock.v0.4")),
+        ("manifest_version", Value::from("airlock.v0")),
+        ("bytes_crossed", Value::from(-1)),
+        ("bytes_crossed", Value::from("632")),
+        ("attestation", Value::from("trusted")),
+    ] {
+        let mut manifest = valid.clone();
+        manifest[field] = value.clone();
+        assert!(
+            schema.validate(&manifest).is_err(),
+            "{field}={value} must not validate"
+        );
+    }
+}

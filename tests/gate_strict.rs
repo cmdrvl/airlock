@@ -1246,3 +1246,168 @@ fn bodies_the_gate_cannot_canonicalize_are_denied_and_it_keeps_serving() {
     assert_eq!(status, 200);
     assert_eq!(origin.count.load(Ordering::Acquire), 1);
 }
+
+fn fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/clean_telemetry_only")
+}
+
+/// The gate accepts airlock.v0.2 and airlock.v0.3 during the transition. `verify` now writes
+/// v0.3, so this uses the committed v0.2 golden, which was never regenerated.
+#[test]
+fn gate_still_forwards_against_a_v0_2_manifest_during_the_transition() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest_dir = temp.path().join("manifests");
+    std::fs::create_dir(&manifest_dir).unwrap();
+    let v0_2 = fixture_root().join("expected_manifest.json");
+    let manifest: Value = serde_json::from_slice(&std::fs::read(&v0_2).unwrap()).unwrap();
+    assert_eq!(manifest["manifest_version"], "airlock.v0.2");
+    assert!(manifest.get("bytes_crossed").is_none());
+    std::fs::copy(&v0_2, manifest_dir.join("v0_2.json")).unwrap();
+    let request: Value =
+        serde_json::from_slice(&std::fs::read(fixture_root().join("request.json")).unwrap())
+            .unwrap();
+    let origin = start_origin();
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+
+    let (status, _) = post(
+        &client(),
+        gate.address,
+        &serde_json::to_vec(&request).unwrap(),
+    );
+
+    assert_eq!(
+        status, 200,
+        "a v0.2 manifest must still authorize its request"
+    );
+    assert_eq!(origin.count.load(Ordering::Acquire), 1);
+}
+
+fn gate_startup_with_manifest(manifest: &Value) -> (Option<i32>, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest_dir = temp.path().join("manifests");
+    std::fs::create_dir(&manifest_dir).unwrap();
+    std::fs::write(
+        manifest_dir.join("manifest.json"),
+        serde_json::to_vec(manifest).unwrap(),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_airlock"))
+        .args([
+            "gate",
+            "--mode",
+            "strict-manifest",
+            "--upstream",
+            "http://127.0.0.1:9",
+            "--manifest-dir",
+        ])
+        .arg(&manifest_dir)
+        .arg("--out-dir")
+        .arg(temp.path().join("receipts"))
+        .arg("--no-witness")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A gate that accepts the manifest keeps serving and never exits. Bound the wait so that
+    // regression fails this test (code None) instead of hanging the suite.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let code = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status.code();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let mut stderr = String::new();
+    let _ = child.stderr.take().unwrap().read_to_string(&mut stderr);
+    (code, stderr)
+}
+
+#[test]
+fn gate_refuses_unsupported_versions_and_incomplete_v0_3_manifests_at_startup() {
+    let v0_3: Value = serde_json::from_slice(
+        &std::fs::read(fixture_root().join("expected_manifest_v0_3.json")).unwrap(),
+    )
+    .unwrap();
+
+    let mut future = v0_3.clone();
+    future["manifest_version"] = Value::from("airlock.v0.4");
+    let mut without_bytes = v0_3.clone();
+    without_bytes
+        .as_object_mut()
+        .unwrap()
+        .remove("bytes_crossed");
+    let mut without_attestation = v0_3.clone();
+    without_attestation
+        .as_object_mut()
+        .unwrap()
+        .remove("attestation");
+
+    for (label, manifest, expected) in [
+        ("airlock.v0.4", &future, "unsupported manifest version"),
+        (
+            "v0.3 without bytes_crossed",
+            &without_bytes,
+            "v0.3 manifest without bytes_crossed and attestation",
+        ),
+        (
+            "v0.3 without attestation",
+            &without_attestation,
+            "v0.3 manifest without bytes_crossed and attestation",
+        ),
+    ] {
+        let (code, stderr) = gate_startup_with_manifest(manifest);
+        assert_eq!(code, Some(2), "{label}: {stderr}");
+        assert!(
+            stderr.contains(expected),
+            "{label}: unexpected stderr {stderr}"
+        );
+    }
+}
+
+/// bytes_crossed is the size of the canonical request the manifest hash covers, so it is what
+/// the gate puts on the wire. 632 was counted independently of verify, from the fixture's
+/// request, with a separate canonicalizer.
+#[test]
+fn bytes_crossed_is_the_number_of_bytes_the_origin_receives() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(manifest_dir.join("clean_telemetry_only.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["manifest_version"], "airlock.v0.3");
+    assert_eq!(manifest["bytes_crossed"], 632);
+    assert_eq!(manifest["attestation"], "self_attested");
+    let origin = start_origin();
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+
+    // Sent pretty-printed: the origin must still receive exactly bytes_crossed bytes.
+    let pretty = serde_json::to_vec_pretty(&request).unwrap();
+    assert_ne!(
+        pretty.len() as u64,
+        manifest["bytes_crossed"].as_u64().unwrap()
+    );
+    let (status, _) = post(&client(), gate.address, &pretty);
+
+    assert_eq!(status, 200);
+    let received = origin.received.lock().unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].body.len() as u64, manifest["bytes_crossed"]);
+}

@@ -315,9 +315,18 @@ fn load_strict_manifests(
         let bytes = fs::read(&path).map_err(|_| "strict-manifest entry is unreadable")?;
         let manifest: AirlockManifest = serde_json::from_slice(&bytes)
             .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
-        if manifest.manifest_version != crate::manifest::AIRLOCK_MANIFEST_VERSION {
+        if !crate::manifest::is_supported_manifest_version(&manifest.manifest_version) {
             return Err(
                 "strict-manifest directory contains an unsupported manifest version".to_owned(),
+            );
+        }
+        // v0.3 requires the fields v0.2 never had; the schema says so and the gate agrees.
+        if manifest.manifest_version == crate::manifest::AIRLOCK_MANIFEST_VERSION
+            && (manifest.bytes_crossed.is_none() || manifest.attestation.is_none())
+        {
+            return Err(
+                "strict-manifest directory contains a v0.3 manifest without bytes_crossed and attestation"
+                    .to_owned(),
             );
         }
         if !matches!(

@@ -8,7 +8,10 @@
   "properties": {
     "manifest_version": {
       "type": "string",
-      "const": "airlock.v0.2"
+      "enum": [
+        "airlock.v0.2",
+        "airlock.v0.3"
+      ]
     },
     "binding_status": {
       "type": "string",
@@ -94,8 +97,55 @@
     "timestamp": {
       "type": "string",
       "format": "date-time"
+    },
+    "bytes_crossed": {
+      "description": "airlock.v0.3 and later. Length in bytes of the RFC 8785 canonical request JSON covered by request_payload_hash.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "attestation": {
+      "description": "airlock.v0.3 and later. verify writes self_attested; transmitted and gated are reserved for send and gate receipts.",
+      "type": "string",
+      "enum": [
+        "self_attested",
+        "transmitted",
+        "gated"
+      ]
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "manifest_version": {
+            "const": "airlock.v0.3"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "bytes_crossed",
+          "attestation"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "bytes_crossed"
+              ]
+            },
+            {
+              "required": [
+                "attestation"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
   "required": [
     "manifest_version",
     "binding_status",

@@ -436,7 +436,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::manifest::{AIRLOCK_MANIFEST_VERSION, ProvenanceSummary};
+    use crate::manifest::{AIRLOCK_MANIFEST_VERSION, Attestation, ProvenanceSummary};
     use crate::refusal::REFUSAL_OUTCOME;
     use crate::types::{BindingStatus, BoundaryMode, UpstreamArtifact};
 
@@ -497,6 +497,8 @@ mod tests {
                 by_boundary_class,
             },
             timestamp: "2026-03-26T14:00:00Z".to_string(),
+            bytes_crossed: Some(1234),
+            attestation: Some(Attestation::SelfAttested),
         }
     }
 

@@ -847,7 +847,7 @@ fn test_verify_strict_telemetry() {
 
     let actual = read_json_output(&output);
     let expected = read_json(&fixture(
-        "fixtures/clean_telemetry_only/expected_manifest.json",
+        "fixtures/clean_telemetry_only/expected_manifest_v0_3.json",
     ));
     assert_eq!(actual["achieved_claim"], "STRICT_TELEMETRY_ONLY");
     assert_eq!(actual["boundary_mode"], "TELEMETRY_ONLY");
@@ -884,7 +884,9 @@ fn test_verify_annotated() {
         .clone();
 
     let actual = read_json_output(&output);
-    let expected = read_json(&fixture("fixtures/annotated_mode/expected_manifest.json"));
+    let expected = read_json(&fixture(
+        "fixtures/annotated_mode/expected_manifest_v0_3.json",
+    ));
     assert_eq!(actual["achieved_claim"], "RAW_DOCUMENT_ABSENT");
     assert_eq!(actual["boundary_mode"], "ANNOTATED");
     assert_eq!(normalized_manifest(actual, &expected), expected);
@@ -916,7 +918,9 @@ fn test_verify_boundary_failed() {
         .clone();
 
     let actual = read_json_output(&output);
-    let expected = read_json(&fixture("fixtures/boundary_failed/expected_manifest.json"));
+    let expected = read_json(&fixture(
+        "fixtures/boundary_failed/expected_manifest_v0_3.json",
+    ));
     assert_eq!(actual["achieved_claim"], "BOUNDARY_FAILED");
     assert_eq!(normalized_manifest(actual, &expected), expected);
     assert!(

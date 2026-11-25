@@ -18,8 +18,40 @@ use crate::types::{
     BindingStatus, BlockedReason, BoundaryMode, ClaimLevel, Finding, UpstreamArtifact,
 };
 
-pub const AIRLOCK_MANIFEST_VERSION: &str = "airlock.v0.2";
+/// Version written by `airlock verify`. v0.3 adds `bytes_crossed` and `attestation`, which
+/// change manifest bytes, so it is a new version rather than a quiet extension of v0.2.
+pub const AIRLOCK_MANIFEST_VERSION: &str = "airlock.v0.3";
+/// The previous version. Manifests already written under it stay valid: the gate still
+/// forwards against them and `explain` still reads them. They never gain v0.3 fields.
+pub const AIRLOCK_MANIFEST_VERSION_V0_2: &str = "airlock.v0.2";
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// True for every manifest version this binary reads.
+pub fn is_supported_manifest_version(version: &str) -> bool {
+    version == AIRLOCK_MANIFEST_VERSION || version == AIRLOCK_MANIFEST_VERSION_V0_2
+}
+
+/// Who vouches for a manifest. `verify` produces `self_attested`: the claim is the verifier's
+/// own and nothing has been transmitted. `transmitted` and `gated` are reserved for the
+/// receipts of `airlock send` and `airlock gate`; the manifest is signed before either happens,
+/// so `verify` never writes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attestation {
+    SelfAttested,
+    Transmitted,
+    Gated,
+}
+
+impl Attestation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Attestation::SelfAttested => "self_attested",
+            Attestation::Transmitted => "transmitted",
+            Attestation::Gated => "gated",
+        }
+    }
+}
 
 /// Aggregate provenance counts used by explain output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +101,14 @@ pub struct AirlockManifest {
     pub blocked_reasons: Vec<BlockedReason>,
     pub provenance_summary: ProvenanceSummary,
     pub timestamp: String,
+    /// Length in bytes of the RFC 8785 canonical request JSON that `request_payload_hash`
+    /// covers, which is what a gate forwards. Present from v0.3; a v0.2 manifest has none and
+    /// is never rewritten to add it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_crossed: Option<u64>,
+    /// Present from v0.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<Attestation>,
 }
 
 impl AirlockManifest {
@@ -141,6 +181,8 @@ pub struct ManifestBuilder {
     findings: Option<Vec<Finding>>,
     blocked_reasons: Option<Vec<BlockedReason>>,
     timestamp: Option<String>,
+    bytes_crossed: Option<u64>,
+    attestation: Option<Attestation>,
 }
 
 impl ManifestBuilder {
@@ -258,6 +300,16 @@ impl ManifestBuilder {
         self
     }
 
+    pub fn bytes_crossed(mut self, bytes_crossed: u64) -> Self {
+        self.bytes_crossed = Some(bytes_crossed);
+        self
+    }
+
+    pub fn attestation(mut self, attestation: Attestation) -> Self {
+        self.attestation = Some(attestation);
+        self
+    }
+
     pub fn build(self) -> Result<AirlockManifest, ManifestBuildError> {
         let binding_status = require(self.binding_status, "binding_status")?;
         let boundary_mode = require(self.boundary_mode, "boundary_mode")?;
@@ -336,6 +388,8 @@ impl ManifestBuilder {
         let blocked_reasons = require(self.blocked_reasons, "blocked_reasons")?;
         let timestamp = require_non_empty(self.timestamp, "timestamp")?;
         validate_rfc3339_timestamp(&timestamp)?;
+        let bytes_crossed = require(self.bytes_crossed, "bytes_crossed")?;
+        let attestation = require(self.attestation, "attestation")?;
 
         Ok(AirlockManifest {
             manifest_version: AIRLOCK_MANIFEST_VERSION.to_string(),
@@ -360,6 +414,8 @@ impl ManifestBuilder {
             blocked_reasons,
             provenance_summary: prompt_provenance.summary,
             timestamp,
+            bytes_crossed: Some(bytes_crossed),
+            attestation: Some(attestation),
         })
     }
 }
@@ -568,6 +624,8 @@ mod tests {
                 offending_paths: vec!["mutator_context.challenge_observation".to_string()],
             }])
             .timestamp("2026-03-26T14:28:00Z")
+            .bytes_crossed(632)
+            .attestation(Attestation::SelfAttested)
     }
 
     fn sample_manifest() -> AirlockManifest {
@@ -612,9 +670,68 @@ mod tests {
         assert!(
             manifest
                 .to_canonical_json()
-                .contains("\"manifest_version\":\"airlock.v0.2\"")
+                .contains("\"manifest_version\":\"airlock.v0.3\"")
         );
         assert_eq!(manifest.binding_status, BindingStatus::Bound);
+    }
+
+    #[test]
+    fn v0_3_manifest_carries_bytes_crossed_and_attestation() {
+        let json: Value = serde_json::from_str(&sample_manifest().to_canonical_json()).unwrap();
+
+        assert_eq!(json["bytes_crossed"], 632);
+        assert_eq!(json["attestation"], "self_attested");
+    }
+
+    #[test]
+    fn builder_requires_bytes_crossed_and_attestation() {
+        let mut without_bytes = sample_builder();
+        without_bytes.bytes_crossed = None;
+        assert_eq!(
+            without_bytes.build().unwrap_err().to_string(),
+            "missing required field: bytes_crossed"
+        );
+
+        let mut without_attestation = sample_builder();
+        without_attestation.attestation = None;
+        assert_eq!(
+            without_attestation.build().unwrap_err().to_string(),
+            "missing required field: attestation"
+        );
+    }
+
+    #[test]
+    fn supported_versions_are_v0_2_and_v0_3_only() {
+        assert!(is_supported_manifest_version("airlock.v0.2"));
+        assert!(is_supported_manifest_version("airlock.v0.3"));
+        assert!(!is_supported_manifest_version("airlock.v0"));
+        assert!(!is_supported_manifest_version("airlock.v0.4"));
+        assert!(!is_supported_manifest_version(""));
+    }
+
+    /// A v0.2 manifest on disk must keep its bytes and its hash after a read and re-serialize
+    /// through the current type: the gate hashes manifests it parsed, and the transition rule is
+    /// that v0.2 files are never altered.
+    #[test]
+    fn v0_2_manifests_keep_their_bytes_and_hash_through_the_current_type() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/clean_telemetry_only/expected_manifest.json");
+        let original = std::fs::read_to_string(path).unwrap();
+        let original_value: Value = serde_json::from_str(&original).unwrap();
+        assert_eq!(original_value["manifest_version"], "airlock.v0.2");
+
+        let manifest: AirlockManifest = serde_json::from_str(&original).unwrap();
+
+        assert_eq!(manifest.bytes_crossed, None);
+        assert_eq!(manifest.attestation, None);
+        assert_eq!(
+            manifest.to_canonical_json(),
+            canonical_json(&original_value)
+        );
+        assert_eq!(
+            manifest.hash(),
+            blake3_hash(&canonical_json_bytes(&original_value))
+        );
     }
 
     #[test]

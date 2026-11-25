@@ -150,7 +150,7 @@ fn unchanged_wrapped_request_is_bound_and_schema_valid() {
     let manifest = verify_request(&request);
 
     assert_eq!(manifest["binding_status"], "BOUND");
-    assert_eq!(manifest["manifest_version"], "airlock.v0.2");
+    assert_eq!(manifest["manifest_version"], "airlock.v0.3");
     assert_eq!(manifest["achieved_claim"], "STRICT_TELEMETRY_ONLY");
     assert!(manifest["findings"].as_array().unwrap().is_empty());
 }

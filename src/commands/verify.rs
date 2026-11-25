@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use crate::adapter::{self, TransportDeclaration};
 use crate::assembler::PromptProvenance;
 use crate::cli::{VERIFY_PARTIAL, VERIFY_PASS, VerifyArgs};
-use crate::hash::{blake3_hash, jcs_blake3_hash};
-use crate::manifest::ManifestBuilder;
+use crate::hash::{blake3_hash, jcs, jcs_blake3_hash};
+use crate::manifest::{Attestation, ManifestBuilder};
 use crate::output::{SOURCE_DATE_EPOCH_ENV, now_utc};
 use crate::policy::{self, AirlockPolicy};
 use crate::refusal::RefusalEnvelope;
@@ -99,8 +99,10 @@ fn run_with_writers(
             .write_to(stdout);
         }
     };
-    let request_payload_hash = match jcs_blake3_hash(&request_value) {
-        Ok(hash) => hash,
+    // One canonicalization feeds both the hash and bytes_crossed, so the recorded length is by
+    // construction the length of the bytes that request_payload_hash covers.
+    let canonical_request = match jcs::canonicalize(&request_value) {
+        Ok(canonical) => canonical,
         Err(error) => {
             return RefusalEnvelope::bad_request(
                 format!("request payload cannot be hashed as RFC 8785 canonical JSON: {error}"),
@@ -109,6 +111,8 @@ fn run_with_writers(
             .write_to(stdout);
         }
     };
+    let request_payload_hash = blake3_hash(canonical_request.as_bytes());
+    let bytes_crossed = canonical_request.len() as u64;
     if prompt_provenance.prompt_payload_hash != prompt_payload_hash {
         return RefusalEnvelope::bad_provenance(
             "prompt provenance does not match prompt payload hash",
@@ -198,6 +202,8 @@ fn run_with_writers(
         .findings(verify_result.findings)
         .blocked_reasons(verify_result.blocked_reasons)
         .timestamp(manifest_instant.to_rfc3339())
+        .bytes_crossed(bytes_crossed)
+        .attestation(Attestation::SelfAttested)
         .build()
     {
         Ok(manifest) => manifest,

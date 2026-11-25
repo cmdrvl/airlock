@@ -252,10 +252,10 @@ impl Adapter for GenericJsonAdapter {
                     json!({ "pointer": self.messages_pointer }),
                 )
             })?;
-            if let Some(Value::String(text)) = message.get("content") {
-                if let Some(decoded) = decode_structured_container(text) {
-                    message.insert("content".to_string(), decoded);
-                }
+            if let Some(Value::String(text)) = message.get("content")
+                && let Some(decoded) = decode_structured_container(text)
+            {
+                message.insert("content".to_string(), decoded);
             }
             messages.push(Value::Object(message));
         }

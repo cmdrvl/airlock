@@ -165,10 +165,10 @@ pub fn append_witness(record: WitnessRecord) -> Result<(), WitnessError> {
 
 /// Append a witness record to the given ledger path.
 pub fn append_witness_at(path: &Path, record: &WitnessRecord) -> Result<(), WitnessError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
     }
 
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -316,28 +316,28 @@ fn matches_filters(
     timestamp: DateTime<Utc>,
     filters: &WitnessFilters,
 ) -> bool {
-    if let Some(tool) = &filters.tool {
-        if &record.tool != tool {
-            return false;
-        }
+    if let Some(tool) = &filters.tool
+        && &record.tool != tool
+    {
+        return false;
     }
 
-    if let Some(outcome) = &filters.outcome {
-        if &record.outcome != outcome {
-            return false;
-        }
+    if let Some(outcome) = &filters.outcome
+        && &record.outcome != outcome
+    {
+        return false;
     }
 
-    if let Some(since) = filters.since {
-        if timestamp < since {
-            return false;
-        }
+    if let Some(since) = filters.since
+        && timestamp < since
+    {
+        return false;
     }
 
-    if let Some(until) = filters.until {
-        if timestamp > until {
-            return false;
-        }
+    if let Some(until) = filters.until
+        && timestamp > until
+    {
+        return false;
     }
 
     if let Some(input_hash) = &filters.input_hash {

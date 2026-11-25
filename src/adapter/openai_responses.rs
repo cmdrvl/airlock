@@ -84,21 +84,21 @@ impl Adapter for OpenAiResponsesAdapter {
     ) -> Result<Value, RefusalEnvelope> {
         let model_id = validated_model_id(config)?;
         let temperature = validated_temperature(config)?;
-        if let Some(temperature) = temperature {
-            if !(0.0..=MAX_TEMPERATURE).contains(&temperature) {
-                return Err(RefusalEnvelope::bad_request(
-                    "OpenAI Responses temperature must be between 0 and 2",
-                    json!({ "field": "temperature", "value": temperature.to_string() }),
-                ));
-            }
+        if let Some(temperature) = temperature
+            && !(0.0..=MAX_TEMPERATURE).contains(&temperature)
+        {
+            return Err(RefusalEnvelope::bad_request(
+                "OpenAI Responses temperature must be between 0 and 2",
+                json!({ "field": "temperature", "value": temperature.to_string() }),
+            ));
         }
-        if let Some(max_tokens) = config.max_tokens {
-            if max_tokens < MIN_OUTPUT_TOKENS {
-                return Err(RefusalEnvelope::bad_request(
-                    "OpenAI Responses max_output_tokens must be at least 16",
-                    json!({ "field": "max_tokens", "value": max_tokens }),
-                ));
-            }
+        if let Some(max_tokens) = config.max_tokens
+            && max_tokens < MIN_OUTPUT_TOKENS
+        {
+            return Err(RefusalEnvelope::bad_request(
+                "OpenAI Responses max_output_tokens must be at least 16",
+                json!({ "field": "max_tokens", "value": max_tokens }),
+            ));
         }
 
         let mut input = Vec::new();

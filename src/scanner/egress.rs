@@ -109,11 +109,13 @@ fn check_private_bloom_permissions(_path: &Path, _metadata: &fs::Metadata) -> Re
 }
 
 pub fn egress_scanner(bloom: Option<ShingleBloom>, min_hits: usize) -> Scanner {
-    let mut config = ScanConfig::default();
-    config.max_input_bytes = MAX_GATE_REQUEST_BYTES;
-    config.max_decoded_bytes = MAX_DECODED_BYTES;
-    config.max_decode_depth = 2;
-    config.shingle_min_hits = min_hits.max(1);
+    let mut config = ScanConfig {
+        max_input_bytes: MAX_GATE_REQUEST_BYTES,
+        max_decoded_bytes: MAX_DECODED_BYTES,
+        max_decode_depth: 2,
+        shingle_min_hits: min_hits.max(1),
+        ..ScanConfig::default()
+    };
     if bloom.is_some() {
         config.packs.push(Pack::ProtectedCorpus);
     }
@@ -147,16 +149,13 @@ pub fn scan_policy_proxy_request_with_media(
         .filter_map(|entry| Regex::new(&entry.pattern).ok())
         .collect();
     let mut findings = Vec::new();
-    scan_value(
-        &request,
-        "",
+    let context = ScanContext {
         policy,
-        &patterns,
+        patterns: &patterns,
         scanner,
         base64_media_pointers,
-        false,
-        &mut findings,
-    );
+    };
+    scan_value(&context, &request, "", false, &mut findings);
     findings.sort_by(|left, right| {
         left.artifact_class
             .cmp(&right.artifact_class)
@@ -169,16 +168,28 @@ pub fn scan_policy_proxy_request_with_media(
     })
 }
 
+/// What a scan needs besides the node being visited. It is the same for every recursive call.
+#[derive(Clone, Copy)]
+struct ScanContext<'a> {
+    policy: &'a AirlockPolicy,
+    patterns: &'a [Regex],
+    scanner: &'a Scanner,
+    base64_media_pointers: &'a HashSet<String>,
+}
+
 fn scan_value(
+    context: &ScanContext<'_>,
     value: &Value,
     pointer: &str,
-    policy: &AirlockPolicy,
-    patterns: &[Regex],
-    scanner: &Scanner,
-    base64_media_pointers: &HashSet<String>,
     in_multimodal: bool,
     findings: &mut Vec<EgressFinding>,
 ) {
+    let ScanContext {
+        policy,
+        patterns,
+        scanner,
+        base64_media_pointers,
+    } = *context;
     let multimodal = in_multimodal || is_multimodal_node(value);
     if multimodal && policy.allow_multimodal != Some(true) {
         findings.push(EgressFinding {
@@ -202,12 +213,9 @@ fn scan_value(
                     });
                 }
                 scan_value(
+                    context,
                     child,
                     &pointer_child(pointer, key),
-                    policy,
-                    patterns,
-                    scanner,
-                    base64_media_pointers,
                     multimodal,
                     findings,
                 );
@@ -216,12 +224,9 @@ fn scan_value(
         Value::Array(items) => {
             for (index, child) in items.iter().enumerate() {
                 scan_value(
+                    context,
                     child,
                     &format!("{pointer}/{index}"),
-                    policy,
-                    patterns,
-                    scanner,
-                    base64_media_pointers,
                     multimodal,
                     findings,
                 );

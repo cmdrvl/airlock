@@ -147,10 +147,7 @@ fn start_gate(
     let address = line
         .trim()
         .strip_prefix("airlock gate listening on ")
-        .unwrap_or_else(|| {
-            assert!(false, "gate did not start: {line}");
-            ""
-        })
+        .unwrap_or_else(|| panic!("gate did not start: {line}"))
         .parse()
         .unwrap();
     GateProcess { child, address }

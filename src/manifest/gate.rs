@@ -38,9 +38,6 @@ impl GateReceipt {
         request_hash: impl Into<String>,
         blocked: bool,
         findings: Vec<EgressFinding>,
-        policy_id: Option<String>,
-        policy_hash: Option<String>,
-        matched_manifest_hash: Option<String>,
     ) -> Self {
         Self {
             gate_version: "airlock.gate.v1".to_owned(),
@@ -52,10 +49,23 @@ impl GateReceipt {
             blocked,
             findings,
             timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-            policy_id,
-            policy_hash,
-            matched_manifest_hash,
+            policy_id: None,
+            policy_hash: None,
+            matched_manifest_hash: None,
         }
+    }
+
+    /// Record which policy the gate was enforcing when it produced this receipt.
+    pub fn with_policy(mut self, policy_id: Option<String>, policy_hash: Option<String>) -> Self {
+        self.policy_id = policy_id;
+        self.policy_hash = policy_hash;
+        self
+    }
+
+    /// Record the hash of the manifest that authorized this request, if one matched.
+    pub fn with_matched_manifest(mut self, matched_manifest_hash: Option<String>) -> Self {
+        self.matched_manifest_hash = matched_manifest_hash;
+        self
     }
 
     pub fn write_to(&self, directory: &Path) -> io::Result<PathBuf> {

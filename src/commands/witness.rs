@@ -225,28 +225,28 @@ fn matches_filters(
     timestamp: DateTime<Utc>,
     filters: &WitnessFilters,
 ) -> bool {
-    if let Some(tool) = &filters.tool {
-        if &record.tool != tool {
-            return false;
-        }
+    if let Some(tool) = &filters.tool
+        && &record.tool != tool
+    {
+        return false;
     }
 
-    if let Some(outcome) = &filters.outcome {
-        if &record.outcome != outcome {
-            return false;
-        }
+    if let Some(outcome) = &filters.outcome
+        && &record.outcome != outcome
+    {
+        return false;
     }
 
-    if let Some(since) = filters.since {
-        if timestamp < since {
-            return false;
-        }
+    if let Some(since) = filters.since
+        && timestamp < since
+    {
+        return false;
     }
 
-    if let Some(until) = filters.until {
-        if timestamp > until {
-            return false;
-        }
+    if let Some(until) = filters.until
+        && timestamp > until
+    {
+        return false;
     }
 
     if let Some(input_hash) = &filters.input_hash {

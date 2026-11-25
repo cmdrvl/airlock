@@ -182,16 +182,16 @@ impl Adapter for OpenAiChatCompletionsAdapter {
             ));
         }
 
-        if let Some(temperature) = config.temperature {
-            if !temperature.is_finite() {
-                return Err(RefusalEnvelope::bad_request(
-                    "transport config temperature must be finite",
-                    json!({
-                        "field": "temperature",
-                        "value": temperature.to_string(),
-                    }),
-                ));
-            }
+        if let Some(temperature) = config.temperature
+            && !temperature.is_finite()
+        {
+            return Err(RefusalEnvelope::bad_request(
+                "transport config temperature must be finite",
+                json!({
+                    "field": "temperature",
+                    "value": temperature.to_string(),
+                }),
+            ));
         }
 
         let messages = prompt_payload
@@ -260,10 +260,10 @@ impl Adapter for OpenAiChatCompletionsAdapter {
                     )
                 })?;
 
-                if message.get("role").and_then(Value::as_str) == Some("user") {
-                    if let Some(content) = message.get_mut("content") {
-                        *content = decode_user_content(content);
-                    }
+                if message.get("role").and_then(Value::as_str) == Some("user")
+                    && let Some(content) = message.get_mut("content")
+                {
+                    *content = decode_user_content(content);
                 }
 
                 Ok(Value::Object(message))
@@ -587,18 +587,17 @@ pub(crate) fn pointer_index(base: &str, index: usize) -> String {
 
 /// Classify a URL-or-data-URI string as inline base64 media or a remote reference.
 pub(crate) fn classify_reference(pointer: String, url: &str) -> ScreenablePart {
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((meta, payload)) = rest.split_once(',') {
-            if let Some(media_type) = meta.strip_suffix(";base64") {
-                return ScreenablePart {
-                    pointer,
-                    kind: PartKind::Base64Media {
-                        media_type: media_type.to_string(),
-                    },
-                    data: payload.to_string(),
-                };
-            }
-        }
+    if let Some(rest) = url.strip_prefix("data:")
+        && let Some((meta, payload)) = rest.split_once(',')
+        && let Some(media_type) = meta.strip_suffix(";base64")
+    {
+        return ScreenablePart {
+            pointer,
+            kind: PartKind::Base64Media {
+                media_type: media_type.to_string(),
+            },
+            data: payload.to_string(),
+        };
     }
     ScreenablePart {
         pointer,

@@ -440,10 +440,7 @@ mod tests {
         .unwrap();
         let args = match cli.command {
             Some(Commands::Gate(args)) => args,
-            _ => {
-                assert!(false, "expected gate command");
-                return;
-            }
+            _ => panic!("expected gate command"),
         };
         assert_eq!(args.mode, GateMode::PolicyProxy);
         assert_eq!(args.policy, Some(PathBuf::from("policy.yaml")));
@@ -467,10 +464,7 @@ mod tests {
         .unwrap();
         let args = match strict.command {
             Some(Commands::Gate(args)) => args,
-            _ => {
-                assert!(false, "expected strict gate command");
-                return;
-            }
+            _ => panic!("expected strict gate command"),
         };
         assert_eq!(args.mode, GateMode::StrictManifest);
     }

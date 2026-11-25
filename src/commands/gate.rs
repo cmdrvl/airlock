@@ -540,9 +540,10 @@ fn block_request_with_findings(
         request_hash,
         true,
         findings.to_vec(),
+    )
+    .with_policy(
         state.policy.as_ref().map(|policy| policy.policy_id.clone()),
         state.policy_hash.clone(),
-        None,
     );
     write_receipt_and_witness(state, &mut receipt, "BOUNDARY_FAILED", 1);
     let refusal = GateRefusal::blocked(findings.to_vec());
@@ -607,10 +608,10 @@ fn forward_request(
         {
             continue;
         }
-        if let Ok(value) = value.to_str() {
-            if let Ok(header) = Header::from_bytes(name.as_str().as_bytes(), value.as_bytes()) {
-                response_headers.push(header);
-            }
+        if let Ok(value) = value.to_str()
+            && let Ok(header) = Header::from_bytes(name.as_str().as_bytes(), value.as_bytes())
+        {
+            response_headers.push(header);
         }
     }
     let hasher = Arc::new(Mutex::new(blake3::Hasher::new()));
@@ -636,10 +637,12 @@ fn forward_request(
         request_hash,
         false,
         findings,
+    )
+    .with_policy(
         state.policy.as_ref().map(|policy| policy.policy_id.clone()),
         state.policy_hash.clone(),
-        matched_manifest_hash,
-    );
+    )
+    .with_matched_manifest(matched_manifest_hash);
     receipt.response_hash = Some(response_hash.clone());
     receipt.upstream_status = Some(status);
     write_receipt_and_witness(
@@ -671,10 +674,12 @@ fn gateway_error(
             artifact_class: "UPSTREAM_ERROR".to_owned(),
             rule_id: rule_id.to_owned(),
         }],
+    )
+    .with_policy(
         state.policy.as_ref().map(|policy| policy.policy_id.clone()),
         state.policy_hash.clone(),
-        matched_manifest_hash,
-    );
+    )
+    .with_matched_manifest(matched_manifest_hash);
     write_receipt_and_witness(state, &mut receipt, "GATE_UPSTREAM_ERROR", REFUSAL);
     let refusal = GateRefusal::with_code(
         "UPSTREAM_UNAVAILABLE",
@@ -746,9 +751,10 @@ fn reject_overloaded(request: Request, state: &GateState) {
         blake3_hash(b"unavailable"),
         true,
         vec![finding.clone()],
+    )
+    .with_policy(
         state.policy.as_ref().map(|policy| policy.policy_id.clone()),
         state.policy_hash.clone(),
-        None,
     );
     write_receipt_and_witness(state, &mut receipt, "BOUNDARY_FAILED", REFUSAL);
     let refusal = GateRefusal::with_code(

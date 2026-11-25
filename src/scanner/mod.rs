@@ -409,6 +409,11 @@ fn model_output_paths(prompt_payload: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// True when the prompt carries an earlier turn under [`PRIOR_TURN_KEY`].
+pub(crate) fn carries_prior_turn(prompt_payload: &Value) -> bool {
+    !model_output_paths(prompt_payload).is_empty()
+}
+
 /// True when `path` is one of `roots` or lies beneath one (`root.x` or `root[0]`).
 fn path_is_under_any(path: &str, roots: &[String]) -> bool {
     roots.iter().any(|root| {

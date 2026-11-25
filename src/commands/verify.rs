@@ -321,6 +321,44 @@ pub(crate) fn verify_request(
         ));
     }
 
+    // A prompt that carries an earlier turn must say which one, and a link must have something to
+    // link: otherwise a manifest that took model output from a prior turn could present as turn
+    // 0, and `chain verify` ("walk back to turn 0") would stop at it. The claim is derived from
+    // the prompt either way; this keeps "no chain member means root" true.
+    let carries_prior_turn = scanner::carries_prior_turn(prompt_value);
+    match (&prompt_provenance.chain, carries_prior_turn) {
+        (Some(link), true) => {
+            if let Some(reason) = link.invalid_reason() {
+                return Err(RefusalEnvelope::bad_provenance(
+                    format!("prompt provenance chain link is invalid: {reason}"),
+                    json!({
+                        "field": "chain",
+                        "path": request.provenance_path.display().to_string(),
+                    }),
+                ));
+            }
+        }
+        (Some(_), false) => {
+            return Err(RefusalEnvelope::bad_provenance(
+                "prompt provenance carries a chain link but the prompt has no prior_turn",
+                json!({
+                    "field": "chain",
+                    "path": request.provenance_path.display().to_string(),
+                }),
+            ));
+        }
+        (None, true) => {
+            return Err(RefusalEnvelope::bad_provenance(
+                "the prompt carries a prior_turn but its provenance has no chain link; assemble it with --prior-manifest",
+                json!({
+                    "field": "chain",
+                    "path": request.provenance_path.display().to_string(),
+                }),
+            ));
+        }
+        (None, false) => {}
+    }
+
     let boundary_mode = prompt_provenance.boundary_mode;
     let not_crossed = match request.not_crossed_path {
         Some(path) => Some(load_not_crossed(
@@ -377,6 +415,10 @@ pub(crate) fn verify_request(
         .attestation(Attestation::SelfAttested);
     let builder = match &not_crossed {
         Some(loaded) => builder.not_crossed(loaded.entries.clone()),
+        None => builder,
+    };
+    let builder = match &prompt_provenance.chain {
+        Some(link) => builder.chain(link.clone()),
         None => builder,
     };
     let manifest = builder.build().map_err(|error| {

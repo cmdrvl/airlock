@@ -23,6 +23,25 @@
         "TELEMETRY_ONLY"
       ]
     },
+    "chain": {
+      "description": "Present exactly when assemble was given a prior turn (--prior-receipt, --response and --prior-manifest). The turn this prompt follows; verify and send copy it into the manifest, which makes that manifest airlock.v0.4. prior_manifest_hash is the hash of the prior turn's manifest as the gate computes it; turn_index is 1 after a manifest with no chain link and one more than the prior manifest's index after that.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prior_manifest_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "turn_index": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "prior_manifest_hash",
+        "turn_index"
+      ]
+    },
     "records": {
       "type": "array",
       "items": {

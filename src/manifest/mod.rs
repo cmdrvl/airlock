@@ -12,23 +12,38 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::assembler::{BoundaryClass, NotCrossedEntry, PromptProvenance};
+use crate::chain::ChainLink;
 use crate::hash::blake3_hash;
 use crate::output::{canonical_json, canonical_json_bytes};
 use crate::types::{
     BindingStatus, BlockedReason, BoundaryMode, ClaimLevel, Finding, UpstreamArtifact,
 };
 
-/// Version written by `airlock verify`. v0.3 adds `bytes_crossed` and `attestation`, which
-/// change manifest bytes, so it is a new version rather than a quiet extension of v0.2.
+/// Version written by `airlock verify` and `airlock send` for a manifest with no chain link.
+/// v0.3 adds `bytes_crossed` and `attestation`, which change manifest bytes, so it is a new
+/// version rather than a quiet extension of v0.2.
 pub const AIRLOCK_MANIFEST_VERSION: &str = "airlock.v0.3";
 /// The previous version. Manifests already written under it stay valid: the gate still
 /// forwards against them and `explain` still reads them. They never gain v0.3 fields.
 pub const AIRLOCK_MANIFEST_VERSION_V0_2: &str = "airlock.v0.2";
+/// Written exactly when the manifest carries a `chain` link (a turn that follows an earlier
+/// one). It has every v0.3 member plus `chain`, which changes manifest bytes, so it is a new
+/// version rather than an extension of v0.3: a manifest with no link stays v0.3 and is
+/// byte-identical to what v0.3 always wrote.
+pub const AIRLOCK_MANIFEST_VERSION_V0_4: &str = "airlock.v0.4";
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// True for every manifest version this binary reads.
 pub fn is_supported_manifest_version(version: &str) -> bool {
-    version == AIRLOCK_MANIFEST_VERSION || version == AIRLOCK_MANIFEST_VERSION_V0_2
+    version == AIRLOCK_MANIFEST_VERSION
+        || version == AIRLOCK_MANIFEST_VERSION_V0_2
+        || version == AIRLOCK_MANIFEST_VERSION_V0_4
+}
+
+/// True for the versions that carry the members v0.3 introduced (`bytes_crossed`,
+/// `attestation`, `not_crossed`, `transmission`, `signature`): v0.3 and every later version.
+pub fn has_v0_3_members(version: &str) -> bool {
+    version == AIRLOCK_MANIFEST_VERSION || version == AIRLOCK_MANIFEST_VERSION_V0_4
 }
 
 /// Who vouches for a manifest. `verify` produces `self_attested`: the claim is the verifier's
@@ -126,6 +141,12 @@ pub struct AirlockManifest {
     /// never by the builder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<ManifestSignature>,
+    /// The turn this manifest follows. From v0.4, and present exactly when the version is
+    /// v0.4: `assemble --prior-manifest` writes it into the prompt provenance and `verify` and
+    /// `send` copy it here, so the signature and `prompt_provenance_hash` both cover it. A
+    /// manifest without it is turn 0 and no earlier turn's output went into its prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<ChainLink>,
 }
 
 /// What `airlock send` did with a request. Only the request body is attested: headers are not.
@@ -206,6 +227,20 @@ pub struct ManifestSignature {
 }
 
 impl AirlockManifest {
+    /// Why this manifest breaks the chain-member rule for its version, or `None`: a v0.4
+    /// manifest must carry a valid `chain`, and no other version may carry one. The gate, `chain
+    /// verify` and `assemble --prior-manifest` all apply this one rule.
+    pub fn chain_shape_error(&self) -> Option<&'static str> {
+        match (self.manifest_version.as_str(), &self.chain) {
+            (AIRLOCK_MANIFEST_VERSION_V0_4, None) => {
+                Some("an airlock.v0.4 manifest must carry a chain member")
+            }
+            (AIRLOCK_MANIFEST_VERSION_V0_4, Some(link)) => link.invalid_reason(),
+            (_, Some(_)) => Some("only an airlock.v0.4 manifest may carry a chain member"),
+            (_, None) => None,
+        }
+    }
+
     pub fn to_canonical_json(&self) -> String {
         canonical_json(&self.as_json_value())
     }
@@ -278,6 +313,7 @@ pub struct ManifestBuilder {
     bytes_crossed: Option<u64>,
     attestation: Option<Attestation>,
     not_crossed: Option<Vec<NotCrossedEntry>>,
+    chain: Option<ChainLink>,
 }
 
 impl ManifestBuilder {
@@ -411,6 +447,13 @@ impl ManifestBuilder {
         self
     }
 
+    /// Record the turn this manifest follows. Setting it makes the manifest `airlock.v0.4`;
+    /// leave it unset for turn 0, which stays `airlock.v0.3`.
+    pub fn chain(mut self, chain: ChainLink) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+
     pub fn build(self) -> Result<AirlockManifest, ManifestBuildError> {
         let binding_status = require(self.binding_status, "binding_status")?;
         let boundary_mode = require(self.boundary_mode, "boundary_mode")?;
@@ -491,6 +534,14 @@ impl ManifestBuilder {
         validate_rfc3339_timestamp(&timestamp)?;
         let bytes_crossed = require(self.bytes_crossed, "bytes_crossed")?;
         let attestation = require(self.attestation, "attestation")?;
+        if let Some(reason) = self.chain.as_ref().and_then(ChainLink::invalid_reason) {
+            return Err(ManifestBuildError::invalid("chain", reason));
+        }
+        let manifest_version = if self.chain.is_some() {
+            AIRLOCK_MANIFEST_VERSION_V0_4
+        } else {
+            AIRLOCK_MANIFEST_VERSION
+        };
         if let Some(entries) = &self.not_crossed {
             for entry in entries {
                 validate_non_empty_field("not_crossed.path", &entry.path)?;
@@ -503,7 +554,7 @@ impl ManifestBuilder {
         }
 
         Ok(AirlockManifest {
-            manifest_version: AIRLOCK_MANIFEST_VERSION.to_string(),
+            manifest_version: manifest_version.to_string(),
             binding_status,
             boundary_mode,
             policy_id,
@@ -530,6 +581,7 @@ impl ManifestBuilder {
             not_crossed: self.not_crossed,
             transmission: None,
             signature: None,
+            chain: self.chain,
         })
     }
 }
@@ -643,6 +695,7 @@ mod tests {
     use super::*;
     use crate::assembler::{NotCrossedReason, ProvenanceRecord, TransformationKind};
     use crate::hash::blake3_hash;
+    use serde_json::json;
 
     fn sample_hash(label: &str) -> String {
         blake3_hash(label.as_bytes())
@@ -879,12 +932,143 @@ mod tests {
     }
 
     #[test]
-    fn supported_versions_are_v0_2_and_v0_3_only() {
+    fn supported_versions_are_v0_2_v0_3_and_v0_4_only() {
         assert!(is_supported_manifest_version("airlock.v0.2"));
         assert!(is_supported_manifest_version("airlock.v0.3"));
+        assert!(is_supported_manifest_version("airlock.v0.4"));
         assert!(!is_supported_manifest_version("airlock.v0"));
-        assert!(!is_supported_manifest_version("airlock.v0.4"));
+        assert!(!is_supported_manifest_version("airlock.v0.5"));
         assert!(!is_supported_manifest_version(""));
+        // v0.3 and v0.4 share the v0.3 members; v0.2 has none of them.
+        assert!(has_v0_3_members("airlock.v0.3"));
+        assert!(has_v0_3_members("airlock.v0.4"));
+        assert!(!has_v0_3_members("airlock.v0.2"));
+        assert!(!has_v0_3_members("airlock.v0.5"));
+    }
+
+    fn sample_link(turn_index: u64) -> ChainLink {
+        ChainLink {
+            prior_manifest_hash: sample_hash("the prior manifest"),
+            turn_index,
+        }
+    }
+
+    #[test]
+    fn a_manifest_with_no_link_is_v0_3_and_has_no_chain_member_at_all() {
+        let manifest = sample_manifest();
+        assert_eq!(manifest.manifest_version, "airlock.v0.3");
+        assert_eq!(manifest.chain, None);
+        let json: Value = serde_json::from_str(&manifest.to_canonical_json()).unwrap();
+        assert!(
+            json.as_object().unwrap().get("chain").is_none(),
+            "a turn-0 manifest must serialize with no chain key, not a null one"
+        );
+    }
+
+    #[test]
+    fn a_manifest_with_a_link_is_v0_4_and_serializes_the_link() {
+        let manifest = sample_builder().chain(sample_link(3)).build().unwrap();
+        assert_eq!(manifest.manifest_version, "airlock.v0.4");
+        let json: Value = serde_json::from_str(&manifest.to_canonical_json()).unwrap();
+        assert_eq!(json["manifest_version"], "airlock.v0.4");
+        assert_eq!(
+            json["chain"],
+            json!({
+                "prior_manifest_hash": sample_hash("the prior manifest"),
+                "turn_index": 3,
+            })
+        );
+        // Every v0.3 member is still there.
+        assert_eq!(json["bytes_crossed"], 632);
+        assert_eq!(json["attestation"], "self_attested");
+    }
+
+    #[test]
+    fn the_link_changes_the_manifest_hash_and_only_by_being_present() {
+        let plain = sample_manifest();
+        let one = sample_builder().chain(sample_link(1)).build().unwrap();
+        let two = sample_builder().chain(sample_link(2)).build().unwrap();
+        assert_ne!(plain.hash(), one.hash());
+        assert_ne!(one.hash(), two.hash());
+        assert_eq!(
+            one.hash(),
+            sample_builder()
+                .chain(sample_link(1))
+                .build()
+                .unwrap()
+                .hash(),
+            "same inputs, same hash"
+        );
+    }
+
+    #[test]
+    fn the_builder_refuses_an_invalid_link() {
+        for link in [
+            sample_link(0),
+            ChainLink {
+                prior_manifest_hash: "blake3:abc".to_string(),
+                turn_index: 1,
+            },
+            ChainLink {
+                prior_manifest_hash: sample_hash("x").to_uppercase(),
+                turn_index: 1,
+            },
+        ] {
+            let error = sample_builder().chain(link.clone()).build().unwrap_err();
+            assert!(error.to_string().contains("chain"), "{link:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_chain_member_rule_holds_for_every_version() {
+        let plain = sample_manifest();
+        let chained = sample_builder().chain(sample_link(2)).build().unwrap();
+        assert_eq!(plain.chain_shape_error(), None);
+        assert_eq!(chained.chain_shape_error(), None);
+
+        let mut v0_4_without = plain.clone();
+        v0_4_without.manifest_version = AIRLOCK_MANIFEST_VERSION_V0_4.to_string();
+        assert!(
+            v0_4_without
+                .chain_shape_error()
+                .unwrap()
+                .contains("must carry")
+        );
+
+        let mut v0_3_with = chained.clone();
+        v0_3_with.manifest_version = AIRLOCK_MANIFEST_VERSION.to_string();
+        assert!(
+            v0_3_with
+                .chain_shape_error()
+                .unwrap()
+                .contains("only an airlock.v0.4")
+        );
+
+        let mut v0_2_with = chained.clone();
+        v0_2_with.manifest_version = AIRLOCK_MANIFEST_VERSION_V0_2.to_string();
+        assert!(v0_2_with.chain_shape_error().is_some());
+
+        let mut index_zero = chained;
+        index_zero.chain.as_mut().unwrap().turn_index = 0;
+        assert!(
+            index_zero
+                .chain_shape_error()
+                .unwrap()
+                .contains("turn_index")
+        );
+    }
+
+    #[test]
+    fn a_v0_4_manifest_round_trips_through_serde_with_its_hash_intact() {
+        let manifest = sample_builder().chain(sample_link(7)).build().unwrap();
+        let text = manifest.to_canonical_json();
+        let parsed: AirlockManifest = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, manifest);
+        assert_eq!(
+            parsed.hash(),
+            manifest.hash(),
+            "the gate re-hashes the parsed struct, so the chain member must survive parsing"
+        );
     }
 
     /// A v0.2 manifest on disk must keep its bytes and its hash after a read and re-serialize

@@ -24,6 +24,8 @@ use airlock::adapter::{
     Adapter, AnthropicMessagesAdapter, OpenAiResponsesAdapter, TransportConfig,
 };
 use airlock::hash::{blake3_hash, jcs_blake3_hash};
+use airlock::manifest::AirlockManifest;
+use airlock::output::canonical_json_bytes;
 use assert_cmd::Command;
 use jsonschema::validator_for;
 use serde_json::{Value, json};
@@ -77,8 +79,9 @@ fn text_pointer(adapter: &str) -> &'static str {
     }
 }
 
-/// A receipt as `airlock gate` writes one for an admitted, forwarded, 200 exchange.
-fn receipt_for(response: &[u8]) -> Value {
+/// A receipt as `airlock gate` writes one for an admitted, forwarded, 200 exchange that matched
+/// the manifest whose hash is `matched_manifest_hash`.
+fn receipt_for(response: &[u8], matched_manifest_hash: &str) -> Value {
     json!({
         "gate_version": "airlock.gate.v1",
         "mode": "strict-manifest",
@@ -89,8 +92,15 @@ fn receipt_for(response: &[u8]) -> Value {
         "blocked": false,
         "findings": [],
         "timestamp": "2026-11-25T00:00:00Z",
-        "matched_manifest_hash": blake3_hash(b"fixture prior manifest"),
+        "matched_manifest_hash": matched_manifest_hash,
     })
+}
+
+/// A manifest's hash as the gate computes it: the canonical JSON of the parsed manifest.
+fn manifest_hash(path: &Path) -> String {
+    serde_json::from_slice::<AirlockManifest>(&fs::read(path).expect("read manifest"))
+        .unwrap_or_else(|error| panic!("parse manifest {}: {error}", path.display()))
+        .hash()
 }
 
 /// What `verify` said about one turn.
@@ -109,6 +119,8 @@ struct Chain {
     adapter: String,
     response: PathBuf,
     receipt: PathBuf,
+    /// The manifest of the earlier turn; the receipt's matched_manifest_hash is its hash.
+    prior_manifest: PathBuf,
     /// Raw `--tool-result` values, `TOOL_USE_ID=PATH`.
     tool_results: Vec<String>,
 }
@@ -162,14 +174,34 @@ impl Work {
         self.write(name, text.as_bytes())
     }
 
+    /// A real turn-0 manifest: assemble and verify with no chain under the baseline policy.
+    /// Returns its path.
+    fn turn_zero(&self, stem: &str) -> PathBuf {
+        let policy = self.policy(&format!("{stem}.policy.yaml"), "");
+        let assembled = self.assemble(&policy, "TELEMETRY_ONLY", stem, None);
+        assert_eq!(
+            assembled.output.status.code(),
+            Some(0),
+            "turn 0 assemble refused: {}",
+            String::from_utf8_lossy(&assembled.output.stdout)
+        );
+        let observed = self.verify(&policy, &assembled, stem);
+        assert_eq!(observed.exit, 0, "turn 0 must verify: {observed:?}");
+        self.path(&format!("{stem}.manifest.json"))
+    }
+
+    /// A chain whose prior turn is a real manifest and whose receipt names exactly that manifest.
     fn chain(&self, adapter: &str, response: &[u8], stem: &str) -> Chain {
+        let prior_manifest = self.turn_zero(&format!("{stem}.turn0"));
         Chain {
             adapter: adapter.to_owned(),
             response: self.write(&format!("{stem}.response.json"), response),
             receipt: self.write(
                 &format!("{stem}.receipt.json"),
-                &serde_json::to_vec(&receipt_for(response)).expect("serialize receipt"),
+                &serde_json::to_vec(&receipt_for(response, &manifest_hash(&prior_manifest)))
+                    .expect("serialize receipt"),
             ),
+            prior_manifest,
             tool_results: Vec::new(),
         }
     }
@@ -196,7 +228,9 @@ impl Work {
                 .arg(&chain.receipt)
                 .arg("--response")
                 .arg(&chain.response)
-                .args(["--response-adapter", &chain.adapter]);
+                .args(["--response-adapter", &chain.adapter])
+                .arg("--prior-manifest")
+                .arg(&chain.prior_manifest);
             for spec in &chain.tool_results {
                 command.args(["--tool-result", spec]);
             }
@@ -671,22 +705,36 @@ fn a_streamed_body_and_an_adapter_without_an_unwrapper_are_refused() {
 }
 
 #[test]
-fn the_three_chain_flags_come_only_together() {
+fn the_four_chain_flags_come_only_together() {
+    // al-210 D-c added --prior-manifest to what D-a called "the three chain flags" (named in the
+    // evidence): each flag alone, and every set missing exactly one, must be refused.
     let work = Work::new();
     let response = response_bytes(OPENAI, |_| {});
     let chain = work.chain(OPENAI, &response, "t");
     let policy = work.policy("p.yaml", "");
-    for flags in [
-        vec![
-            "--response".to_owned(),
-            chain.response.display().to_string(),
-        ],
-        vec![
-            "--prior-receipt".to_owned(),
-            chain.receipt.display().to_string(),
-        ],
-        vec!["--response-adapter".to_owned(), OPENAI.to_owned()],
-    ] {
+    let all = [
+        ("--prior-receipt", chain.receipt.display().to_string()),
+        ("--response", chain.response.display().to_string()),
+        ("--response-adapter", OPENAI.to_owned()),
+        (
+            "--prior-manifest",
+            chain.prior_manifest.display().to_string(),
+        ),
+    ];
+    let mut sets: Vec<Vec<String>> = Vec::new();
+    for (index, (flag, value)) in all.iter().enumerate() {
+        // The flag alone.
+        sets.push(vec![(*flag).to_owned(), value.clone()]);
+        // Every flag but this one.
+        sets.push(
+            all.iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .flat_map(|(_, (flag, value))| [(*flag).to_owned(), value.clone()])
+                .collect(),
+        );
+    }
+    for flags in sets {
         let prompt = work.path("lone.prompt.json");
         let output = Command::cargo_bin("airlock")
             .expect("airlock binary")
@@ -1189,6 +1237,7 @@ fn a_receipt_the_real_gate_wrote_anchors_the_chain() {
         adapter: ANTHROPIC.to_owned(),
         response: response_path,
         receipt: receipt_path,
+        prior_manifest: manifests.join("turn0.json"),
         tool_results: Vec::new(),
     };
     let turn1 = work.assemble(&policy, "TELEMETRY_ONLY", "turn1", Some(&chain));
@@ -1205,6 +1254,16 @@ fn a_receipt_the_real_gate_wrote_anchors_the_chain() {
             .filter(|record| record["boundary_class"] == "MODEL_OUTPUT")
             .all(|record| record["source_artifact_hash"] == receipt["response_hash"]),
         "every MODEL_OUTPUT record names the response hash the gate recorded"
+    );
+    // The hash `assemble` computed for the prior manifest is the one the real gate stamped into
+    // its receipt, so a chain link can be walked back to the receipt that anchors it.
+    assert_eq!(
+        read_json(&turn1.provenance)["chain"],
+        json!({
+            "prior_manifest_hash": receipt["matched_manifest_hash"],
+            "turn_index": 1,
+        }),
+        "the link names the manifest the real gate matched"
     );
     let observed = work.verify(&policy, &turn1, "turn1");
     assert_eq!(observed.claim, "STRICT_TELEMETRY_ONLY", "{observed:?}");
@@ -1850,6 +1909,7 @@ fn tool_result_comes_only_with_the_chain_flags() {
     let spec = format!("{}={}", call_id(OPENAI), artifact.display());
     let receipt = chain.receipt.display().to_string();
     let response_path = chain.response.display().to_string();
+    let prior_manifest = chain.prior_manifest.display().to_string();
     for (label, flags) in [
         ("alone", vec!["--tool-result", spec.as_str()]),
         (
@@ -1861,6 +1921,21 @@ fn tool_result_comes_only_with_the_chain_flags() {
                 receipt.as_str(),
                 "--response",
                 response_path.as_str(),
+                "--prior-manifest",
+                prior_manifest.as_str(),
+            ],
+        ),
+        (
+            "without the prior manifest",
+            vec![
+                "--tool-result",
+                spec.as_str(),
+                "--prior-receipt",
+                receipt.as_str(),
+                "--response",
+                response_path.as_str(),
+                "--response-adapter",
+                OPENAI,
             ],
         ),
     ] {
@@ -1941,8 +2016,16 @@ fn tool_results_follow_the_responses_order_not_the_flag_order() {
 
         let mut forward = work.chain(adapter, &response, "fwd");
         forward.tool_results = vec![first_spec.clone(), second_spec.clone()];
-        let mut reverse = work.chain(adapter, &response, "rev");
-        reverse.tool_results = vec![second_spec, first_spec];
+        // The same prior turn (same receipt, same manifest), so only the flag order differs. A
+        // second `work.chain` would write its own turn-0 manifest, which carries a timestamp, and
+        // the link to it would legitimately differ.
+        let reverse = Chain {
+            adapter: forward.adapter.clone(),
+            response: forward.response.clone(),
+            receipt: forward.receipt.clone(),
+            prior_manifest: forward.prior_manifest.clone(),
+            tool_results: vec![second_spec, first_spec],
+        };
 
         let a = work.assemble_chain(&policy, "fwd", &forward);
         let b = work.assemble_chain(&policy, "rev", &reverse);
@@ -2059,4 +2142,718 @@ fn the_adapters_restore_a_prompt_that_carries_tool_results_exactly() {
             "{adapter}: binding compares these, so they must be identical, newline and é included"
         );
     }
+}
+
+// --- chain manifests (al-210 D-c) -----------------------------------------------------------
+
+fn manifest_schema() -> jsonschema::Validator {
+    validator_for(&read_json(&repo("schemas/airlock.v0.schema.json")))
+        .expect("compile the manifest schema")
+}
+
+/// Assemble one chained turn and verify it (unsigned), requiring both to succeed. Returns the
+/// chain it followed, the assembled files and the path of the manifest `verify` wrote.
+fn chained_turn(work: &Work, adapter: &str, stem: &str) -> (Chain, Assembled, PathBuf) {
+    let policy = work.policy(&format!("{stem}.policy.yaml"), ALL_PACKS);
+    let chain = work.chain(adapter, &response_bytes(adapter, |_| {}), stem);
+    let assembled = work.assemble_chain(&policy, stem, &chain);
+    let observed = work.verify(&policy, &assembled, stem);
+    assert_eq!(observed.exit, 0, "{adapter}: {observed:?}");
+    let manifest = work.path(&format!("{stem}.manifest.json"));
+    (chain, assembled, manifest)
+}
+
+/// `verify` with its whole output kept: the process output and where the manifest would be.
+fn verify_raw(
+    work: &Work,
+    policy: &Path,
+    prompt: &Path,
+    provenance: &Path,
+    stem: &str,
+) -> (Output, PathBuf) {
+    let request = json!({"model": "gpt-5", "messages": read_json(prompt)["messages"].clone()});
+    let request_path = work.write(
+        &format!("{stem}.request.json"),
+        &serde_json::to_vec(&request).expect("serialize request"),
+    );
+    let manifest = work.path(&format!("{stem}.manifest.json"));
+    let output = Command::cargo_bin("airlock")
+        .expect("airlock binary")
+        .args(["verify", "--no-sign", "--no-witness", "--policy"])
+        .arg(policy)
+        .arg("--prompt")
+        .arg(prompt)
+        .arg("--provenance")
+        .arg(provenance)
+        .arg("--request")
+        .arg(&request_path)
+        .arg("--out")
+        .arg(&manifest)
+        .output()
+        .expect("run verify");
+    (output, manifest)
+}
+
+fn stdout_refusal(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).unwrap_or(Value::Null)
+}
+
+#[test]
+fn a_chained_turn_writes_a_v0_4_manifest_naming_the_manifest_the_receipt_matched() {
+    for adapter in ADAPTERS {
+        let work = Work::new();
+        let (chain, assembled, manifest_path) = chained_turn(&work, adapter, "t");
+
+        // Turn 0 is the manifest verify has always written: v0.3, no chain member.
+        let prior = read_json(&chain.prior_manifest);
+        assert_eq!(prior["manifest_version"], "airlock.v0.3", "{adapter}");
+        assert!(prior.get("chain").is_none(), "{adapter}");
+
+        let expected = json!({
+            "prior_manifest_hash": manifest_hash(&chain.prior_manifest),
+            "turn_index": 1,
+        });
+        assert_eq!(
+            read_json(&chain.receipt)["matched_manifest_hash"],
+            expected["prior_manifest_hash"],
+            "{adapter}: the receipt names the manifest the link names"
+        );
+        let provenance = read_json(&assembled.provenance);
+        assert_eq!(provenance["chain"], expected, "{adapter}");
+        let manifest = read_json(&manifest_path);
+        assert_eq!(manifest["manifest_version"], "airlock.v0.4", "{adapter}");
+        assert_eq!(manifest["chain"], expected, "{adapter}");
+        for member in ["bytes_crossed", "attestation", "prompt_provenance_hash"] {
+            assert!(
+                manifest.get(member).is_some(),
+                "{adapter}: v0.4 keeps {member}"
+            );
+        }
+
+        // The manifest's provenance hash covers the link: it is the hash of the provenance with
+        // the member in it, and not the hash of the provenance without it.
+        let hash_of = |value: &Value| blake3_hash(&canonical_json_bytes(value));
+        let mut without = provenance.clone();
+        without.as_object_mut().expect("object").remove("chain");
+        assert_eq!(
+            manifest["prompt_provenance_hash"],
+            hash_of(&provenance).as_str(),
+            "{adapter}"
+        );
+        assert_ne!(
+            manifest["prompt_provenance_hash"],
+            hash_of(&without).as_str(),
+            "{adapter}"
+        );
+
+        manifest_schema()
+            .validate(&manifest)
+            .unwrap_or_else(|error| panic!("{adapter}: manifest fails its schema: {error}"));
+        provenance_schema()
+            .validate(&provenance)
+            .unwrap_or_else(|error| panic!("{adapter}: provenance fails its schema: {error}"));
+    }
+}
+
+#[test]
+fn the_next_turn_is_index_two_and_a_v0_2_or_v0_3_manifest_can_anchor_turn_one() {
+    for adapter in ADAPTERS {
+        let work = Work::new();
+        let (_, _, one) = chained_turn(&work, adapter, "one");
+        let response = response_bytes(adapter, |_| {});
+        let policy = work.policy("two.policy.yaml", ALL_PACKS);
+        let chain_after = |prior: &Path, stem: &str| Chain {
+            adapter: adapter.to_owned(),
+            response: work.write(&format!("{stem}.response.json"), &response),
+            receipt: work.write(
+                &format!("{stem}.receipt.json"),
+                &serde_json::to_vec(&receipt_for(&response, &manifest_hash(prior)))
+                    .expect("serialize receipt"),
+            ),
+            prior_manifest: prior.to_path_buf(),
+            tool_results: Vec::new(),
+        };
+
+        // A turn that follows a chained (v0.4) manifest is one further along, and names that
+        // manifest rather than the turn-0 one before it.
+        let chain = chain_after(&one, "two");
+        let assembled = work.assemble_chain(&policy, "two", &chain);
+        let observed = work.verify(&policy, &assembled, "two");
+        assert_eq!(observed.exit, 0, "{adapter}: {observed:?}");
+        let manifest = read_json(&work.path("two.manifest.json"));
+        assert_eq!(manifest["manifest_version"], "airlock.v0.4", "{adapter}");
+        assert_eq!(
+            manifest["chain"],
+            json!({"prior_manifest_hash": manifest_hash(&one), "turn_index": 2}),
+            "{adapter}"
+        );
+        assert_ne!(
+            manifest["chain"]["prior_manifest_hash"],
+            read_json(&one)["chain"]["prior_manifest_hash"],
+            "{adapter}: turn 2 names turn 1's manifest, not turn 0's"
+        );
+
+        // Manifests written before v0.4 can still start a chain.
+        for golden in ["expected_manifest.json", "expected_manifest_v0_3.json"] {
+            let prior = repo(&format!("fixtures/clean_telemetry_only/{golden}"));
+            let chain = chain_after(&prior, &format!("legacy-{golden}"));
+            let assembled = work.assemble_chain(&policy, &format!("legacy-{golden}"), &chain);
+            assert_eq!(
+                read_json(&assembled.provenance)["chain"],
+                json!({"prior_manifest_hash": manifest_hash(&prior), "turn_index": 1}),
+                "{adapter} {golden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_prompt_with_no_prior_turn_still_gets_a_v0_3_manifest_and_provenance_with_no_chain_key() {
+    let work = Work::new();
+    let policy = work.policy("p.yaml", ALL_PACKS);
+    let plain = work.assemble(&policy, "TELEMETRY_ONLY", "plain", None);
+    assert_eq!(plain.output.status.code(), Some(0));
+    let provenance = read_json(&plain.provenance);
+    assert!(
+        provenance.get("chain").is_none(),
+        "no chain key at all, not a null one: {provenance}"
+    );
+    let observed = work.verify(&policy, &plain, "plain");
+    assert_eq!(observed.exit, 0, "{observed:?}");
+    let manifest = read_json(&work.path("plain.manifest.json"));
+    assert_eq!(manifest["manifest_version"], "airlock.v0.3");
+    assert!(manifest.get("chain").is_none());
+    manifest_schema()
+        .validate(&manifest)
+        .unwrap_or_else(|error| panic!("a v0.3 manifest fails its schema: {error}"));
+}
+
+#[test]
+fn a_receipt_paired_with_the_wrong_manifest_is_refused_before_anything_is_written() {
+    for adapter in ADAPTERS {
+        let work = Work::new();
+        let policy = work.policy("p.yaml", ALL_PACKS);
+        let mut chain = work.chain(adapter, &response_bytes(adapter, |_| {}), "t");
+        let intended = manifest_hash(&chain.prior_manifest);
+        // A different real manifest: same shape, different files, so a different hash.
+        chain.prior_manifest = work.turn_zero("other");
+        let other = manifest_hash(&chain.prior_manifest);
+        assert_ne!(intended, other, "{adapter}: the two manifests must differ");
+
+        let assembled = work.assemble(&policy, "TELEMETRY_ONLY", "t", Some(&chain));
+        assert_eq!(assembled.output.status.code(), Some(2), "{adapter}");
+        let refusal = assembled.refusal();
+        assert_eq!(refusal["refusal"]["code"], "E_BAD_INPUT", "{adapter}");
+        let detail = &refusal["refusal"]["detail"];
+        assert_eq!(detail["field"], "prior_manifest.hash", "{adapter}");
+        assert_eq!(
+            detail["receipt_matched_manifest_hash"],
+            intended.as_str(),
+            "{adapter}"
+        );
+        assert_eq!(detail["manifest_hash"], other.as_str(), "{adapter}");
+        assert!(
+            !assembled.prompt.exists() && !assembled.provenance.exists(),
+            "{adapter}: nothing is written"
+        );
+    }
+}
+
+#[test]
+fn a_prior_manifest_that_cannot_anchor_a_chain_is_refused_by_field() {
+    type Edit = fn(&mut Value);
+    let edits: [(&str, Edit); 3] = [
+        ("prior_manifest.manifest_version", |m| {
+            m["manifest_version"] = json!("airlock.v0.5");
+        }),
+        // v0.4 without its chain member.
+        ("prior_manifest.chain", |m| {
+            m["manifest_version"] = json!("airlock.v0.4");
+        }),
+        // A chain member on a version that may not carry one.
+        ("prior_manifest.chain", |m| {
+            m["chain"] = json!({
+                "prior_manifest_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+                "turn_index": 1,
+            });
+        }),
+    ];
+    let work = Work::new();
+    let policy = work.policy("p.yaml", ALL_PACKS);
+    let mut cases: Vec<(String, &str, Vec<u8>)> = vec![
+        ("not JSON".to_owned(), "prior_manifest", b"nope".to_vec()),
+        (
+            "an empty object".to_owned(),
+            "prior_manifest",
+            b"{}".to_vec(),
+        ),
+    ];
+    let chain = work.chain(OPENAI, &response_bytes(OPENAI, |_| {}), "t");
+    for (index, (field, edit)) in edits.iter().enumerate() {
+        let mut manifest = read_json(&chain.prior_manifest);
+        edit(&mut manifest);
+        cases.push((
+            format!("edit {index}"),
+            field,
+            serde_json::to_vec(&manifest).expect("serialize"),
+        ));
+    }
+    for (label, field, bytes) in cases {
+        let mut chain = work.chain(OPENAI, &response_bytes(OPENAI, |_| {}), "t");
+        chain.prior_manifest = work.write("bad.manifest.json", &bytes);
+        let assembled = work.assemble(&policy, "TELEMETRY_ONLY", "t", Some(&chain));
+        assert_eq!(assembled.output.status.code(), Some(2), "{label}");
+        let refusal = assembled.refusal();
+        assert_eq!(refusal["refusal"]["code"], "E_BAD_INPUT", "{label}");
+        assert_eq!(refusal["refusal"]["detail"]["field"], field, "{label}");
+        assert!(!assembled.prompt.exists(), "{label}: nothing is written");
+    }
+
+    let mut missing = work.chain(OPENAI, &response_bytes(OPENAI, |_| {}), "t");
+    missing.prior_manifest = work.path("no-such-manifest.json");
+    let assembled = work.assemble(&policy, "TELEMETRY_ONLY", "t", Some(&missing));
+    assert_eq!(assembled.output.status.code(), Some(2));
+    assert_eq!(assembled.refusal()["refusal"]["code"], "E_MISSING_FILE");
+}
+
+#[test]
+fn verify_refuses_a_provenance_that_disagrees_with_the_prompt_about_the_chain() {
+    type Edit = fn(&mut Value);
+    for adapter in ADAPTERS {
+        let work = Work::new();
+        let policy = work.policy("p.yaml", ALL_PACKS);
+        let chain = work.chain(adapter, &response_bytes(adapter, |_| {}), "c");
+        let chained = work.assemble_chain(&policy, "c", &chain);
+        let plain = work.assemble(&policy, "TELEMETRY_ONLY", "plain", None);
+        assert_eq!(plain.output.status.code(), Some(0), "{adapter}");
+
+        let cases: [(&str, &Assembled, Edit, Option<&str>); 5] = [
+            (
+                "a chained prompt whose link was removed",
+                &chained,
+                |p| {
+                    p.as_object_mut().expect("object").remove("chain");
+                },
+                Some("has no chain link"),
+            ),
+            (
+                "a prompt with no prior turn that gained a link",
+                &plain,
+                |p| {
+                    p["chain"] = json!({
+                        "prior_manifest_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+                        "turn_index": 1,
+                    });
+                },
+                Some("has no prior_turn"),
+            ),
+            (
+                "a link with index 0",
+                &chained,
+                |p| p["chain"]["turn_index"] = json!(0),
+                Some("chain link is invalid"),
+            ),
+            (
+                "a link with an uppercase hash",
+                &chained,
+                |p| {
+                    let upper = p["chain"]["prior_manifest_hash"]
+                        .as_str()
+                        .expect("hash")
+                        .to_uppercase();
+                    p["chain"]["prior_manifest_hash"] = json!(upper);
+                },
+                Some("chain link is invalid"),
+            ),
+            (
+                "a link with a member it does not have",
+                &chained,
+                |p| {
+                    p["chain"]["response_hash"] = json!(
+                        "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+                    );
+                },
+                None,
+            ),
+        ];
+        for (index, (label, assembled, edit, message)) in cases.iter().enumerate() {
+            let mut provenance = read_json(&assembled.provenance);
+            edit(&mut provenance);
+            let provenance_path = work.write(
+                &format!("case{index}.provenance.json"),
+                &serde_json::to_vec(&provenance).expect("serialize"),
+            );
+            let (output, manifest) = verify_raw(
+                &work,
+                &policy,
+                &assembled.prompt,
+                &provenance_path,
+                &format!("case{index}"),
+            );
+            assert_eq!(output.status.code(), Some(2), "{adapter} {label}");
+            assert!(
+                !manifest.exists(),
+                "{adapter} {label}: no manifest is written on refusal"
+            );
+            if let Some(message) = message {
+                let refusal = stdout_refusal(&output);
+                assert_eq!(
+                    refusal["refusal"]["code"], "E_BAD_PROVENANCE",
+                    "{adapter} {label}"
+                );
+                assert!(
+                    refusal["refusal"]["message"]
+                        .as_str()
+                        .is_some_and(|text| text.contains(message)),
+                    "{adapter} {label}: {refusal}"
+                );
+            }
+        }
+    }
+}
+
+fn airlock_with_home(home: &Path) -> Command {
+    let mut command = Command::cargo_bin("airlock").expect("airlock binary");
+    command.env("HOME", home).env_remove("USERPROFILE");
+    command
+}
+
+#[test]
+fn the_signature_covers_the_chain_member_and_a_downgrade_to_v0_3_fails() {
+    type Edit = fn(&mut Value);
+    let work = Work::new();
+    let home = tempdir().expect("home");
+    let keygen = airlock_with_home(home.path())
+        .arg("keygen")
+        .output()
+        .expect("keygen");
+    assert_eq!(keygen.status.code(), Some(0), "keygen must succeed");
+
+    let policy = work.policy("p.yaml", ALL_PACKS);
+    let chain = work.chain(OPENAI, &response_bytes(OPENAI, |_| {}), "s");
+    let assembled = work.assemble_chain(&policy, "s", &chain);
+    let request = json!({
+        "model": "gpt-5",
+        "messages": read_json(&assembled.prompt)["messages"].clone(),
+    });
+    let request_path = work.write(
+        "s.request.json",
+        &serde_json::to_vec(&request).expect("serialize"),
+    );
+    let signed = work.path("s.signed.manifest.json");
+    let verified = airlock_with_home(home.path())
+        .args(["verify", "--no-witness", "--policy"])
+        .arg(&policy)
+        .arg("--prompt")
+        .arg(&assembled.prompt)
+        .arg("--provenance")
+        .arg(&assembled.provenance)
+        .arg("--request")
+        .arg(&request_path)
+        .arg("--out")
+        .arg(&signed)
+        .output()
+        .expect("run signing verify");
+    assert_eq!(
+        verified.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&verified.stdout)
+    );
+    let manifest = read_json(&signed);
+    assert_eq!(manifest["manifest_version"], "airlock.v0.4");
+    assert!(
+        manifest.get("signature").is_some(),
+        "verify signs by default"
+    );
+
+    let check = |path: &Path| {
+        airlock_with_home(home.path())
+            .arg("verify-manifest")
+            .arg(path)
+            .output()
+            .expect("run verify-manifest")
+    };
+    let intact = check(&signed);
+    assert_eq!(
+        intact.status.code(),
+        Some(0),
+        "a signed v0.4 manifest verifies: {}",
+        String::from_utf8_lossy(&intact.stdout)
+    );
+
+    let edits: [(&str, Edit); 4] = [
+        ("turn_index changed", |m| {
+            m["chain"]["turn_index"] = json!(2)
+        }),
+        ("prior_manifest_hash changed", |m| {
+            m["chain"]["prior_manifest_hash"] =
+                json!("blake3:0000000000000000000000000000000000000000000000000000000000000000");
+        }),
+        ("chain removed", |m| {
+            m.as_object_mut().expect("object").remove("chain");
+        }),
+        ("downgraded to v0.3 with the chain stripped", |m| {
+            m["manifest_version"] = json!("airlock.v0.3");
+            m.as_object_mut().expect("object").remove("chain");
+        }),
+    ];
+    for (index, (label, edit)) in edits.iter().enumerate() {
+        let mut altered = manifest.clone();
+        edit(&mut altered);
+        let path = work.write(
+            &format!("altered{index}.manifest.json"),
+            &serde_json::to_vec(&altered).expect("serialize"),
+        );
+        let output = check(&path);
+        assert_eq!(output.status.code(), Some(2), "{label}");
+        assert_eq!(
+            stdout_refusal(&output)["refusal"]["detail"]["reason"],
+            "signature_mismatch",
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn the_schemas_agree_with_the_loader_about_chain_members() {
+    let work = Work::new();
+    let (_, assembled, manifest_path) = chained_turn(&work, OPENAI, "t");
+    let manifests = manifest_schema();
+    let provenances = provenance_schema();
+    let manifest = read_json(&manifest_path);
+    let provenance = read_json(&assembled.provenance);
+    assert!(manifests.is_valid(&manifest));
+    assert!(provenances.is_valid(&provenance));
+
+    type Edit = fn(&mut Value);
+    let bad_manifests: [(&str, Edit); 7] = [
+        ("v0.4 without its chain member", |m| {
+            m.as_object_mut().expect("object").remove("chain");
+        }),
+        ("v0.3 with a chain member", |m| {
+            m["manifest_version"] = json!("airlock.v0.3");
+        }),
+        ("v0.2 with a chain member", |m| {
+            m["manifest_version"] = json!("airlock.v0.2");
+        }),
+        ("a chain with index 0", |m| {
+            m["chain"]["turn_index"] = json!(0)
+        }),
+        ("a chain with a fractional index", |m| {
+            m["chain"]["turn_index"] = json!(1.5);
+        }),
+        ("a chain with an uppercase hash", |m| {
+            let upper = m["chain"]["prior_manifest_hash"]
+                .as_str()
+                .expect("hash")
+                .to_uppercase();
+            m["chain"]["prior_manifest_hash"] = json!(upper);
+        }),
+        ("a chain with an extra member", |m| {
+            m["chain"]["response_hash"] =
+                json!("blake3:0000000000000000000000000000000000000000000000000000000000000000");
+        }),
+    ];
+    for (label, edit) in bad_manifests {
+        let mut altered = manifest.clone();
+        edit(&mut altered);
+        assert!(
+            !manifests.is_valid(&altered),
+            "the schema must reject {label}"
+        );
+    }
+
+    let bad_provenances: [(&str, Edit); 4] = [
+        ("index 0", |p| p["chain"]["turn_index"] = json!(0)),
+        ("a short hash", |p| {
+            p["chain"]["prior_manifest_hash"] = json!("blake3:abc");
+        }),
+        ("an extra member", |p| p["chain"]["note"] = json!("x")),
+        ("a missing index", |p| {
+            p["chain"]
+                .as_object_mut()
+                .expect("object")
+                .remove("turn_index");
+        }),
+    ];
+    for (label, edit) in bad_provenances {
+        let mut altered = provenance.clone();
+        edit(&mut altered);
+        assert!(
+            !provenances.is_valid(&altered),
+            "the provenance schema must reject a chain with {label}"
+        );
+    }
+}
+
+#[test]
+fn explain_reports_the_chain_in_text_and_json_and_says_nothing_for_other_versions() {
+    let work = Work::new();
+    let (chain, _, manifest_path) = chained_turn(&work, ANTHROPIC, "t");
+    let link = read_json(&manifest_path)["chain"].clone();
+    let hash = link["prior_manifest_hash"]
+        .as_str()
+        .expect("hash")
+        .to_owned();
+
+    let explain = |path: &Path, json: bool| {
+        let mut command = Command::cargo_bin("airlock").expect("airlock binary");
+        command.args(["explain", "--manifest"]).arg(path);
+        if json {
+            command.arg("--json");
+        }
+        let output = command.output().expect("run explain");
+        assert_eq!(output.status.code(), Some(0), "explain must succeed");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    let text = explain(&manifest_path, false);
+    assert!(
+        text.contains("Chain: turn 1") && text.contains(&hash),
+        "{text}"
+    );
+    let json: Value = serde_json::from_str(&explain(&manifest_path, true)).expect("explain json");
+    assert_eq!(json["chain"], link);
+
+    // A manifest with no chain member explains exactly as before: no line, no key.
+    let prior_text = explain(&chain.prior_manifest, false);
+    assert!(!prior_text.contains("Chain:"), "{prior_text}");
+    let prior_json: Value =
+        serde_json::from_str(&explain(&chain.prior_manifest, true)).expect("explain json");
+    assert!(prior_json.get("chain").is_none(), "{prior_json}");
+}
+
+/// One request through a real strict-manifest gate in front of an origin that answers `reply`:
+/// the receipt the gate wrote (path and contents) and the bytes the client got back.
+fn exchange_through_gate(
+    work: &Work,
+    stem: &str,
+    manifests: &Path,
+    request: &[u8],
+    reply: &[u8],
+) -> (PathBuf, Value, Vec<u8>) {
+    let origin = start_origin(reply.to_vec());
+    let receipts = work.path(&format!("{stem}.receipts"));
+    let gate = start_strict_gate(
+        origin.address,
+        manifests,
+        &receipts,
+        &work.path(&format!("{stem}.witness.jsonl")),
+    );
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let response = agent
+        .post(&format!("http://{}/v1/chat/completions", gate.address))
+        .header("Content-Type", "application/json")
+        .send(request.to_vec())
+        .expect("post through the gate");
+    assert_eq!(
+        response.status().as_u16(),
+        200,
+        "{stem}: the gate must forward the request its manifest matches"
+    );
+    let mut relayed = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .read_to_end(&mut relayed)
+        .expect("read relayed response");
+    assert_eq!(relayed, reply, "{stem}: the gate relays the origin's bytes");
+    let (path, receipt) = wait_for_forwarded_receipt(&receipts);
+    drop(gate);
+    (path, receipt, relayed)
+}
+
+#[test]
+fn a_three_turn_chain_runs_through_the_real_gate_with_v0_4_manifests() {
+    let work = Work::new();
+    let policy = work.policy("p.yaml", ALL_PACKS);
+    let manifests = work.path("manifests");
+    fs::create_dir(&manifests).expect("manifest dir");
+    let reply_text = |text: &'static str| {
+        response_bytes(ANTHROPIC, |reply| {
+            set(reply, text_pointer(ANTHROPIC), json!(text));
+        })
+    };
+
+    // Turn 0: no chain, so airlock.v0.3 as always.
+    let turn0 = work.assemble(&policy, "TELEMETRY_ONLY", "turn0", None);
+    assert_eq!(turn0.output.status.code(), Some(0));
+    let observed = work.verify(&policy, &turn0, "turn0");
+    assert_eq!(observed.exit, 0, "{observed:?}");
+    fs::copy(
+        work.path("turn0.manifest.json"),
+        manifests.join("turn0.json"),
+    )
+    .expect("copy turn 0 manifest");
+    let (receipt0_path, receipt0, relayed0) = exchange_through_gate(
+        &work,
+        "gate0",
+        &manifests,
+        &fs::read(work.path("turn0.request.json")).expect("turn 0 request"),
+        &reply_text("Reply to turn zero."),
+    );
+
+    // Turn 1 follows turn 0 and is airlock.v0.4.
+    let chain1 = Chain {
+        adapter: ANTHROPIC.to_owned(),
+        response: work.write("turn0.response.json", &relayed0),
+        receipt: receipt0_path,
+        prior_manifest: manifests.join("turn0.json"),
+        tool_results: Vec::new(),
+    };
+    let turn1 = work.assemble_chain(&policy, "turn1", &chain1);
+    let observed = work.verify(&policy, &turn1, "turn1");
+    assert_eq!(observed.claim, "STRICT_TELEMETRY_ONLY", "{observed:?}");
+    let manifest1 = read_json(&work.path("turn1.manifest.json"));
+    assert_eq!(manifest1["manifest_version"], "airlock.v0.4");
+    assert_eq!(
+        manifest1["chain"],
+        json!({"prior_manifest_hash": receipt0["matched_manifest_hash"], "turn_index": 1})
+    );
+
+    // The gate starts with a v0.4 manifest in its directory and forwards the request it matches.
+    fs::copy(
+        work.path("turn1.manifest.json"),
+        manifests.join("turn1.json"),
+    )
+    .expect("copy turn 1 manifest");
+    let (receipt1_path, receipt1, relayed1) = exchange_through_gate(
+        &work,
+        "gate1",
+        &manifests,
+        &fs::read(work.path("turn1.request.json")).expect("turn 1 request"),
+        &reply_text("Reply to turn one."),
+    );
+    assert_eq!(
+        receipt1["matched_manifest_hash"],
+        manifest_hash(&manifests.join("turn1.json")).as_str(),
+        "the gate and the library hash a v0.4 manifest the same way, chain member included"
+    );
+
+    // Turn 2 follows turn 1.
+    let chain2 = Chain {
+        adapter: ANTHROPIC.to_owned(),
+        response: work.write("turn1.response.json", &relayed1),
+        receipt: receipt1_path,
+        prior_manifest: manifests.join("turn1.json"),
+        tool_results: Vec::new(),
+    };
+    let turn2 = work.assemble_chain(&policy, "turn2", &chain2);
+    let observed = work.verify(&policy, &turn2, "turn2");
+    assert_eq!(observed.claim, "STRICT_TELEMETRY_ONLY", "{observed:?}");
+    let manifest2 = read_json(&work.path("turn2.manifest.json"));
+    assert_eq!(manifest2["manifest_version"], "airlock.v0.4");
+    assert_eq!(
+        manifest2["chain"],
+        json!({"prior_manifest_hash": receipt1["matched_manifest_hash"], "turn_index": 2})
+    );
+    assert_ne!(
+        manifest2["chain"]["prior_manifest_hash"], manifest1["chain"]["prior_manifest_hash"],
+        "each link names its own prior manifest"
+    );
 }

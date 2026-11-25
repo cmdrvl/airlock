@@ -7,7 +7,7 @@ use crate::adapter::{ResponsePart, unwrap_response};
 use crate::assembler::{
     self, InputArtifact, NotCrossedInventory, PriorTurn, PromptProvenance, ToolResultArtifact,
 };
-use crate::chain::check_receipt;
+use crate::chain::{ChainLink, check_receipt, link_to_prior_manifest};
 use crate::cli::{AssembleArgs, VERIFY_PASS};
 use crate::hash::{blake3_hash, jcs};
 use crate::policy::{hash_policy, load_policy};
@@ -204,6 +204,7 @@ struct LoadedPriorTurn {
     response_hash: String,
     parts: Vec<ResponsePart>,
     tool_results: Vec<ToolResultArtifact>,
+    link: ChainLink,
 }
 
 impl LoadedPriorTurn {
@@ -212,6 +213,7 @@ impl LoadedPriorTurn {
             response_hash: &self.response_hash,
             parts: &self.parts,
             tool_results: &self.tool_results,
+            link: &self.link,
         }
     }
 }
@@ -276,10 +278,11 @@ fn load_prior_turn(
     args: &AssembleArgs,
     witness_inputs: &mut Vec<WitnessInput>,
 ) -> Result<Option<LoadedPriorTurn>, RefusalEnvelope> {
-    let (Some(receipt_path), Some(response_path), Some(adapter_name)) = (
+    let (Some(receipt_path), Some(response_path), Some(adapter_name), Some(manifest_path)) = (
         args.prior_receipt.as_deref(),
         args.response.as_deref(),
         args.response_adapter.as_deref(),
+        args.prior_manifest.as_deref(),
     ) else {
         return Ok(None);
     };
@@ -305,6 +308,10 @@ fn load_prior_turn(
         )
     })?;
     let checked = check_receipt(&receipt, &response_bytes)?;
+    // The receipt names the prior manifest by hash; the manifest itself supplies the turn index,
+    // and a receipt paired with the wrong manifest is refused here, before anything crosses.
+    let prior_manifest_bytes = read(manifest_path, "prior manifest")?;
+    let link = link_to_prior_manifest(&checked.matched_manifest_hash, &prior_manifest_bytes)?;
 
     let response: Value = serde_json::from_slice(&response_bytes).map_err(|error| {
         RefusalEnvelope::bad_input(
@@ -323,11 +330,16 @@ fn load_prior_turn(
         response_path.display().to_string(),
         checked.response_hash.clone(),
     ));
+    witness_inputs.push(WitnessRecord::input(
+        manifest_path.display().to_string(),
+        blake3_hash(&prior_manifest_bytes),
+    ));
 
     Ok(Some(LoadedPriorTurn {
         response_hash: checked.response_hash,
         parts,
         tool_results,
+        link,
     }))
 }
 
@@ -436,6 +448,7 @@ claim_levels:
             prior_receipt: None,
             response: None,
             response_adapter: None,
+            prior_manifest: None,
             no_witness: false,
         }
     }

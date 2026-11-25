@@ -387,14 +387,23 @@ fn load_strict_manifests(
                 "strict-manifest directory contains an unsupported manifest version".to_owned(),
             );
         }
-        // v0.3 requires the fields v0.2 never had; the schema says so and the gate agrees.
-        if manifest.manifest_version == crate::manifest::AIRLOCK_MANIFEST_VERSION
+        // v0.3 and v0.4 require the fields v0.2 never had; the schema says so and the gate agrees.
+        if crate::manifest::has_v0_3_members(&manifest.manifest_version)
             && (manifest.bytes_crossed.is_none() || manifest.attestation.is_none())
         {
-            return Err(
-                "strict-manifest directory contains a v0.3 manifest without bytes_crossed and attestation"
-                    .to_owned(),
-            );
+            return Err(format!(
+                "strict-manifest directory contains a {} manifest without bytes_crossed and attestation",
+                manifest.manifest_version.trim_start_matches("airlock.")
+            ));
+        }
+        // A v0.4 manifest must carry a valid chain link and no other version may carry one. The
+        // gate re-hashes the parsed manifest to stamp matched_manifest_hash into receipts, so a
+        // member the loader accepted without checking would be a member nobody had verified.
+        if let Some(reason) = manifest.chain_shape_error() {
+            return Err(format!(
+                "strict-manifest directory contains a malformed {} manifest: {reason}",
+                manifest.manifest_version.trim_start_matches("airlock.")
+            ));
         }
         // A manifest that carries a signature is checked when a key is configured. An unsigned
         // one is accepted either way: a signature is never required.

@@ -338,6 +338,12 @@ fn json_explanation(manifest: &AirlockManifest, manifest_ref: &str) -> Value {
         if let Some(transmission) = &manifest.transmission {
             explanation["transmission"] = json!(transmission);
         }
+        // Only an airlock.v0.4 manifest carries a chain link. Left out, not null, for every
+        // other manifest, so their explanation is unchanged. explain reports the link; it does
+        // not follow it.
+        if let Some(chain) = &manifest.chain {
+            explanation["chain"] = json!(chain);
+        }
         explanation["not_crossed"] = json!(manifest.not_crossed);
         explanation["signature"] = match &manifest.signature {
             Some(signature) => json!({
@@ -512,6 +518,14 @@ fn render_v0_3_fields(output: &mut String, manifest: &AirlockManifest) {
     if let Some(attestation) = manifest.attestation {
         writeln!(output, "Attestation: {}", attestation_sentence(attestation)).unwrap();
     }
+    if let Some(chain) = &manifest.chain {
+        writeln!(
+            output,
+            "Chain: turn {} of a conversation; it follows the manifest with hash {} (explain reports the link and does not follow it)",
+            chain.turn_index, chain.prior_manifest_hash
+        )
+        .unwrap();
+    }
     if let Some(transmission) = &manifest.transmission {
         render_transmission(output, transmission);
     }
@@ -669,6 +683,7 @@ mod tests {
             not_crossed: None,
             transmission: None,
             signature: None,
+            chain: None,
         }
     }
 

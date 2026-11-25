@@ -1799,7 +1799,9 @@ fn gate_refuses_unsupported_versions_and_incomplete_v0_3_manifests_at_startup() 
     .unwrap();
 
     let mut future = v0_3.clone();
-    future["manifest_version"] = Value::from("airlock.v0.4");
+    // v0.4 is a supported version now (al-210 D-c), so the stand-in for a version this binary
+    // does not read moves to v0.5. The assertion is unchanged.
+    future["manifest_version"] = Value::from("airlock.v0.5");
     let mut without_bytes = v0_3.clone();
     without_bytes
         .as_object_mut()
@@ -1811,8 +1813,30 @@ fn gate_refuses_unsupported_versions_and_incomplete_v0_3_manifests_at_startup() 
         .unwrap()
         .remove("attestation");
 
+    // The chain member belongs to airlock.v0.4 and only to it (al-210 D-c): a manifest that
+    // says v0.4 without it, or says v0.3 with it, is not a manifest the gate will serve.
+    let link = serde_json::json!({
+        "prior_manifest_hash":
+            "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+        "turn_index": 1,
+    });
+    let mut v0_4_without_chain = v0_3.clone();
+    v0_4_without_chain["manifest_version"] = Value::from("airlock.v0.4");
+    let mut v0_3_with_chain = v0_3.clone();
+    v0_3_with_chain["chain"] = link.clone();
+    let mut v0_4_index_zero = v0_3.clone();
+    v0_4_index_zero["manifest_version"] = Value::from("airlock.v0.4");
+    v0_4_index_zero["chain"] = link;
+    v0_4_index_zero["chain"]["turn_index"] = Value::from(0);
+    let mut v0_4_without_bytes = v0_4_index_zero.clone();
+    v0_4_without_bytes["chain"]["turn_index"] = Value::from(1);
+    v0_4_without_bytes
+        .as_object_mut()
+        .unwrap()
+        .remove("bytes_crossed");
+
     for (label, manifest, expected) in [
-        ("airlock.v0.4", &future, "unsupported manifest version"),
+        ("airlock.v0.5", &future, "unsupported manifest version"),
         (
             "v0.3 without bytes_crossed",
             &without_bytes,
@@ -1822,6 +1846,22 @@ fn gate_refuses_unsupported_versions_and_incomplete_v0_3_manifests_at_startup() 
             "v0.3 without attestation",
             &without_attestation,
             "v0.3 manifest without bytes_crossed and attestation",
+        ),
+        (
+            "v0.4 without its chain member",
+            &v0_4_without_chain,
+            "must carry a chain member",
+        ),
+        (
+            "v0.3 with a chain member",
+            &v0_3_with_chain,
+            "only an airlock.v0.4 manifest may carry a chain member",
+        ),
+        ("v0.4 with turn_index 0", &v0_4_index_zero, "turn_index"),
+        (
+            "v0.4 without bytes_crossed",
+            &v0_4_without_bytes,
+            "v0.4 manifest without bytes_crossed and attestation",
         ),
     ] {
         let (code, stderr) = gate_startup_with_manifest(manifest);

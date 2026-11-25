@@ -201,29 +201,36 @@ pub struct AssembleArgs {
 
     #[arg(
         long = "prior-receipt",
-        requires_all = ["response", "response_adapter"],
+        requires_all = ["response", "response_adapter", "prior_manifest"],
         help = "Gate receipt (airlock.gate.v1) that recorded the earlier response. Its response_hash must equal the hash of --response, it must be an admitted 2xx exchange, and it must name a matched manifest. A receipt is unsigned JSON, so this link is only as strong as the file's custody"
     )]
     pub prior_receipt: Option<PathBuf>,
 
     #[arg(
         long,
-        requires_all = ["prior_receipt", "response_adapter"],
+        requires_all = ["prior_receipt", "response_adapter", "prior_manifest"],
         help = "Provider response body from the earlier turn, exactly as received (JSON, not a stream). Its text and tool calls enter the prompt as MODEL_OUTPUT under prior_turn"
     )]
     pub response: Option<PathBuf>,
 
     #[arg(
         long = "response-adapter",
-        requires_all = ["prior_receipt", "response"],
+        requires_all = ["prior_receipt", "response", "prior_manifest"],
         help = "Provider that produced --response: openai_responses or anthropic_messages"
     )]
     pub response_adapter: Option<String>,
 
     #[arg(
+        long = "prior-manifest",
+        requires_all = ["prior_receipt", "response", "response_adapter"],
+        help = "The manifest of the earlier turn. Its hash must equal the receipt's matched_manifest_hash, so a receipt paired with the wrong manifest is refused before anything is written. The new prompt's chain link records that hash and the next turn_index (1 after a manifest with no chain link); the manifest verify writes for it is airlock.v0.4"
+    )]
+    pub prior_manifest: Option<PathBuf>,
+
+    #[arg(
         long = "tool-result",
         value_name = "TOOL_USE_ID=PATH",
-        requires_all = ["prior_receipt", "response", "response_adapter"],
+        requires_all = ["prior_receipt", "response", "response_adapter", "prior_manifest"],
         help = "A tool result that answers a tool call in --response (repeatable). PATH is a UTF-8 text artifact, embedded verbatim. The strict claim needs the policy's declared_tool_results to list the blake3 hash of its exact bytes; an undeclared tool result is admitted but caps the claim at RAW_DOCUMENT_ABSENT"
     )]
     pub tool_result: Vec<String>,

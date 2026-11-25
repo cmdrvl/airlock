@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value, json};
 
 use crate::adapter::ResponsePart;
+use crate::chain::ChainLink;
 use crate::hash::blake3_hash;
 use crate::output::{canonical_json_bytes, sort_value};
 use crate::policy::AirlockPolicy;
@@ -74,6 +75,9 @@ pub struct PriorTurn<'a> {
     pub response_hash: &'a str,
     pub parts: &'a [ResponsePart],
     pub tool_results: &'a [ToolResultArtifact],
+    /// The turn this prompt follows. The assembler writes it into the provenance unchanged; the
+    /// caller derived it from the prior manifest the receipt matched.
+    pub link: &'a ChainLink,
 }
 
 pub fn assemble(
@@ -195,6 +199,10 @@ pub fn assemble_with_prior_turn(
         boundary_mode,
         records,
     );
+    let prompt_provenance = match prior_turn {
+        Some(turn) => prompt_provenance.with_chain(turn.link.clone()),
+        None => prompt_provenance,
+    };
 
     ensure_provenance_coverage(&prompt_payload, &prompt_provenance)?;
 

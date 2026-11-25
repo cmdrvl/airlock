@@ -18,7 +18,9 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde_json::{Value, json};
 
 use crate::hash::blake3_hash;
-use crate::manifest::{AIRLOCK_MANIFEST_VERSION, AirlockManifest, ManifestSignature};
+use crate::manifest::{
+    AIRLOCK_MANIFEST_VERSION, AIRLOCK_MANIFEST_VERSION_V0_4, AirlockManifest, ManifestSignature,
+};
 use crate::output::canonical_json_bytes;
 use crate::paths;
 use crate::refusal::RefusalEnvelope;
@@ -343,7 +345,7 @@ impl fmt::Display for SignatureFailure {
             Self::NotAnObject => write!(f, "the manifest is not a JSON object"),
             Self::UnsupportedVersion(version) => write!(
                 f,
-                "only {AIRLOCK_MANIFEST_VERSION} manifests carry a signature; this one is {version}"
+                "only {AIRLOCK_MANIFEST_VERSION} and {AIRLOCK_MANIFEST_VERSION_V0_4} manifests carry a signature; this one is {version}"
             ),
             Self::Unsigned => write!(f, "the manifest carries no signature"),
             Self::Malformed(why) => write!(f, "the manifest signature is malformed: {why}"),
@@ -376,7 +378,7 @@ pub fn verify_value(
 ) -> Result<VerifiedSignature, SignatureFailure> {
     let object = manifest.as_object().ok_or(SignatureFailure::NotAnObject)?;
     match object.get("manifest_version").and_then(Value::as_str) {
-        Some(AIRLOCK_MANIFEST_VERSION) => {}
+        Some(AIRLOCK_MANIFEST_VERSION | AIRLOCK_MANIFEST_VERSION_V0_4) => {}
         other => {
             return Err(SignatureFailure::UnsupportedVersion(
                 other.unwrap_or("(missing)").to_string(),

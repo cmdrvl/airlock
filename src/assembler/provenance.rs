@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::chain::ChainLink;
 use crate::hash::blake3_hash;
 use crate::output::{canonical_json, canonical_json_bytes};
 use crate::types::BoundaryMode;
@@ -52,6 +53,11 @@ pub struct PromptProvenance {
     pub prompt_payload_hash: String,
     pub boundary_mode: BoundaryMode,
     pub records: Vec<ProvenanceRecord>,
+    /// The turn this prompt follows, present exactly when `assemble` was given a prior turn.
+    /// `verify` and `send` copy it into the manifest. Skipped when absent, so the provenance
+    /// of a prompt with no earlier turn is byte-identical to what it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<ChainLink>,
 }
 
 impl PromptProvenance {
@@ -67,7 +73,14 @@ impl PromptProvenance {
             prompt_payload_hash: prompt_payload_hash.into(),
             boundary_mode,
             records,
+            chain: None,
         }
+    }
+
+    /// Record the turn this prompt follows.
+    pub fn with_chain(mut self, chain: ChainLink) -> Self {
+        self.chain = Some(chain);
+        self
     }
 
     /// Serialize this artifact as canonical JSON with recursively sorted keys.

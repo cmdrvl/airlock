@@ -10,7 +10,8 @@
       "type": "string",
       "enum": [
         "airlock.v0.2",
-        "airlock.v0.3"
+        "airlock.v0.3",
+        "airlock.v0.4"
       ]
     },
     "binding_status": {
@@ -122,6 +123,24 @@
     "transmission": {
       "$ref": "#/$defs/transmission"
     },
+    "chain": {
+      "description": "airlock.v0.4 only, and required there. The turn this manifest follows, copied from the prompt provenance assemble wrote. A manifest with no chain member is turn 0 and is airlock.v0.3. prior_manifest_hash is the hash of the prior turn's manifest as the gate computes it (the canonical JSON of the parsed manifest, signature included); turn_index is 1 after a manifest with no chain member and one more than the prior manifest's index after that.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prior_manifest_hash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "turn_index": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "prior_manifest_hash",
+        "turn_index"
+      ]
+    },
     "signature": {
       "description": "airlock.v0.3 and later, absent when verify ran with --no-sign. Ed25519 signature over the canonical JSON of this manifest with the signature member removed. The public key is not embedded: public_key_fingerprint names the signer and `airlock verify-manifest` is given the key.",
       "type": "object",
@@ -147,10 +166,35 @@
   },
   "allOf": [
     {
+      "description": "A v0.4 manifest carries a chain member; no other version may.",
       "if": {
         "properties": {
           "manifest_version": {
-            "const": "airlock.v0.3"
+            "const": "airlock.v0.4"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "chain"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "chain"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "manifest_version": {
+            "enum": [
+              "airlock.v0.3",
+              "airlock.v0.4"
+            ]
           }
         }
       },

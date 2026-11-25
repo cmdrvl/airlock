@@ -8,7 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use jsonschema::validator_for;
 use serde_json::Value;
@@ -37,6 +37,12 @@ fn start_origin() -> Origin {
 
 /// Like `start_origin`, with a chosen response body.
 fn start_origin_replying(reply: Vec<u8>) -> Origin {
+    start_origin_after(reply, Duration::ZERO)
+}
+
+/// Like `start_origin_replying`, but the origin waits `delay` before it answers. The wait
+/// ends early when the origin is dropped, so a slow origin never slows a test down.
+fn start_origin_after(reply: Vec<u8>, delay: Duration) -> Origin {
     let server = Server::http("127.0.0.1:0").unwrap();
     let address = server.server_addr().to_ip().unwrap();
     let count = Arc::new(AtomicUsize::new(0));
@@ -50,6 +56,10 @@ fn start_origin_replying(reply: Vec<u8>) -> Origin {
                 Err(_) => break,
             };
             thread_count.fetch_add(1, Ordering::AcqRel);
+            let answer_at = Instant::now() + delay;
+            while Instant::now() < answer_at && !thread_stop.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(20));
+            }
             let _ = request.respond(Response::from_data(reply.clone()));
         }
     });
@@ -117,10 +127,20 @@ fn client() -> ureq::Agent {
 }
 
 fn post(agent: &ureq::Agent, address: SocketAddr, body: &[u8]) -> (u16, Value) {
+    post_with(agent, address, body.to_vec())
+}
+
+/// POST any kind of body: a byte vector goes out with a Content-Length, a reader goes out
+/// chunked with no declared length.
+fn post_with(
+    agent: &ureq::Agent,
+    address: SocketAddr,
+    body: impl ureq::AsSendBody,
+) -> (u16, Value) {
     let response = agent
         .post(&format!("http://{address}/v1/chat/completions"))
         .header("Content-Type", "application/json")
-        .send(body.to_vec())
+        .send(body)
         .unwrap();
     let status = response.status().as_u16();
     let mut bytes = Vec::new();
@@ -252,6 +272,42 @@ fn read_witness(path: &Path) -> Vec<Value> {
         .collect()
 }
 
+/// The receipts and witness records the gate has written so far, waiting until there are
+/// `expected` of each. A forwarded request is recorded after its response has gone out, so
+/// a test that reads right after the response can see a receipt that is not there yet or is
+/// half written; files and lines that do not parse yet are skipped and retried.
+fn wait_for_recorded(
+    receipts_dir: &Path,
+    witness_path: &Path,
+    expected: usize,
+) -> (Vec<Value>, Vec<Value>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let receipts: Vec<Value> = std::fs::read_dir(receipts_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                serde_json::from_slice(&std::fs::read(entry.ok()?.path()).ok()?).ok()
+            })
+            .collect();
+        let witness: Vec<Value> = std::fs::read_to_string(witness_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        if receipts.len() >= expected && witness.len() >= expected {
+            return (receipts, witness);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "gate recorded {} receipts and {} witness records, expected {expected}",
+            receipts.len(),
+            witness.len()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn forwarded_and_denied_requests_record_byte_counts_in_receipt_and_witness() {
     const REPLY_BYTES: usize = 1234;
@@ -292,9 +348,9 @@ fn forwarded_and_denied_requests_record_byte_counts_in_receipt_and_witness() {
     assert_eq!(reply.len(), REPLY_BYTES);
     assert_eq!(post(&agent, gate.address, unmatched).0, 403);
     assert_eq!(post(&agent, gate.address, malformed).0, 403);
+    let (receipts, witness) = wait_for_recorded(&receipts_dir, &witness_path, 3);
     drop(gate);
 
-    let receipts = read_receipts(&receipts_dir);
     assert_eq!(receipts.len(), 3);
     receipts.iter().for_each(assert_valid_gate_document);
     let find = |predicate: &dyn Fn(&Value) -> bool| {
@@ -313,7 +369,6 @@ fn forwarded_and_denied_requests_record_byte_counts_in_receipt_and_witness() {
     let denied_malformed = find(&|receipt| receipt["request_bytes"] == malformed.len());
     assert_eq!(denied_malformed["blocked"], true);
 
-    let witness = read_witness(&witness_path);
     let gated = witness
         .iter()
         .find(|record| record["outcome"] == "GATED")
@@ -335,5 +390,210 @@ fn forwarded_and_denied_requests_record_byte_counts_in_receipt_and_witness() {
         denied
             .iter()
             .all(|record| record["params"]["response_bytes"].is_null())
+    );
+}
+
+/// What one request sent to a strict gate with a request-size cap left behind.
+struct CapRun {
+    status: u16,
+    body: Value,
+    receipts: Vec<Value>,
+    witness: Vec<Value>,
+    forwarded: usize,
+    sent_bytes: usize,
+}
+
+/// Send the fixture request that a bound manifest matches, pretty-printed, to a strict gate
+/// whose `--max-request-bytes` is the request's size plus `cap_delta`. `chunked` sends the
+/// body with no declared length.
+fn run_with_cap(cap_delta: i64, chunked: bool) -> CapRun {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let pretty = serde_json::to_vec_pretty(&request).unwrap();
+    let cap = (pretty.len() as i64 + cap_delta).to_string();
+    let origin = start_origin();
+    let receipts_dir = temp.path().join("receipts");
+    let witness_path = temp.path().join("witness.jsonl");
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &receipts_dir,
+        &witness_path,
+        &["--max-request-bytes", &cap],
+    );
+    let agent = client();
+    let (status, body) = if chunked {
+        post_with(
+            &agent,
+            gate.address,
+            ureq::SendBody::from_owned_reader(std::io::Cursor::new(pretty.clone())),
+        )
+    } else {
+        post(&agent, gate.address, &pretty)
+    };
+    let (receipts, witness) = wait_for_recorded(&receipts_dir, &witness_path, 1);
+    drop(gate);
+    CapRun {
+        status,
+        body,
+        receipts,
+        witness,
+        forwarded: origin.count.load(Ordering::Acquire),
+        sent_bytes: pretty.len(),
+    }
+}
+
+#[test]
+fn request_over_the_size_cap_is_denied_and_the_cap_is_recorded() {
+    let run = run_with_cap(-1, false);
+
+    assert_eq!(run.status, 403);
+    assert_eq!(run.body["code"], "E_GATE_DENIED");
+    assert_eq!(
+        run.forwarded, 0,
+        "an oversized request must never reach the origin"
+    );
+    assert_eq!(run.receipts.len(), 1);
+    let receipt = &run.receipts[0];
+    assert_valid_gate_document(receipt);
+    assert_eq!(receipt["blocked"], true);
+    assert_eq!(receipt["limit"]["kind"], "max_request_bytes");
+    assert_eq!(receipt["limit"]["limit"], run.sent_bytes - 1);
+    assert_eq!(
+        receipt["limit"]["observed"], run.sent_bytes,
+        "a declared Content-Length is recorded as the observed size"
+    );
+    assert!(
+        receipt.get("request_bytes").is_none(),
+        "the oversized body was never read, so no received size is claimed"
+    );
+    let witness = run
+        .witness
+        .iter()
+        .find(|record| record["outcome"] == "BOUNDARY_FAILED")
+        .expect("a witness record for the denial");
+    assert_eq!(witness["params"]["limit"], receipt["limit"]);
+}
+
+#[test]
+fn chunked_request_over_the_size_cap_is_denied_without_an_observed_size() {
+    let run = run_with_cap(-1, true);
+
+    assert_eq!(run.status, 403);
+    assert_eq!(run.body["code"], "E_GATE_DENIED");
+    assert_eq!(run.forwarded, 0);
+    assert_eq!(run.receipts.len(), 1);
+    let receipt = &run.receipts[0];
+    assert_valid_gate_document(receipt);
+    assert_eq!(receipt["limit"]["kind"], "max_request_bytes");
+    assert_eq!(receipt["limit"]["limit"], run.sent_bytes - 1);
+    assert!(
+        receipt["limit"].get("observed").is_none(),
+        "a body with no declared length has no observed size to report: {receipt}"
+    );
+}
+
+#[test]
+fn request_exactly_at_the_size_cap_is_forwarded() {
+    let run = run_with_cap(0, false);
+
+    assert_eq!(run.status, 200);
+    assert_eq!(run.forwarded, 1);
+    assert_eq!(run.receipts.len(), 1);
+    assert_valid_gate_document(&run.receipts[0]);
+    assert_eq!(run.receipts[0]["blocked"], false);
+    assert_eq!(run.receipts[0]["request_bytes"], run.sent_bytes);
+    assert!(run.receipts[0].get("limit").is_none());
+}
+
+#[test]
+fn upstream_timeout_is_recorded_with_the_configured_limit_but_other_failures_are_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let pretty = serde_json::to_vec_pretty(&request).unwrap();
+
+    // An origin that answers after 3 s, behind a gate that waits 1 s.
+    let slow_origin = start_origin_after(b"{}".to_vec(), Duration::from_secs(3));
+    let slow_receipts = temp.path().join("slow-receipts");
+    let slow_witness = temp.path().join("slow-witness.jsonl");
+    let slow_gate = start_strict_gate(
+        slow_origin.address,
+        &manifest_dir,
+        &slow_receipts,
+        &slow_witness,
+        &["--timeout-seconds", "1"],
+    );
+    let (status, refusal) = post(&client(), slow_gate.address, &pretty);
+    drop(slow_gate);
+
+    assert_eq!(status, 502);
+    assert_eq!(refusal["code"], "UPSTREAM_UNAVAILABLE");
+    let receipts = read_receipts(&slow_receipts);
+    assert_eq!(receipts.len(), 1);
+    assert_valid_gate_document(&receipts[0]);
+    assert_eq!(receipts[0]["findings"][0]["rule_id"], "UPSTREAM_TIMEOUT");
+    assert_eq!(receipts[0]["limit"]["kind"], "timeout_seconds");
+    assert_eq!(receipts[0]["limit"]["limit"], 1);
+    assert_eq!(receipts[0]["request_bytes"], pretty.len());
+    let witness = read_witness(&slow_witness);
+    let record = witness
+        .iter()
+        .find(|record| record["outcome"] == "GATE_UPSTREAM_ERROR")
+        .expect("a witness record for the timeout");
+    assert_eq!(record["params"]["limit"], receipts[0]["limit"]);
+
+    // An upstream that refuses the connection is an upstream failure, not a timeout.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_address = closed.local_addr().unwrap();
+    drop(closed);
+    let refused_receipts = temp.path().join("refused-receipts");
+    let refused_gate = start_strict_gate(
+        closed_address,
+        &manifest_dir,
+        &refused_receipts,
+        &temp.path().join("refused-witness.jsonl"),
+        &[],
+    );
+    let (status, refusal) = post(&client(), refused_gate.address, &pretty);
+    drop(refused_gate);
+
+    assert_eq!(status, 502);
+    assert_eq!(refusal["code"], "UPSTREAM_UNAVAILABLE");
+    let receipts = read_receipts(&refused_receipts);
+    assert_eq!(receipts.len(), 1);
+    assert_valid_gate_document(&receipts[0]);
+    assert_eq!(
+        receipts[0]["findings"][0]["rule_id"],
+        "UPSTREAM_UNAVAILABLE"
+    );
+    assert!(receipts[0].get("limit").is_none());
+}
+
+#[test]
+fn policy_proxy_refuses_a_size_cap_above_its_scan_limit_at_startup() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/clean_telemetry_only");
+    let temp = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_airlock"))
+        .args([
+            "gate",
+            "--mode",
+            "policy-proxy",
+            "--upstream",
+            "https://api.openai.com",
+            "--max-request-bytes",
+            "4194305",
+            "--policy",
+        ])
+        .arg(root.join("policy.yaml"))
+        .arg("--out-dir")
+        .arg(temp.path().join("receipts"))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--max-request-bytes cannot exceed the policy-proxy scan limit of 4194304"),
+        "unexpected stderr: {stderr}"
     );
 }

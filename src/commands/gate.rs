@@ -15,7 +15,7 @@ use crate::adapter::{self, PartKind, TransportDeclaration};
 use crate::cli::{GateArgs, GateMode, REFUSAL, VERIFY_PASS};
 use crate::hash::blake3_hash;
 use crate::manifest::AirlockManifest;
-use crate::manifest::gate::{GateReceipt, GateRefusal};
+use crate::manifest::gate::{GateLimit, GateReceipt, GateRefusal};
 use crate::output::canonical_json_bytes;
 use crate::policy::{self, AirlockPolicy};
 use crate::scanner::egress::{
@@ -26,7 +26,24 @@ use crate::types::ClaimLevel;
 use crate::witness::{self, WitnessInput, WitnessRecord};
 
 const MAX_CONCURRENT_REQUESTS: usize = 32;
-const MAX_BODY_READ: u64 = MAX_GATE_REQUEST_BYTES as u64 + 1;
+/// Strict-manifest mode only canonicalizes and hashes a body, so it takes up to 32 MiB by
+/// default. policy-proxy also scans the body and is held to the scanner's own limit.
+const DEFAULT_STRICT_MAX_REQUEST_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The request-body cap in force for `mode`. policy-proxy cannot read more than it can scan,
+/// so a larger `--max-request-bytes` is refused at startup instead of silently clamped.
+fn effective_max_request_bytes(mode: GateMode, requested: Option<u64>) -> Result<u64, String> {
+    let scan_limit = MAX_GATE_REQUEST_BYTES as u64;
+    match (mode, requested) {
+        (GateMode::StrictManifest, None) => Ok(DEFAULT_STRICT_MAX_REQUEST_BYTES),
+        (GateMode::StrictManifest, Some(bytes)) => Ok(bytes),
+        (GateMode::PolicyProxy, None) => Ok(scan_limit),
+        (GateMode::PolicyProxy, Some(bytes)) if bytes <= scan_limit => Ok(bytes),
+        (GateMode::PolicyProxy, Some(_)) => Err(format!(
+            "--max-request-bytes cannot exceed the policy-proxy scan limit of {scan_limit} bytes"
+        )),
+    }
+}
 
 #[derive(Clone)]
 struct StrictManifestEntry {
@@ -46,6 +63,8 @@ struct GateState {
     strict_manifests: Arc<BTreeMap<String, StrictManifestEntry>>,
     out_dir: PathBuf,
     no_witness: bool,
+    max_request_bytes: u64,
+    timeout_seconds: u64,
 }
 
 pub fn run(args: GateArgs) -> u8 {
@@ -59,6 +78,13 @@ pub fn run(args: GateArgs) -> u8 {
     };
     let upstream = match validate_upstream(&args.upstream) {
         Ok(upstream) => upstream,
+        Err(message) => {
+            let _ = writeln!(stderr, "airlock gate: {message}");
+            return REFUSAL;
+        }
+    };
+    let max_request_bytes = match effective_max_request_bytes(args.mode, args.max_request_bytes) {
+        Ok(bytes) => bytes,
         Err(message) => {
             let _ = writeln!(stderr, "airlock gate: {message}");
             return REFUSAL;
@@ -177,6 +203,8 @@ pub fn run(args: GateArgs) -> u8 {
         strict_manifests,
         out_dir: args.out_dir,
         no_witness: args.no_witness,
+        max_request_bytes,
+        timeout_seconds: args.timeout_seconds,
     });
     let server = match Server::http(listen) {
         Ok(server) => server,
@@ -318,24 +346,17 @@ fn handle_request(mut request: Request, state: &GateState) {
         );
         return;
     }
-    if request
+    if let Some(declared) = request
         .body_length()
-        .is_some_and(|length| length > MAX_GATE_REQUEST_BYTES)
+        .filter(|length| *length as u64 > state.max_request_bytes)
     {
-        block_request(
-            request,
-            state,
-            "request body exceeds the scan limit",
-            "REQUEST_SCAN_REFUSED",
-            None,
-            None,
-        );
+        reject_oversized(request, state, Some(declared as u64));
         return;
     }
     let mut body = Vec::new();
     let read_result = request
         .as_reader()
-        .take(MAX_BODY_READ)
+        .take(state.max_request_bytes + 1)
         .read_to_end(&mut body);
     if read_result.is_err() {
         block_request(
@@ -348,15 +369,8 @@ fn handle_request(mut request: Request, state: &GateState) {
         );
         return;
     }
-    if body.len() > MAX_GATE_REQUEST_BYTES {
-        block_request(
-            request,
-            state,
-            "request body exceeds the scan limit",
-            "REQUEST_SCAN_REFUSED",
-            None,
-            None,
-        );
+    if body.len() as u64 > state.max_request_bytes {
+        reject_oversized(request, state, None);
         return;
     }
     let received = body.len() as u64;
@@ -572,22 +586,47 @@ fn block_request(
     request_hash: Option<String>,
     request_bytes: Option<u64>,
 ) {
-    let finding = EgressFinding {
+    let findings = [scan_refused_finding(rule_id)];
+    let request_hash = request_hash.unwrap_or_else(|| blake3_hash(b"unavailable"));
+    let receipt = denial_receipt(state, &findings, &request_hash, request_bytes);
+    refuse_request(
+        request,
+        state,
+        receipt,
+        refusal_for_mode(state.mode, &findings),
+    );
+}
+
+/// Refuse a request whose body is over the size cap, recording the cap and, when the client
+/// declared a length, the size it declared.
+fn reject_oversized(request: Request, state: &GateState, declared: Option<u64>) {
+    let findings = [scan_refused_finding("REQUEST_SCAN_REFUSED")];
+    let receipt = denial_receipt(state, &findings, &blake3_hash(b"unavailable"), None).with_limit(
+        GateLimit::max_request_bytes(state.max_request_bytes, declared),
+    );
+    refuse_request(
+        request,
+        state,
+        receipt,
+        refusal_for_mode(state.mode, &findings),
+    );
+}
+
+fn scan_refused_finding(rule_id: &str) -> EgressFinding {
+    EgressFinding {
         artifact_class: "REQUEST_SCAN_REFUSED".to_owned(),
         rule_id: rule_id.to_owned(),
         key_path: None,
         span_hash: None,
-    };
-    let request_hash = request_hash.unwrap_or_else(|| blake3_hash(b"unavailable"));
-    match state.mode {
-        GateMode::StrictManifest => {
-            deny_request(request, state, &[finding], &request_hash, request_bytes)
-        }
-        // policy-proxy keeps its published contract: a request it cannot screen is a
-        // boundary failure.
-        GateMode::PolicyProxy => {
-            block_request_with_findings(request, state, &[finding], &request_hash, request_bytes)
-        }
+    }
+}
+
+/// policy-proxy keeps its published contract (a request it cannot screen is a boundary
+/// failure); strict-manifest refusals are gate denials.
+fn refusal_for_mode(mode: GateMode, findings: &[EgressFinding]) -> GateRefusal {
+    match mode {
+        GateMode::StrictManifest => GateRefusal::denied(findings.to_vec()),
+        GateMode::PolicyProxy => GateRefusal::blocked(findings.to_vec()),
     }
 }
 
@@ -599,12 +638,11 @@ fn block_request_with_findings(
     request_hash: &str,
     request_bytes: Option<u64>,
 ) {
+    let receipt = denial_receipt(state, findings, request_hash, request_bytes);
     refuse_request(
         request,
         state,
-        findings,
-        request_hash,
-        request_bytes,
+        receipt,
         GateRefusal::blocked(findings.to_vec()),
     );
 }
@@ -618,25 +656,23 @@ fn deny_request(
     request_hash: &str,
     request_bytes: Option<u64>,
 ) {
+    let receipt = denial_receipt(state, findings, request_hash, request_bytes);
     refuse_request(
         request,
         state,
-        findings,
-        request_hash,
-        request_bytes,
+        receipt,
         GateRefusal::denied(findings.to_vec()),
     );
 }
 
-fn refuse_request(
-    request: Request,
+/// The receipt for a request the gate refused: claim BOUNDARY_FAILED, blocked.
+fn denial_receipt(
     state: &GateState,
     findings: &[EgressFinding],
     request_hash: &str,
     request_bytes: Option<u64>,
-    refusal: GateRefusal,
-) {
-    let mut receipt = GateReceipt::new(
+) -> GateReceipt {
+    GateReceipt::new(
         mode_name(state.mode),
         "BOUNDARY_FAILED",
         request_hash,
@@ -647,7 +683,15 @@ fn refuse_request(
         state.policy.as_ref().map(|policy| policy.policy_id.clone()),
         state.policy_hash.clone(),
     )
-    .with_request_bytes(request_bytes);
+    .with_request_bytes(request_bytes)
+}
+
+fn refuse_request(
+    request: Request,
+    state: &GateState,
+    mut receipt: GateReceipt,
+    refusal: GateRefusal,
+) {
     write_receipt_and_witness(state, &mut receipt, "BOUNDARY_FAILED", 1);
     return_json(
         request,
@@ -683,8 +727,13 @@ fn forward_request(request: Request, state: &GateState, body: &[u8], admitted: A
     }
     let upstream_response = match upstream_request.send(body) {
         Ok(response) => response,
+        Err(ureq::Error::Timeout(_)) => {
+            let limit = GateLimit::timeout_seconds(state.timeout_seconds);
+            gateway_error(request, state, &admitted, "UPSTREAM_TIMEOUT", Some(limit));
+            return;
+        }
         Err(_) => {
-            gateway_error(request, state, &admitted, "UPSTREAM_UNAVAILABLE");
+            gateway_error(request, state, &admitted, "UPSTREAM_UNAVAILABLE", None);
             return;
         }
     };
@@ -746,7 +795,15 @@ fn forward_request(request: Request, state: &GateState, body: &[u8], admitted: A
     );
 }
 
-fn gateway_error(request: Request, state: &GateState, admitted: &Admitted, rule_id: &str) {
+/// The upstream did not give the gate a response: HTTP 502, with the limit recorded when the
+/// cause was the configured upstream timeout.
+fn gateway_error(
+    request: Request,
+    state: &GateState,
+    admitted: &Admitted,
+    rule_id: &str,
+    limit: Option<GateLimit>,
+) {
     let mut receipt = GateReceipt::new(
         mode_name(state.mode),
         &admitted.achieved_claim,
@@ -765,6 +822,7 @@ fn gateway_error(request: Request, state: &GateState, admitted: &Admitted, rule_
     )
     .with_request_bytes(Some(admitted.request_bytes))
     .with_matched_manifest(admitted.matched_manifest_hash.clone());
+    receipt.limit = limit;
     write_receipt_and_witness(state, &mut receipt, "GATE_UPSTREAM_ERROR", REFUSAL);
     let refusal = GateRefusal::with_code(
         "UPSTREAM_UNAVAILABLE",
@@ -800,6 +858,7 @@ fn write_receipt_and_witness(
         "upstream_status": receipt.upstream_status,
         "request_bytes": receipt.request_bytes,
         "response_bytes": receipt.response_bytes,
+        "limit": receipt.limit,
         "blocked": receipt.blocked,
         "finding_rules": receipt.findings.iter().map(|finding| finding.rule_id.as_str()).collect::<Vec<_>>(),
         "matched_manifest_hash": receipt.matched_manifest_hash,
@@ -912,6 +971,33 @@ impl<R: Read> Read for HashingReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_cap_defaults_and_limits_follow_the_mode() {
+        let scan_limit = MAX_GATE_REQUEST_BYTES as u64;
+        assert_eq!(
+            effective_max_request_bytes(GateMode::StrictManifest, None),
+            Ok(32 * 1024 * 1024)
+        );
+        assert_eq!(
+            effective_max_request_bytes(GateMode::StrictManifest, Some(100 * 1024 * 1024)),
+            Ok(100 * 1024 * 1024)
+        );
+        assert_eq!(
+            effective_max_request_bytes(GateMode::PolicyProxy, None),
+            Ok(scan_limit)
+        );
+        assert_eq!(
+            effective_max_request_bytes(GateMode::PolicyProxy, Some(scan_limit)),
+            Ok(scan_limit)
+        );
+        assert_eq!(
+            effective_max_request_bytes(GateMode::PolicyProxy, Some(1024)),
+            Ok(1024)
+        );
+        let refused = effective_max_request_bytes(GateMode::PolicyProxy, Some(scan_limit + 1));
+        assert!(refused.is_err_and(|message| message.contains("scan limit")));
+    }
 
     #[test]
     fn listener_and_upstream_must_be_constrained() {

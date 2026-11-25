@@ -10,6 +10,36 @@ use crate::scanner::egress::EgressFinding;
 
 static GATE_RECEIPT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// A configured limit that tripped, recorded on the receipt of the request it stopped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GateLimit {
+    /// Which limit: `max_request_bytes` or `timeout_seconds`.
+    pub kind: String,
+    /// The configured value, in bytes or seconds.
+    pub limit: u64,
+    /// What was observed when it is known, for example the declared request size in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed: Option<u64>,
+}
+
+impl GateLimit {
+    pub fn max_request_bytes(limit: u64, observed: Option<u64>) -> Self {
+        Self {
+            kind: "max_request_bytes".to_owned(),
+            limit,
+            observed,
+        }
+    }
+
+    pub fn timeout_seconds(limit: u64) -> Self {
+        Self {
+            kind: "timeout_seconds".to_owned(),
+            limit,
+            observed: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GateReceipt {
     pub gate_version: String,
@@ -26,6 +56,9 @@ pub struct GateReceipt {
     /// Response-body bytes the gate read from the upstream and handed to the client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_bytes: Option<u64>,
+    /// The limit that tripped, when the request was stopped by one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<GateLimit>,
     pub blocked: bool,
     pub findings: Vec<EgressFinding>,
     pub timestamp: String,
@@ -54,6 +87,7 @@ impl GateReceipt {
             upstream_status: None,
             request_bytes: None,
             response_bytes: None,
+            limit: None,
             blocked,
             findings,
             timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -73,6 +107,12 @@ impl GateReceipt {
     /// Record how many request-body bytes the gate received, if it had read the body.
     pub fn with_request_bytes(mut self, request_bytes: Option<u64>) -> Self {
         self.request_bytes = request_bytes;
+        self
+    }
+
+    /// Record the limit that stopped this request.
+    pub fn with_limit(mut self, limit: GateLimit) -> Self {
+        self.limit = Some(limit);
         self
     }
 

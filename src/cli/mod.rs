@@ -117,6 +117,13 @@ pub struct GateArgs {
     pub timeout_seconds: u64,
 
     #[arg(
+        long = "max-request-bytes",
+        value_parser = clap::value_parser!(u64).range(1..=1_073_741_824),
+        help = "Largest request body to read, in bytes (default 33554432 in strict-manifest mode; policy-proxy defaults to and cannot exceed its 4194304 byte scan limit)"
+    )]
+    pub max_request_bytes: Option<u64>,
+
+    #[arg(
         long = "out-dir",
         default_value = "airlock-gate",
         help = "Directory for gate receipts"

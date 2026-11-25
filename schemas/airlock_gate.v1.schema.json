@@ -44,6 +44,17 @@
           "minimum": 0,
           "description": "Response-body bytes the gate read from the upstream and handed to the client."
         },
+        "limit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "limit"],
+          "description": "The configured limit that stopped this request.",
+          "properties": {
+            "kind": { "enum": ["max_request_bytes", "timeout_seconds"] },
+            "limit": { "type": "integer", "minimum": 1, "description": "Configured value, in bytes or seconds." },
+            "observed": { "type": "integer", "minimum": 0, "description": "Observed value when known, such as the declared request size." }
+          }
+        },
         "blocked": { "type": "boolean" },
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
         "timestamp": { "type": "string", "format": "date-time" },

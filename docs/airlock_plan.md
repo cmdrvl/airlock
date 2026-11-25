@@ -1494,4 +1494,59 @@ A manifest is a **commitment** to one boundary crossing:
 
 ### Tracking
 
-Beads under epic al-39t.
+Beads under epic `al-39t`.
+
+---
+
+## System Integration & Agent-Ergonomic Synthesis — 2026-11-24
+
+Within the unified CMD+RVL architecture (`cmdrvl/docs/SYSTEM_ARCHITECTURE.md`),
+`airlock` is the **Egress Half of Orthogonal Plane A (the Boundary & Exposure
+Lattice)**, projecting its exact `attestation_mode`, `achieved_claim`, and
+`local_reads` posture directly into `cmdrvl orient` and `control.v0`.
+
+### Architectural refinements & v1 scope tightening
+
+1. **Wire-format correctness (`al-g9e`, P0):**
+   Fix `src/assembler/mod.rs:104-115` and `src/adapter/mod.rs:91-94` where
+   `messages[1].content` is emitted as a raw JSON object (rejected by live
+   OpenAI APIs). Canonicalize user content cleanly during `wrap()` with lossless
+   round-trip `unwrap()` so `al-1ay` (`REQUEST_UNBOUND`) verifies live wire
+   payloads end-to-end.
+2. **Two explicit `airlock gate` modes (`al-cuh`, P1):**
+   Interactive coding agents (`claude`, `codex`, `gemini`, Cursor) do not call
+   `airlock assemble` before every turn. Split `airlock gate` into:
+   - `--mode strict-manifest`: every POST must match a pre-verified manifest
+     hash (`403` otherwise); earns `RAW_DOCUMENT_ABSENT` or
+     `STRICT_TELEMETRY_ONLY`. Default for deterministic pipelines and
+     `evidence-protocol` runtimes.
+   - `--mode policy-proxy`: live wire inspection using shared
+     `boundary-detectors` + policy denylists + optional `--protected-bloom`
+     one-way shingle filter from `veil` + multimodal base64 block screening;
+     blocks violations with HTTP `403` + structured refusal; hashes allowed
+     requests and zero-buffering SSE responses into the witness ledger; earns
+     `POLICY_SCREENED` (paired orthogonally with `LOCAL_READS_CLEAN` under
+     `veil sandbox`, `al-1th`).
+3. **Modern 4-provider wire adapters (`al-2kf`, promoted to P1):**
+   Support OpenAI `/v1/chat/completions`, **OpenAI `/v1/responses`**, Anthropic
+   `/v1/messages` (including `system`, `tool_use`, `tool_result`, and
+   `image`/`document` base64 content blocks), and Google Gemini
+   `generateContent` / `streamGenerateContent`, plus the generic JSON pointer
+   adapter. Default-deny unapproved base64 image/document attachments in strict
+   policies to close multimodal exfiltration.
+4. **Shared `boundary-detectors` crate (`al-34s` + `veil` `bd-jg9`):**
+   Consume one shared pure-Rust crate with `veil` (including recursive
+   base64/hex decode-and-rescan and `PROTECTED_CORPUS_MATCH` Bloom matching) so
+   ingress and egress scanners never drift.
+5. **Runtime & cryptographic scope discipline for v1 velocity:**
+   - Build `airlock gate` on **`asupersync`** for cancel-correct concurrent
+     HTTP/SSE proxying, strict upstream timeouts, zero-buffering SSE chunk
+     hashing, and guaranteed teardown when parent `veil sandbox` exits.
+   - Prioritize unprivileged **macOS Seatbelt** and **Linux Landlock ABI 4+**
+     egress rules (`al-28e`); treat root `netns`/`veth` and `pf` anchors as
+     optional hardening recipes.
+   - Ship `prev_hash`-chained witness JSONL + **Ed25519 signature over RFC 8785
+     JCS** (`al-12z`, `al-33c`) in v1; defer full RFC 6962 Merkle checkpoints /
+     consistency proofs (`al-3t8`, P3) and fragment Merkle selective disclosure
+     to v1.5/v2 so the wire gate ships cleanly.
+

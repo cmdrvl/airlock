@@ -38,8 +38,19 @@ pub fn canonical_json_bytes(v: &Value) -> Vec<u8> {
     canonical_json(v).into_bytes()
 }
 
+/// Embedded `operator.v1` manifest. `--describe`, `capabilities --json` and the
+/// `contract` inside `doctor capabilities --json` all render exactly this document.
+pub fn operator_json() -> &'static str {
+    OPERATOR_JSON
+}
+
 pub fn emit_describe(w: &mut impl Write) -> io::Result<()> {
     w.write_all(OPERATOR_JSON.as_bytes())
+}
+
+/// `capabilities --json`: the same document as `--describe`.
+pub fn emit_capabilities(w: &mut impl Write) -> io::Result<()> {
+    emit_describe(w)
 }
 
 pub fn emit_schema(w: &mut impl Write) -> io::Result<()> {
@@ -144,8 +155,22 @@ mod tests {
         let mut buf = Vec::new();
         emit_describe(&mut buf).unwrap();
         let value: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(value["schema_version"], "operator.v1");
         assert_eq!(value["name"], "airlock");
-        assert_eq!(value["output_schema"], "airlock.v0.schema.json");
+        assert_eq!(value["tool_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            value["invocation"]["output_schema"],
+            "airlock.v0.schema.json"
+        );
+    }
+
+    #[test]
+    fn emit_capabilities_is_byte_identical_to_describe() {
+        let mut describe = Vec::new();
+        let mut capabilities = Vec::new();
+        emit_describe(&mut describe).unwrap();
+        emit_capabilities(&mut capabilities).unwrap();
+        assert_eq!(describe, capabilities);
     }
 
     #[test]

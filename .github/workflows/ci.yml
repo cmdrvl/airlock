@@ -29,6 +29,12 @@ jobs:
       - name: Run clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Install ast-grep
+        run: npm install --global @ast-grep/cli
+
+      - name: Spine static rules (ast-grep)
+        run: ast-grep scan
+
       - name: Run tests
         run: cargo test --locked
 

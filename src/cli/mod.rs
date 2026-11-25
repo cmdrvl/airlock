@@ -6,14 +6,14 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::types::{BoundaryMode, ClaimLevel};
 
-pub use exit::{REFUSAL, VERIFY_PARTIAL, VERIFY_PASS};
+pub use exit::{REFUSAL, UNHEALTHY, VERIFY_PARTIAL, VERIFY_PASS};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "airlock",
     about = "Prove what crossed the model boundary",
     long_about = "Assemble proof-carrying model prompts, verify exactly what crossed the model boundary, and inspect local witness receipts.",
-    after_help = "Agent entry points:\n  airlock --robot-triage\n  airlock capabilities --json\n  airlock robot-docs guide\n\nCore flow:\n  airlock assemble --policy <POLICY> --input <JSON>... --out prompt_payload.json --provenance-out prompt_provenance.json\n  airlock verify --policy <POLICY> --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json\n  airlock explain --manifest airlock_manifest.json --json",
+    after_help = "Agent entry points:\n  airlock doctor triage --json\n  airlock capabilities --json\n  airlock robot-docs guide\n\nCore flow:\n  airlock assemble --policy <POLICY> --input <JSON>... --out prompt_payload.json --provenance-out prompt_provenance.json\n  airlock verify --policy <POLICY> --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json\n  airlock explain --manifest airlock_manifest.json --json",
     disable_version_flag = true
 )]
 pub struct Cli {
@@ -34,7 +34,7 @@ pub struct Cli {
 
     #[arg(
         long = "robot-triage",
-        help = "Emit read-only machine triage JSON without reading run artifacts or witness ledgers"
+        help = "Deprecated alias of `doctor triage --json` (read-only; never reads run artifacts or witness ledgers)"
     )]
     pub robot_triage: bool,
 }
@@ -49,7 +49,7 @@ pub enum Commands {
     Explain(ExplainArgs),
     #[command(about = "Read-only health, capabilities, robot docs, and triage for agents")]
     Doctor(DoctorArgs),
-    #[command(about = "Alias for 'airlock doctor capabilities'; use --json for machine output")]
+    #[command(about = "Emit the operator.v1 contract (same document as --describe) with --json")]
     Capabilities(DoctorJsonArgs),
     #[command(
         name = "robot-docs",
@@ -140,10 +140,13 @@ pub struct ExplainArgs {
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 #[command(
-    after_help = "Read-only agent surfaces:\n  airlock doctor health --json\n  airlock doctor capabilities --json\n  airlock doctor robot-docs\n  airlock doctor --robot-triage"
+    after_help = "Read-only agent surfaces (cmdrvl.doctor.v1; exit 0 healthy, 1 unhealthy, 2 usage error):\n  airlock doctor --json\n  airlock doctor capabilities --json\n  airlock doctor triage --json\n  airlock doctor robot-docs\n\nDeprecated aliases: `doctor health`, `doctor --robot-triage`, `airlock --robot-triage`."
 )]
 pub struct DoctorArgs {
-    #[arg(long = "robot-triage", help = "Emit read-only triage JSON for agents")]
+    #[arg(
+        long = "robot-triage",
+        help = "Deprecated alias of `doctor triage --json`"
+    )]
     pub robot_triage: bool,
 
     #[arg(long, help = "Emit JSON where the selected doctor command supports it")]
@@ -155,10 +158,16 @@ pub struct DoctorArgs {
 
 #[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
 pub enum DoctorCommands {
-    #[command(about = "Read-only embedded health diagnostics")]
+    #[command(
+        about = "Deprecated alias of `doctor [--json]`: read-only embedded health diagnostics"
+    )]
     Health(DoctorJsonArgs),
-    #[command(about = "Machine-readable command, side-effect, and config contract")]
+    #[command(
+        about = "cmdrvl.doctor.v1 capabilities report whose `contract` is the operator.v1 manifest"
+    )]
     Capabilities(DoctorJsonArgs),
+    #[command(about = "cmdrvl.doctor.v1 triage report with next_actions")]
+    Triage(DoctorJsonArgs),
     #[command(name = "robot-docs", about = "Paste-ready agent operating guide")]
     RobotDocs,
 }
@@ -376,6 +385,23 @@ mod tests {
         };
         assert!(matches!(&args.command, Some(DoctorCommands::Health(_))));
         let Some(DoctorCommands::Health(format)) = args.command else {
+            return;
+        };
+        assert!(format.json);
+        assert!(!args.robot_triage);
+    }
+
+    #[test]
+    fn parses_doctor_triage_json() {
+        let cli = Cli::try_parse_from(["airlock", "doctor", "triage", "--json"]).unwrap();
+
+        let command = cli.command.unwrap();
+        assert!(matches!(&command, Commands::Doctor(_)));
+        let Commands::Doctor(args) = command else {
+            return;
+        };
+        assert!(matches!(&args.command, Some(DoctorCommands::Triage(_))));
+        let Some(DoctorCommands::Triage(format)) = args.command else {
             return;
         };
         assert!(format.json);

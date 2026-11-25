@@ -1,0 +1,14 @@
+# Local copy of spine-rules/rules/witness-must-append.yml with one fix: the upstream
+# rule wraps the pattern in `all:` with `inside: { pattern: $$$ }`, which ast-grep
+# 0.51 rejects ("Standalone multi meta variable is invalid") so `ast-grep scan`
+# aborts on it. The intent is unchanged: flag every `File::create(..)`.
+id: witness-must-append
+language: rust
+message: |
+  R-016: Witness files are append-only.
+  File::create() truncates the file. Use OpenOptions::new().append(true).open()
+  to preserve existing witness records and maintain hash-chain integrity.
+severity: error
+note: "Golden Rule R-016 (Witness append-only)"
+rule:
+  pattern: File::create($PATH)

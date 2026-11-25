@@ -84,12 +84,10 @@ airlock explain --manifest airlock_manifest.json
 ### Doctor
 
 ```bash
-airlock doctor health
-airlock doctor health --json
+airlock doctor [--json]
 airlock doctor capabilities --json
+airlock doctor triage --json
 airlock doctor robot-docs
-airlock doctor --robot-triage
-airlock --robot-triage
 airlock capabilities --json
 airlock robot-docs guide
 ```
@@ -98,10 +96,23 @@ The doctor surface is read-only. It does not read policy, prompt, provenance,
 request, or manifest files; it does not open or append witness ledgers; and it
 does not expose `doctor --fix`.
 
-The top-level agent shortcuts are aliases for those same read-only doctor
-contracts. `airlock --robot-triage` is the quickest machine-readable discovery
-call; `airlock capabilities --json` returns the command and side-effect
-contract; `airlock robot-docs guide` prints the compact agent reference.
+Every JSON doctor report is a `cmdrvl.doctor.v1` document (`schema_version`,
+`mode`, `tool`, `tool_version`, `healthy`, `findings[]`). `doctor --json` is mode
+`health`; `doctor capabilities --json` is mode `capabilities` and carries the
+`operator.v1` contract in `contract`; `doctor triage --json` is mode `triage` and
+carries `next_actions`. `healthy` is false exactly when a finding has severity
+`error`. Exit `0` is healthy, `1` is unhealthy, `2` is a usage error only.
+
+`airlock capabilities --json` emits the `operator.v1` contract, byte-identical to
+`airlock --describe`. `airlock robot-docs guide` prints the compact agent
+reference. `doctor health`, `doctor --robot-triage` and `airlock --robot-triage`
+remain as deprecated aliases (`--robot-triage` is `doctor triage --json`).
+
+The pre-v1 doctor `schema` id is superseded by `schema_version`, and the old
+string-valued `contract` field is now `read_only_contract` (`contract` carries the
+`operator.v1` document in capabilities mode). The other detail fields (`ok`,
+`status`, `read_only`, `witness`, `config_footprint`, `side_effects`, `fixers`,
+`checks`) are unchanged.
 
 ### Configuration Footprint
 
@@ -283,14 +294,16 @@ and next commands.
 Read-only health, capability, and robot triage checks for agents.
 
 ```bash
-airlock doctor health [--json]
-airlock doctor capabilities --json
+airlock doctor [--json]               # cmdrvl.doctor.v1, mode health
+airlock doctor capabilities --json    # mode capabilities; `contract` = operator.v1
+airlock doctor triage --json          # mode triage; `next_actions`
 airlock doctor robot-docs
-airlock doctor --robot-triage
-airlock --robot-triage
-airlock capabilities --json
+airlock capabilities --json           # operator.v1 contract, same as --describe
 airlock robot-docs guide
 ```
+
+Deprecated aliases: `airlock doctor health [--json]`, `airlock doctor
+--robot-triage`, `airlock --robot-triage`.
 
 ### `airlock witness`
 
@@ -307,22 +320,27 @@ airlock witness count [--tool T] [--since T] [--until T] [--outcome O] [--input-
 ### Introspection Flags
 
 ```bash
-airlock --describe   # Emit operator.json (machine-readable metadata)
+airlock --describe   # Emit operator.json (operator.v1 contract)
 airlock --schema     # Emit the manifest JSON Schema
 airlock --version    # Emit version string
-airlock --robot-triage # Emit read-only machine triage JSON
+airlock --robot-triage # Deprecated alias of `doctor triage --json`
 ```
 
 Flag precedence: `--describe` > `--schema` > `--version` > subcommand.
 `--robot-triage` is read-only and has no witness side effects.
 
+`operator.json` conforms to the `spine-rules` `operator.v1` contract
+(`schema_version`, `tool_version`, `commands`, `exit_codes`, `refusals`,
+`env_vars`, `formats`, `side_effects`, `pipeline`). It is enforced in CI by
+`tests/golden_rules.rs` (`golden_rules_suite!`) and `ast-grep scan`.
+
 ### Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| `0`  | `VERIFY_PASS` — achieved claim meets or exceeds requirement |
-| `1`  | `VERIFY_PARTIAL` — achieved claim is below the required level |
-| `2`  | `REFUSAL` — structured error (bad input, missing file, etc.) |
+| Code | Domain | Meaning |
+|------|--------|---------|
+| `0`  | positive | `VERIFY_PASS` — achieved claim meets or exceeds requirement; also a healthy `doctor` |
+| `1`  | negative | `VERIFY_PARTIAL` — achieved claim is below `--require-claim`; also an unhealthy `doctor`; also `witness query\|last\|count` with no matching records |
+| `2`  | error | `REFUSAL` — structured error (bad input, missing file, etc.) or CLI usage error |
 
 Refusals emit structured JSON to stdout with a `refusal.code` field
 (`E_BAD_POLICY`, `E_MISSING_FILE`, `E_BAD_INPUT`, etc.).

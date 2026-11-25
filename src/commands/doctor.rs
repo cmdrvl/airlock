@@ -2,17 +2,19 @@ use std::io::{self, Write};
 
 use serde_json::{Map, Value, json};
 
-use crate::cli::{DoctorArgs, DoctorCommands, DoctorJsonArgs, REFUSAL, VERIFY_PASS};
-use crate::output::canonical_json;
+use crate::cli::{DoctorArgs, DoctorCommands, DoctorJsonArgs, REFUSAL, UNHEALTHY, VERIFY_PASS};
+use crate::output::{canonical_json, operator_json};
 use crate::paths;
 use crate::witness;
 
-const HEALTH_SCHEMA: &str = "airlock.doctor.health.v1";
-const CAPABILITIES_SCHEMA: &str = "airlock.doctor.capabilities.v1";
-const TRIAGE_SCHEMA: &str = "airlock.doctor.triage.v1";
-const DOCTOR_CONTRACT: &str = "cmdrvl.read_only_doctor.v1";
-const OPERATOR_JSON: &str = include_str!("../../operator.json");
+/// `schema_version` of every doctor report (family contract `cmdrvl.doctor.v1`).
+const DOCTOR_SCHEMA_VERSION: &str = "cmdrvl.doctor.v1";
+/// Airlock's read-only doctor guarantee. Renamed from the pre-v1 `contract` string
+/// because `contract` now carries the `operator.v1` document in capabilities mode.
+const READ_ONLY_DOCTOR_CONTRACT: &str = "cmdrvl.read_only_doctor.v1";
+const OPERATOR_SCHEMA_VERSION: &str = "operator.v1";
 const MANIFEST_SCHEMA_JSON: &str = include_str!("../../schemas/airlock.v0.schema.json");
+const CHECK_FIX: &str = "rebuild airlock from a release tree: the embedded operator.json or manifest schema does not match this binary";
 
 const SIDE_EFFECTS: &[&str] = &[
     "reads_stdin",
@@ -44,11 +46,14 @@ struct Check {
     name: &'static str,
     ok: bool,
     detail: String,
+    /// Remediation, reported only when the check fails.
+    fix: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
 struct Diagnostics {
     operator_version: String,
+    operator_schema_version: String,
     manifest_schema_title: String,
     witness_ledger_path: String,
     checks: Vec<Check>,
@@ -63,8 +68,13 @@ impl Diagnostics {
         if self.ok() { "healthy" } else { "unhealthy" }
     }
 
+    /// `0` healthy, `1` unhealthy. Never `2`: that is reserved for usage errors.
     fn exit_code(&self) -> u8 {
-        if self.ok() { VERIFY_PASS } else { REFUSAL }
+        if self.ok() { VERIFY_PASS } else { UNHEALTHY }
+    }
+
+    fn failed(&self) -> Vec<&Check> {
+        self.checks.iter().filter(|check| !check.ok).collect()
     }
 }
 
@@ -81,7 +91,7 @@ pub fn run_with_writer(args: DoctorArgs, stdout: &mut impl Write, stderr: &mut i
         return write_json(
             stdout,
             stderr,
-            &robot_triage_value(&diagnostics),
+            &triage_value(&diagnostics),
             diagnostics.exit_code(),
         );
     }
@@ -105,25 +115,53 @@ pub fn run_with_writer(args: DoctorArgs, stdout: &mut impl Write, stderr: &mut i
         }
         DoctorCommands::Capabilities(format) => {
             if args.json || format.json {
-                write_json(stdout, stderr, &capabilities_value(), VERIFY_PASS)
+                write_json(
+                    stdout,
+                    stderr,
+                    &capabilities_value(&diagnostics),
+                    diagnostics.exit_code(),
+                )
             } else {
-                write_text(stdout, &human_capabilities(), VERIFY_PASS)
+                write_text(stdout, &human_capabilities(), diagnostics.exit_code())
+            }
+        }
+        DoctorCommands::Triage(format) => {
+            if args.json || format.json {
+                write_json(
+                    stdout,
+                    stderr,
+                    &triage_value(&diagnostics),
+                    diagnostics.exit_code(),
+                )
+            } else {
+                write_text(stdout, &human_triage(&diagnostics), diagnostics.exit_code())
             }
         }
         DoctorCommands::RobotDocs => write_text(stdout, &robot_docs(), VERIFY_PASS),
     }
 }
 
+/// Human `airlock capabilities` text for the top-level alias (no `--json`).
+pub fn run_capabilities_text(stdout: &mut impl Write) -> u8 {
+    write_text(stdout, &human_capabilities(), VERIFY_PASS)
+}
+
 fn collect_diagnostics() -> Diagnostics {
-    let operator = serde_json::from_str::<Value>(OPERATOR_JSON);
-    let manifest_schema = serde_json::from_str::<Value>(MANIFEST_SCHEMA_JSON);
-    let operator_version = operator_field(&operator, "version");
+    collect_diagnostics_from(operator_json(), MANIFEST_SCHEMA_JSON)
+}
+
+fn collect_diagnostics_from(operator_src: &str, schema_src: &str) -> Diagnostics {
+    let operator = serde_json::from_str::<Value>(operator_src);
+    let manifest_schema = serde_json::from_str::<Value>(schema_src);
+    let operator_version = operator_field(&operator, "/tool_version");
+    let operator_schema_version = operator_field(&operator, "/schema_version");
     let manifest_schema_title = schema_title(&manifest_schema);
     let doctor_advertised = operator
         .as_ref()
         .ok()
-        .and_then(|value| value.pointer("/subcommands/doctor"))
-        .is_some();
+        .and_then(|value| value.get("commands"))
+        .and_then(Value::as_array)
+        .is_some_and(|commands| commands.iter().any(|command| command["name"] == "doctor"));
     let witness_ledger_path = witness::default_witness_path().display().to_string();
 
     let checks = vec![
@@ -131,29 +169,42 @@ fn collect_diagnostics() -> Diagnostics {
             name: "operator_manifest_embedded_json",
             ok: operator.is_ok(),
             detail: parse_detail(&operator),
+            fix: Some(CHECK_FIX),
+        },
+        Check {
+            name: "operator_manifest_schema_version",
+            ok: operator_schema_version == OPERATOR_SCHEMA_VERSION,
+            detail: format!(
+                "operator.json schema_version={operator_schema_version}; expected {OPERATOR_SCHEMA_VERSION}"
+            ),
+            fix: Some(CHECK_FIX),
         },
         Check {
             name: "operator_manifest_version_matches_binary",
             ok: operator_version == env!("CARGO_PKG_VERSION"),
             detail: format!(
-                "operator.json version={operator_version}; binary version={}",
+                "operator.json tool_version={operator_version}; binary version={}",
                 env!("CARGO_PKG_VERSION")
             ),
+            fix: Some(CHECK_FIX),
         },
         Check {
             name: "operator_manifest_doctor_command",
             ok: doctor_advertised,
             detail: "operator.json advertises doctor command discovery".to_owned(),
+            fix: Some(CHECK_FIX),
         },
         Check {
             name: "manifest_schema_embedded_json",
             ok: manifest_schema.is_ok(),
             detail: parse_detail(&manifest_schema),
+            fix: Some(CHECK_FIX),
         },
         Check {
             name: "manifest_schema_title",
             ok: manifest_schema_title == "airlock manifest schema",
             detail: format!("title={manifest_schema_title}"),
+            fix: Some(CHECK_FIX),
         },
         Check {
             name: "doctor_dispatch_read_only",
@@ -161,36 +212,41 @@ fn collect_diagnostics() -> Diagnostics {
             detail:
                 "doctor dispatch does not call assemble, verify, explain, or witness query paths"
                     .to_owned(),
+            fix: None,
         },
         Check {
             name: "witness_path_resolves_without_open",
             ok: true,
             detail: witness_ledger_path.clone(),
+            fix: None,
         },
         Check {
             name: "config_footprint_declared",
             ok: true,
             detail: "implicit witness state is rooted under ~/.cmdrvl/state/witness".to_owned(),
+            fix: None,
         },
         Check {
             name: "fix_mode_disabled",
             ok: true,
             detail: "no doctor --fix argument or fixer registry is exposed".to_owned(),
+            fix: None,
         },
     ];
 
     Diagnostics {
         operator_version,
+        operator_schema_version,
         manifest_schema_title,
         witness_ledger_path,
         checks,
     }
 }
 
-fn operator_field(operator: &Result<Value, serde_json::Error>, field: &str) -> String {
+fn operator_field(operator: &Result<Value, serde_json::Error>, pointer: &str) -> String {
     match operator {
         Ok(value) => value
-            .get(field)
+            .pointer(pointer)
             .and_then(Value::as_str)
             .unwrap_or("<missing>")
             .to_owned(),
@@ -216,17 +272,50 @@ fn parse_detail(result: &Result<Value, serde_json::Error>) -> String {
     }
 }
 
+/// `cmdrvl.doctor.v1` findings: one per check. A failing check is an `error`
+/// finding, so `healthy` is exactly "no error finding".
+fn findings_value(checks: &[&Check]) -> Value {
+    Value::Array(
+        checks
+            .iter()
+            .map(|check| {
+                let mut finding = json!({
+                    "id": check.name,
+                    "severity": if check.ok { "info" } else { "error" },
+                    "message": check.detail,
+                });
+                if !check.ok
+                    && let Some(fix) = check.fix
+                {
+                    finding["fix"] = json!(fix);
+                }
+                finding
+            })
+            .collect(),
+    )
+}
+
+/// `cmdrvl.doctor.v1`, mode `health`. The pre-v1 detail fields (`ok`, `status`,
+/// `version`, `read_only`, `witness`, `config_footprint`, `side_effects`, `fixers`,
+/// `checks`) remain as additive extras; the old `schema` id is superseded by
+/// `schema_version`, and the old `contract` string is now `read_only_contract`.
 fn health_value(diagnostics: &Diagnostics) -> Value {
+    let all: Vec<&Check> = diagnostics.checks.iter().collect();
     json!({
-        "schema": HEALTH_SCHEMA,
+        "schema_version": DOCTOR_SCHEMA_VERSION,
+        "mode": "health",
         "tool": witness::TOOL_NAME,
+        "tool_version": env!("CARGO_PKG_VERSION"),
+        "healthy": diagnostics.ok(),
+        "findings": findings_value(&all),
         "version": env!("CARGO_PKG_VERSION"),
         "ok": diagnostics.ok(),
         "status": diagnostics.status(),
-        "contract": DOCTOR_CONTRACT,
         "read_only": true,
+        "read_only_contract": READ_ONLY_DOCTOR_CONTRACT,
         "operator_manifest": {
-            "version": diagnostics.operator_version
+            "schema_version": diagnostics.operator_schema_version,
+            "tool_version": diagnostics.operator_version
         },
         "schemas": {
             "manifest": diagnostics.manifest_schema_title
@@ -244,15 +333,23 @@ fn health_value(diagnostics: &Diagnostics) -> Value {
     })
 }
 
-fn capabilities_value() -> Value {
-    json!({
-        "schema": CAPABILITIES_SCHEMA,
+/// `cmdrvl.doctor.v1`, mode `capabilities`. `contract` is the `operator.v1`
+/// document, identical to `airlock capabilities --json`. The report describes the
+/// tool and inspects only the embedded manifest, so its findings are the failed
+/// embedded-asset checks (none on a healthy build).
+fn capabilities_value(diagnostics: &Diagnostics) -> Value {
+    let mut value = json!({
+        "schema_version": DOCTOR_SCHEMA_VERSION,
+        "mode": "capabilities",
         "tool": witness::TOOL_NAME,
+        "tool_version": env!("CARGO_PKG_VERSION"),
+        "healthy": diagnostics.ok(),
+        "findings": findings_value(&diagnostics.failed()),
         "version": env!("CARGO_PKG_VERSION"),
-        "contract": DOCTOR_CONTRACT,
         "read_only": true,
+        "read_only_contract": READ_ONLY_DOCTOR_CONTRACT,
         "agent_entrypoints": {
-            "triage_json": "airlock --robot-triage",
+            "triage_json": "airlock doctor triage --json",
             "capabilities_json": "airlock capabilities --json",
             "robot_docs": "airlock robot-docs guide",
             "core_flow": [
@@ -260,79 +357,6 @@ fn capabilities_value() -> Value {
                 "airlock verify --policy <POLICY> --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json",
                 "airlock explain --manifest airlock_manifest.json --json"
             ]
-        },
-        "commands": [
-            {
-                "name": "assemble",
-                "json": true,
-                "purpose": "Assemble deterministic prompt_payload.json and prompt_provenance.json from policy-approved inputs.",
-                "writes": ["prompt_payload", "prompt_provenance"],
-                "records_witness": true
-            },
-            {
-                "name": "verify",
-                "json": true,
-                "purpose": "Verify a prompt/request boundary and emit airlock_manifest.json even when the boundary fails.",
-                "writes": ["manifest"],
-                "records_witness": true
-            },
-            {
-                "name": "explain --json",
-                "json": true,
-                "purpose": "Summarize an airlock manifest for machines without re-running boundary verification.",
-                "writes": [],
-                "records_witness": false
-            },
-            {
-                "name": "witness query|last|count --json",
-                "json": true,
-                "purpose": "Query the local witness ledger without appending new witness records.",
-                "writes": [],
-                "records_witness": false
-            },
-            {
-                "name": "doctor health",
-                "json": true,
-                "purpose": "Summarize embedded manifest, schema, dispatch, and witness-path health without reading run artifacts."
-            },
-            {
-                "name": "doctor capabilities --json",
-                "json": true,
-                "purpose": "Expose machine-readable doctor capabilities, side effects, and disabled fixers."
-            },
-            {
-                "name": "doctor robot-docs",
-                "json": false,
-                "purpose": "Print compact agent-facing command documentation."
-            },
-            {
-                "name": "doctor --robot-triage",
-                "json": true,
-                "purpose": "Return a machine-readable triage packet for automation."
-            }
-        ],
-        "exit_codes": {
-            "0": "command completed; verify may still report BOUNDARY_FAILED as an honest manifest verdict",
-            "1": "VERIFY_PARTIAL: achieved claim is below --require-claim, or witness query/count found no matches",
-            "2": "REFUSAL: command-line, input, manifest, policy, provenance, request, witness, or internal error"
-        },
-        "refusal_codes": [
-            "E_BAD_POLICY",
-            "E_BAD_INPUT",
-            "E_BAD_PROMPT",
-            "E_BAD_REQUEST",
-            "E_BAD_PROVENANCE",
-            "E_BAD_MANIFEST",
-            "E_MISSING_FILE",
-            "E_WITNESS_ERROR",
-            "E_INTERNAL"
-        ],
-        "schemas": {
-            "health": HEALTH_SCHEMA,
-            "capabilities": CAPABILITIES_SCHEMA,
-            "triage": TRIAGE_SCHEMA,
-            "manifest": "airlock.v0.schema.json",
-            "explain": "airlock.explain.v1"
         },
         "composition": {
             "family": {
@@ -365,38 +389,39 @@ fn capabilities_value() -> Value {
         "config_footprint": paths::config_footprint(),
         "side_effects": side_effects_value(),
         "fixers": []
-    })
+    });
+
+    if let Ok(contract) = serde_json::from_str::<Value>(operator_json()) {
+        value["contract"] = contract;
+    }
+    value
 }
 
-fn robot_triage_value(diagnostics: &Diagnostics) -> Value {
-    json!({
-        "schema": TRIAGE_SCHEMA,
-        "tool": witness::TOOL_NAME,
-        "version": env!("CARGO_PKG_VERSION"),
-        "ok": diagnostics.ok(),
-        "status": diagnostics.status(),
-        "contract": DOCTOR_CONTRACT,
-        "read_only": true,
-        "summary": {
-            "message": if diagnostics.ok() {
-                "airlock doctor checks passed"
-            } else {
-                "airlock doctor checks found unhealthy diagnostics"
-            },
-            "capabilities": "airlock capabilities --json",
-            "robot_docs": "airlock robot-docs guide",
-            "failed_checks": diagnostics.checks.iter().filter(|check| !check.ok).count()
-        },
-        "findings": failed_checks_value(&diagnostics.checks),
-        "next_actions": if diagnostics.ok() {
-            Value::Array(Vec::new())
+/// `cmdrvl.doctor.v1`, mode `triage`. `next_actions` is never empty when unhealthy.
+fn triage_value(diagnostics: &Diagnostics) -> Value {
+    let failed = diagnostics.failed();
+    let mut next_actions: Vec<String> = failed
+        .iter()
+        .filter_map(|check| check.fix.map(|fix| format!("{}: {fix}", check.name)))
+        .collect();
+    if !diagnostics.ok() && next_actions.is_empty() {
+        next_actions.push("run `airlock doctor --json` for details".to_owned());
+    }
+
+    let mut value = health_value(diagnostics);
+    value["mode"] = json!("triage");
+    value["next_actions"] = json!(next_actions);
+    value["summary"] = json!({
+        "message": if diagnostics.ok() {
+            "airlock doctor checks passed"
         } else {
-            json!(["inspect embedded operator manifest, schema, and doctor dispatch wiring"])
+            "airlock doctor checks found unhealthy diagnostics"
         },
-        "config_footprint": paths::config_footprint(),
-        "side_effects": side_effects_value(),
-        "fixers": []
-    })
+        "capabilities": "airlock capabilities --json",
+        "robot_docs": "airlock robot-docs guide",
+        "failed_checks": failed.len()
+    });
+    value
 }
 
 fn side_effects_value() -> Value {
@@ -422,29 +447,16 @@ fn checks_value(checks: &[Check]) -> Value {
     )
 }
 
-fn failed_checks_value(checks: &[Check]) -> Value {
-    Value::Array(
-        checks
-            .iter()
-            .filter(|check| !check.ok)
-            .map(|check| {
-                json!({
-                    "severity": "error",
-                    "check": check.name,
-                    "detail": check.detail
-                })
-            })
-            .collect(),
-    )
-}
-
 fn human_health(diagnostics: &Diagnostics) -> String {
     let mut lines = vec![
         format!("airlock doctor health: {}", diagnostics.status()),
         format!("version: {}", env!("CARGO_PKG_VERSION")),
-        format!("contract: {DOCTOR_CONTRACT}"),
-        "read_only: true".to_owned(),
-        format!("operator_manifest: {}", diagnostics.operator_version),
+        format!("report: {DOCTOR_SCHEMA_VERSION}"),
+        format!("read_only_contract: {READ_ONLY_DOCTOR_CONTRACT}"),
+        format!(
+            "operator_manifest: {} ({})",
+            diagnostics.operator_version, diagnostics.operator_schema_version
+        ),
         format!("manifest_schema: {}", diagnostics.manifest_schema_title),
         "side_effects: none".to_owned(),
         "fixers: none".to_owned(),
@@ -459,6 +471,26 @@ fn human_health(diagnostics: &Diagnostics) -> String {
     lines.join("\n")
 }
 
+fn human_triage(diagnostics: &Diagnostics) -> String {
+    let mut lines = vec![format!("airlock doctor triage: {}", diagnostics.status())];
+    let failed = diagnostics.failed();
+    if failed.is_empty() {
+        lines.push("next_actions: none".to_owned());
+    } else {
+        lines.push("next_actions:".to_owned());
+        for check in failed {
+            lines.push(format!(
+                "- {}: {}",
+                check.name,
+                check
+                    .fix
+                    .unwrap_or("run `airlock doctor --json` for details")
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
 fn human_capabilities() -> String {
     [
         "airlock capabilities",
@@ -467,13 +499,13 @@ fn human_capabilities() -> String {
         "- verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out <MANIFEST>",
         "- explain --manifest <MANIFEST> [--json]",
         "- witness query|last|count [filters] [--json]",
-        "- doctor health [--json]",
+        "- doctor [--json]",
         "- doctor capabilities --json",
+        "- doctor triage --json",
         "- doctor robot-docs",
-        "- doctor --robot-triage",
         "agent_entrypoints:",
-        "- airlock --robot-triage",
-        "- airlock capabilities --json",
+        "- airlock capabilities --json   (operator.v1 contract, same document as --describe)",
+        "- airlock doctor triage --json",
         "- airlock robot-docs guide",
         "read_only: true",
         "side_effects: none",
@@ -487,13 +519,13 @@ fn robot_docs() -> String {
         "# airlock doctor robot docs",
         "",
         "Read-only commands:",
-        "- `airlock --robot-triage` emits `airlock.doctor.triage.v1` JSON.",
-        "- `airlock capabilities --json` reports command capabilities, side effects, and config footprint.",
+        "- `airlock capabilities --json` emits the `operator.v1` contract (same document as `airlock --describe`).",
+        "- `airlock doctor [--json]` reports embedded manifest, schema, dispatch, and witness-path health as `cmdrvl.doctor.v1` (mode `health`).",
+        "- `airlock doctor capabilities --json` is `cmdrvl.doctor.v1` mode `capabilities`; its `contract` is the `capabilities --json` document.",
+        "- `airlock doctor triage --json` is `cmdrvl.doctor.v1` mode `triage` with `next_actions`.",
         "- `airlock robot-docs guide` prints this compact agent-facing reference.",
-        "- `airlock doctor health [--json]` reports embedded manifest, schema, dispatch, and witness-path health.",
-        "- `airlock doctor capabilities --json` reports command capabilities, side effects, and fixers.",
-        "- `airlock doctor robot-docs` prints this compact agent-facing reference.",
-        "- `airlock doctor --robot-triage` emits `airlock.doctor.triage.v1` JSON.",
+        "- `airlock doctor robot-docs` prints the same reference.",
+        "- Deprecated aliases: `airlock doctor health [--json]`, `airlock doctor --robot-triage`, `airlock --robot-triage` (same document as `doctor triage --json`).",
         "- `airlock explain --manifest <MANIFEST> --json` summarizes a manifest without re-verifying it.",
         "",
         "Safety contract:",
@@ -510,8 +542,8 @@ fn robot_docs() -> String {
         "- Seal: `pack seal airlock_manifest.json prompt_provenance.json --output evidence/airlock/`.",
         "",
         "Exit codes:",
-        "- `0`: doctor checks or documentation completed.",
-        "- `2`: command-line refusal or unhealthy doctor diagnostics.",
+        "- doctor: `0` healthy, `1` unhealthy (an `error` finding), `2` usage error only.",
+        "- other read-only surfaces: `0` on success.",
     ]
     .join("\n")
 }
@@ -537,11 +569,119 @@ fn write_text(stdout: &mut impl Write, text: &str, exit_code: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use spine_rules::doctor::{DoctorMode, DoctorReport, check_doctor_run};
+
     use super::*;
+
+    const BROKEN_OPERATOR: &str = "{ not json";
+
+    fn healthy() -> Diagnostics {
+        collect_diagnostics()
+    }
+
+    fn unhealthy() -> Diagnostics {
+        collect_diagnostics_from(BROKEN_OPERATOR, MANIFEST_SCHEMA_JSON)
+    }
+
+    fn rendered(value: &Value) -> Vec<u8> {
+        canonical_json(value).into_bytes()
+    }
+
+    #[test]
+    fn healthy_build_has_no_failed_checks() {
+        let diagnostics = healthy();
+        assert!(
+            diagnostics.ok(),
+            "embedded assets must be healthy: {:?}",
+            diagnostics.failed()
+        );
+        assert_eq!(diagnostics.exit_code(), VERIFY_PASS);
+    }
+
+    #[test]
+    fn healthy_reports_conform_to_family_doctor_contract() {
+        let diagnostics = healthy();
+        for (mode, value) in [
+            (DoctorMode::Health, health_value(&diagnostics)),
+            (DoctorMode::Capabilities, capabilities_value(&diagnostics)),
+            (DoctorMode::Triage, triage_value(&diagnostics)),
+        ] {
+            let violations = check_doctor_run(mode, &rendered(&value), Some(0));
+            assert!(violations.is_empty(), "{mode:?}: {violations:?}");
+        }
+    }
+
+    #[test]
+    fn unhealthy_reports_conform_and_exit_one_never_two() {
+        let diagnostics = unhealthy();
+        assert!(!diagnostics.ok());
+        assert_eq!(diagnostics.exit_code(), UNHEALTHY);
+        assert_eq!(UNHEALTHY, 1);
+
+        for (mode, value) in [
+            (DoctorMode::Health, health_value(&diagnostics)),
+            (DoctorMode::Triage, triage_value(&diagnostics)),
+        ] {
+            let violations = check_doctor_run(mode, &rendered(&value), Some(1));
+            assert!(violations.is_empty(), "{mode:?}: {violations:?}");
+            // The same report returned with exit 2 must be rejected by the contract.
+            let wrong = check_doctor_run(mode, &rendered(&value), Some(2));
+            assert!(
+                !wrong.is_empty(),
+                "{mode:?}: exit 2 for unhealthy must fail"
+            );
+        }
+    }
+
+    #[test]
+    fn unhealthy_findings_carry_error_severity_and_fix() {
+        let report = DoctorReport::parse(&canonical_json(&health_value(&unhealthy()))).unwrap();
+        assert!(!report.healthy);
+        let failing: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.severity == spine_rules::doctor::Severity::Error)
+            .collect();
+        assert!(
+            failing
+                .iter()
+                .any(|finding| finding.id == "operator_manifest_embedded_json")
+        );
+        assert!(failing.iter().all(|finding| finding.fix.is_some()));
+    }
+
+    #[test]
+    fn triage_next_actions_are_non_empty_when_unhealthy_and_empty_when_healthy() {
+        let sick = triage_value(&unhealthy());
+        assert!(!sick["next_actions"].as_array().unwrap().is_empty());
+        let well = triage_value(&healthy());
+        assert_eq!(well["next_actions"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn capabilities_contract_is_the_embedded_operator_document() {
+        let value = capabilities_value(&healthy());
+        let embedded: Value = serde_json::from_str(operator_json()).unwrap();
+        assert_eq!(value["contract"], embedded);
+        assert_eq!(value["contract"]["schema_version"], "operator.v1");
+    }
+
+    #[test]
+    fn wrong_operator_schema_version_is_an_error_finding() {
+        let operator = operator_json().replace("\"operator.v1\"", "\"operator.v0\"");
+        let diagnostics = collect_diagnostics_from(&operator, MANIFEST_SCHEMA_JSON);
+        assert!(!diagnostics.ok());
+        assert!(
+            diagnostics
+                .failed()
+                .iter()
+                .any(|check| check.name == "operator_manifest_schema_version")
+        );
+    }
 
     #[test]
     fn capabilities_disable_every_side_effect() {
-        let value = capabilities_value();
+        let value = capabilities_value(&healthy());
         let effects = value["side_effects"].as_object().unwrap();
 
         assert!(!effects.is_empty());
@@ -556,22 +696,21 @@ mod tests {
             "airlock capabilities --json"
         );
         assert!(
-            value["commands"]
+            value["contract"]["commands"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|command| command["name"] == "explain --json")
+                .any(|command| command["name"] == "explain")
         );
     }
 
     #[test]
-    fn health_reports_embedded_doctor_contract() {
-        let diagnostics = collect_diagnostics();
-        let value = health_value(&diagnostics);
+    fn health_reports_read_only_contract_and_footprint() {
+        let value = health_value(&healthy());
 
-        assert_eq!(value["schema"], HEALTH_SCHEMA);
+        assert_eq!(value["schema_version"], DOCTOR_SCHEMA_VERSION);
         assert_eq!(value["tool"], witness::TOOL_NAME);
-        assert_eq!(value["contract"], DOCTOR_CONTRACT);
+        assert_eq!(value["read_only_contract"], READ_ONLY_DOCTOR_CONTRACT);
         assert_eq!(value["read_only"], true);
         assert_eq!(
             value["config_footprint"]["managed_state_paths"][0],

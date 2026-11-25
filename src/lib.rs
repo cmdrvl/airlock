@@ -104,15 +104,14 @@ fn dispatch<W: Write, E: Write>(cli: Cli, stdout: &mut W, stderr: &mut E) -> u8 
         Some(Commands::Verify(args)) => commands::verify::run(args),
         Some(Commands::Explain(args)) => commands::explain::run(args),
         Some(Commands::Doctor(args)) => commands::doctor::run(args),
-        Some(Commands::Capabilities(args)) => commands::doctor::run_with_writer(
-            DoctorArgs {
-                robot_triage: false,
-                json: args.json,
-                command: Some(DoctorCommands::Capabilities(args)),
-            },
-            stdout,
-            stderr,
-        ),
+        // `capabilities --json` is the operator.v1 contract, byte-identical to `--describe`.
+        Some(Commands::Capabilities(args)) => {
+            if args.json {
+                emit_introspection(output::emit_capabilities(stdout), stderr)
+            } else {
+                commands::doctor::run_capabilities_text(stdout)
+            }
+        }
         Some(Commands::RobotDocs(_args)) => commands::doctor::run_with_writer(
             DoctorArgs {
                 robot_triage: false,
@@ -143,7 +142,7 @@ fn maybe_write_parse_hint<W: Write + ?Sized>(args: &[OsString], target: &mut W) 
     if saw_json_typo {
         let _ = writeln!(
             target,
-            "\nhint: did you mean `--json`? For a read-only machine summary, run: `airlock --robot-triage`."
+            "\nhint: did you mean `--json`? For a read-only machine summary, run: `airlock doctor triage --json`."
         );
     } else {
         let _ = writeln!(
@@ -220,7 +219,7 @@ mod tests {
         assert!(stderr.is_empty());
         let help = String::from_utf8(stdout).unwrap();
         assert!(help.contains("Usage: airlock"));
-        assert!(help.contains("airlock --robot-triage"));
+        assert!(help.contains("airlock doctor triage --json"));
     }
 
     #[test]
@@ -233,26 +232,31 @@ mod tests {
         assert_eq!(code, VERIFY_PASS);
         assert!(stderr.is_empty());
         let triage: Value = serde_json::from_slice(&stdout).unwrap();
-        assert_eq!(triage["schema"], "airlock.doctor.triage.v1");
+        assert_eq!(triage["schema_version"], "cmdrvl.doctor.v1");
+        assert_eq!(triage["mode"], "triage");
+        assert_eq!(triage["healthy"], true);
         assert_eq!(triage["read_only"], true);
     }
 
     #[test]
-    fn top_level_capabilities_alias_returns_doctor_contract() {
-        let mut stdout = Vec::new();
+    fn top_level_capabilities_json_is_the_describe_document() {
+        let mut capabilities = Vec::new();
+        let mut describe = Vec::new();
         let mut stderr = Vec::new();
 
         let code = run_with_args(
             ["airlock", "capabilities", "--json"],
-            &mut stdout,
+            &mut capabilities,
             &mut stderr,
         );
+        let describe_code = run_with_args(["airlock", "--describe"], &mut describe, &mut stderr);
 
         assert_eq!(code, VERIFY_PASS);
+        assert_eq!(describe_code, VERIFY_PASS);
         assert!(stderr.is_empty());
-        let capabilities: Value = serde_json::from_slice(&stdout).unwrap();
-        assert_eq!(capabilities["schema"], "airlock.doctor.capabilities.v1");
-        assert_eq!(capabilities["read_only"], true);
+        assert_eq!(capabilities, describe);
+        let contract: Value = serde_json::from_slice(&capabilities).unwrap();
+        assert_eq!(contract["schema_version"], "operator.v1");
     }
 
     #[test]
@@ -266,6 +270,6 @@ mod tests {
         assert!(stdout.is_empty());
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(stderr.contains("did you mean `--json`"));
-        assert!(stderr.contains("airlock --robot-triage"));
+        assert!(stderr.contains("airlock doctor triage --json"));
     }
 }

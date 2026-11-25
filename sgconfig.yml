@@ -1,0 +1,5 @@
+# ast-grep project config. Spine static rules live in ast-rules/ (not rules/):
+# rules/ holds airlock boundary policies (tournament_baseline.yaml), which
+# ast-grep would otherwise try to parse as lint rules.
+ruleDirs:
+  - ast-rules

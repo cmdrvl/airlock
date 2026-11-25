@@ -849,11 +849,10 @@ debug artifact.
 airlock assemble --policy policy.yaml --input strategy_space.json [--input heuristic.json ...] --out prompt_payload.json --provenance-out prompt_provenance.json
 airlock verify  --policy policy.yaml --prompt prompt_payload.json --provenance prompt_provenance.json --request request.json --out airlock_manifest.json [--require-claim RAW_DOCUMENT_ABSENT]
 airlock explain --manifest airlock_manifest.json [--json]
-airlock doctor health [--json]
+airlock doctor [--json]
 airlock doctor capabilities --json
+airlock doctor triage --json
 airlock doctor robot-docs
-airlock doctor --robot-triage
-airlock --robot-triage
 airlock capabilities --json
 airlock robot-docs guide
 airlock witness query [--tool airlock] [--since <iso8601>] [--until <iso8601>] [--outcome <ASSEMBLED|VERIFIED|VERIFY_PARTIAL|REFUSAL>] [--input-hash <substring>] [--limit <n>] [--json]
@@ -861,10 +860,10 @@ airlock witness last [--json]
 airlock witness count [--tool airlock] [--since <iso8601>] [--until <iso8601>] [--outcome <ASSEMBLED|VERIFIED|VERIFY_PARTIAL|REFUSAL>] [--input-hash <substring>] [--json]
 
 # Spine-standard introspection flags
-airlock --describe          # Emit operator.json (pipeline metadata)
+airlock --describe          # Emit operator.json (operator.v1 contract)
 airlock --schema            # Emit output JSON schema
 airlock --version           # Emit version string
-airlock --robot-triage      # Emit read-only machine triage JSON
+airlock --robot-triage      # Deprecated alias of `airlock doctor triage --json`
 ```
 
 Common flags (all subcommands):
@@ -872,8 +871,9 @@ Common flags (all subcommands):
 - `--describe`: print compiled `operator.json` and exit 0 before normal validation
 - `--schema`: print the output schema and exit 0 before normal validation
 - `--version`: print `airlock <semver>` and exit 0
-- `--robot-triage`: print read-only agent triage JSON and exit 0
+- `--robot-triage`: deprecated alias of `doctor triage --json`; read-only, exit 0 healthy / 1 unhealthy
 - `--no-witness`: suppress ambient witness ledger recording for eligible runs
+  (`assemble` and `verify` only)
 
 `assemble` accepts multiple `--input` files. Each input file becomes an entry in
 the manifest's `upstream_artifact_inventory` with its content hash. This keeps
@@ -902,10 +902,28 @@ after writing the manifest.
 existing manifest. It does not re-run policy loading, prompt assembly, request
 scanning, or witness recording.
 
+`operator.json` conforms to the `spine-rules` `operator.v1` family contract and
+is the single source for `--describe`, `capabilities --json` (byte-identical to
+`--describe`) and the `contract` embedded in `doctor capabilities --json`.
+Legacy `operator.v0` spellings (`version`, `subcommands`, `pipeline_position`,
+`exit_semantics`, `refusal_codes`) are gone. Declared refusal codes must match
+the `E_` codes in `src/refusal/mod.rs`.
+
+Every JSON doctor report is `cmdrvl.doctor.v1`: `doctor --json` (mode `health`),
+`doctor capabilities --json` (mode `capabilities`, `contract` = the `operator.v1`
+document) and `doctor triage --json` (mode `triage`, with `next_actions`).
+`healthy` is false exactly when a finding has severity `error`. Doctor exits `0`
+healthy, `1` unhealthy, `2` usage error only; an unhealthy report is never exit
+`2`. The pre-v1 doctor `schema` id is superseded by `schema_version`, the old
+string `contract` is now `read_only_contract`, and the remaining detail fields
+(`ok`, `status`, `read_only`, `witness`, `config_footprint`, `side_effects`,
+`fixers`, `checks`) are additive extras. `doctor health`, `doctor --robot-triage`
+and `--robot-triage` are deprecated aliases.
+
 The top-level `capabilities` and `robot-docs guide` commands are read-only
-agent-discovery aliases for the doctor contracts. They exist so the first
-machine-discovery command an agent guesses can succeed without remembering the
-doctor namespace.
+agent-discovery surfaces. They exist so the first machine-discovery command an
+agent guesses can succeed without remembering the doctor namespace.
+`capabilities --json` is the `operator.v1` contract itself, not a doctor report.
 
 `witness` follows the standard spine ledger surface. Query subcommands do not
 append witness records themselves.
@@ -1082,17 +1100,24 @@ Query runtime semantics should match the mature spine tools:
 `--schema` (output JSON schema) flags. These are present on every spine tool
 and used by pipeline orchestrators to discover tool capabilities.
 
-The compiled `operator.json` should be richer than a name/version stub. It
-should include:
+The compiled `operator.json` is an `operator.v1` document (see
+`spine-rules` `contract.rs`), not a name/version stub. It includes:
 
-- invocation usage strings
-- output mode and output schema
-- common flags (`--describe`, `--schema`, `--version`, `--no-witness`)
-- subcommands (`assemble`, `verify`, `explain`, `doctor`, `witness`)
-- exit semantics
-- refusal map
-- witness capabilities
-- pipeline position (`upstream` / `downstream`)
+- `schema_version` (`operator.v1`), `tool_version` (must equal the `Cargo.toml`
+  package version) and `contract_version`
+- `invocation`: usage strings, output mode, output schema, JSON flag
+- global `options` (`--describe`, `--schema`, `--version`, `--robot-triage`); per-command
+  options (including `--no-witness` on `assemble` and `verify`) live under `commands[]`
+- `commands` (`assemble`, `verify`, `explain`, `witness`, `capabilities`,
+  `robot-docs`, `doctor`)
+- `exit_codes` with family domains (`positive`, `negative`, `error`)
+- `refusals` (the `E_` codes, matching `src/refusal/mod.rs`)
+- `env_vars`, `formats`, `side_effects`
+- `pipeline` (`upstream` / `downstream`)
+- tool-specific extras, such as the `witness` capabilities block
+
+`tests/golden_rules.rs` (`spine_rules::golden_rules_suite!`) and `ast-grep scan`
+(`sgconfig.yml`, `ast-rules/`) enforce this contract in CI.
 
 ### Release And Distribution
 

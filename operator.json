@@ -1,96 +1,159 @@
 {
+  "schema_version": "operator.v1",
   "name": "airlock",
-  "version": "0.3.0",
-  "description": "Prove what crossed the model boundary",
-  "pipeline_position": {
-    "upstream": [
-      "vacuum",
-      "hash",
-      "fingerprint",
-      "benchmark",
-      "assess"
+  "tool_version": "0.3.0",
+  "contract_version": "1.0.0",
+  "description": "Boundary attestation primitive. Proves what crossed the model boundary, which upstream artifacts influenced it, and what claim level was earned. `assemble` builds a deterministic prompt payload plus prompt provenance, `verify` checks a model request against the policy and emits an airlock manifest, `explain` summarizes a manifest, and `witness` queries the local receipt ledger. `doctor`, `capabilities` and `robot-docs` are read-only discovery surfaces.",
+  "repository": "https://github.com/cmdrvl/airlock",
+  "license": "MIT",
+  "agent_guide": "airlock robot-docs guide",
+  "invocation": {
+    "binary": "airlock",
+    "usage": [
+      "airlock assemble --policy <POLICY> --input <FILE>... --out <PROMPT> --provenance-out <PROVENANCE>",
+      "airlock verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out <MANIFEST> [--require-claim <LEVEL>]",
+      "airlock explain --manifest <MANIFEST> [--json]",
+      "airlock witness <query|last|count> [filters] [--json]",
+      "airlock doctor [--json]",
+      "airlock doctor capabilities --json",
+      "airlock doctor triage --json",
+      "airlock doctor robot-docs",
+      "airlock capabilities --json",
+      "airlock robot-docs guide",
+      "airlock --describe",
+      "airlock --schema",
+      "airlock --version"
     ],
-    "downstream": [
-      "lock",
-      "pack",
-      "catalog"
-    ]
+    "output_mode": "json",
+    "output_schema": "airlock.v0.schema.json",
+    "json_flag": "--json"
   },
-  "subcommands": {
-    "assemble": {
-      "description": "Assemble a deterministic prompt payload plus prompt provenance.",
-      "usage": "airlock assemble --policy <POLICY> --input <FILE>... --out <PROMPT> --provenance-out <PROVENANCE>"
+  "arguments": [],
+  "options": [
+    { "name": "describe", "flag": "--describe", "type": "flag", "description": "Print this operator manifest (identical to `capabilities --json`) and exit 0" },
+    { "name": "schema", "flag": "--schema", "type": "flag", "description": "Print the airlock manifest JSON Schema and exit 0" },
+    { "name": "version", "flag": "--version", "type": "flag", "description": "Print 'airlock <version>' and exit 0" },
+    { "name": "robot_triage", "flag": "--robot-triage", "type": "flag", "description": "Deprecated alias of `airlock doctor triage --json`" }
+  ],
+  "commands": [
+    {
+      "name": "assemble",
+      "description": "Assemble a deterministic prompt payload plus prompt provenance from policy-approved inputs.",
+      "options": [
+        { "name": "policy", "flag": "--policy", "type": "file_path", "required": true, "description": "Boundary policy YAML file" },
+        { "name": "input", "flag": "--input", "type": "file_path", "required": true, "repeatable": true, "description": "Input JSON artifact; repeat for multiple upstream artifacts" },
+        { "name": "system_prompt", "flag": "--system-prompt", "type": "file_path", "description": "Optional UTF-8 system prompt file included in provenance" },
+        { "name": "boundary_mode", "flag": "--boundary-mode", "type": "string", "description": "Boundary exposure mode: ANNOTATED (default) or TELEMETRY_ONLY" },
+        { "name": "out", "flag": "--out", "type": "file_path", "required": true, "description": "Path to write prompt_payload.json" },
+        { "name": "provenance_out", "flag": "--provenance-out", "type": "file_path", "required": true, "description": "Path to write prompt_provenance.json" },
+        { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
+      ],
+      "read_only": false,
+      "records_witness": true
     },
-    "verify": {
-      "description": "Verify a request boundary and emit an airlock manifest.",
-      "usage": "airlock verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out <MANIFEST> [--require-claim <LEVEL>]"
+    {
+      "name": "verify",
+      "description": "Verify a request boundary against the policy and emit an airlock manifest, including for BOUNDARY_FAILED.",
+      "options": [
+        { "name": "policy", "flag": "--policy", "type": "file_path", "required": true, "description": "Boundary policy YAML used during assembly" },
+        { "name": "prompt", "flag": "--prompt", "type": "file_path", "required": true, "description": "prompt_payload.json produced by airlock assemble" },
+        { "name": "provenance", "flag": "--provenance", "type": "file_path", "required": true, "description": "prompt_provenance.json produced by airlock assemble" },
+        { "name": "request", "flag": "--request", "type": "file_path", "required": true, "description": "Transport-wrapped model request JSON" },
+        { "name": "out", "flag": "--out", "type": "file_path", "required": true, "description": "Path to write airlock_manifest.json" },
+        { "name": "require_claim", "flag": "--require-claim", "type": "string", "description": "Minimum acceptable claim: BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT or STRICT_TELEMETRY_ONLY" },
+        { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
+      ],
+      "read_only": false,
+      "records_witness": true
     },
-    "explain": {
-      "description": "Render a human-readable or machine-readable explanation of an airlock manifest.",
-      "usage": "airlock explain --manifest <MANIFEST> [--json]"
+    {
+      "name": "explain",
+      "description": "Render a human-readable or machine-readable explanation of an airlock manifest without re-verifying it.",
+      "options": [
+        { "name": "manifest", "flag": "--manifest", "type": "file_path", "required": true, "description": "airlock_manifest.json to explain" },
+        { "name": "json", "flag": "--json", "type": "flag", "description": "Emit machine-readable explanation JSON" }
+      ],
+      "read_only": true,
+      "records_witness": false
     },
-    "doctor": {
-      "description": "Inspect read-only CLI health, capabilities, and machine triage contracts without reading run artifacts or touching witness state.",
-      "usage": "airlock doctor health [--json] | airlock doctor capabilities --json | airlock doctor robot-docs | airlock doctor --robot-triage"
+    {
+      "name": "witness",
+      "description": "Query the local witness ledger (`query`, `last`, `count`) without recording witness entries. `query`, `last` and `count` currently exit 1 when no records match.",
+      "subcommands": ["query", "last", "count"],
+      "options": [
+        { "name": "json", "flag": "--json", "type": "flag", "description": "Emit machine-readable JSON" }
+      ],
+      "read_only": true,
+      "records_witness": false
     },
-    "capabilities": {
-      "description": "Read-only top-level alias for the machine-readable command, side-effect, and config contract.",
-      "usage": "airlock capabilities --json"
+    {
+      "name": "capabilities",
+      "description": "Emit this machine-readable contract (same document as --describe).",
+      "options": [
+        { "name": "json", "flag": "--json", "type": "flag", "description": "Emit the contract as JSON" }
+      ],
+      "read_only": true,
+      "records_witness": false
     },
-    "robot-docs": {
-      "description": "Read-only top-level alias for the compact agent-facing guide.",
-      "usage": "airlock robot-docs guide"
+    {
+      "name": "robot-docs",
+      "description": "Print the compact agent-facing guide (`robot-docs guide`).",
+      "arguments": [
+        { "name": "topic", "type": "string", "position": 0, "required": false, "description": "Only `guide` is defined" }
+      ],
+      "read_only": true,
+      "records_witness": false
     },
-    "robot-triage": {
-      "description": "Read-only top-level machine triage JSON.",
-      "usage": "airlock --robot-triage"
-    },
-    "witness": {
-      "description": "Query the local witness ledger without recording witness entries.",
-      "usage": "airlock witness <query|last|count> [filters] [--json]"
+    {
+      "name": "doctor",
+      "description": "Inspect read-only CLI health without reading run artifacts or touching witness state; every JSON form is a cmdrvl.doctor.v1 report. `doctor --json` is mode health; `doctor capabilities --json` is mode capabilities (its `contract` is this document); `doctor triage --json` is mode triage (with next_actions). Exits 0 healthy, 1 unhealthy. Deprecated aliases kept for compatibility: `doctor health [--json]`, `doctor --robot-triage` and top-level `--robot-triage` (same document as `doctor triage --json`).",
+      "subcommands": ["health", "capabilities", "triage", "robot-docs"],
+      "options": [
+        { "name": "json", "flag": "--json", "type": "flag", "description": "Emit doctor health as JSON" },
+        { "name": "robot_triage", "flag": "--robot-triage", "type": "flag", "description": "Deprecated alias of `doctor triage --json`" }
+      ],
+      "read_only": true,
+      "records_witness": false
     }
-  },
-  "common_flags": [
-    "--describe",
-    "--schema",
-    "--version",
-    "--robot-triage",
-    "--no-witness"
   ],
-  "exit_semantics": {
-    "0": "VERIFY_PASS",
-    "1": "VERIFY_PARTIAL",
-    "2": "REFUSAL"
+  "exit_codes": {
+    "0": { "meaning": "VERIFY_PASS: the command completed and any --require-claim was met; also a healthy doctor and every read-only discovery surface (a verify that earns BOUNDARY_FAILED without --require-claim still exits 0 with an honest manifest verdict)", "domain": "positive" },
+    "1": { "meaning": "VERIFY_PARTIAL: verification completed but the achieved claim fell below --require-claim; also `doctor` reporting an unhealthy state (an error finding); also `witness query|last|count` when no records match", "domain": "negative" },
+    "2": { "meaning": "REFUSAL or CLI/usage error: a structured refusal envelope on stdout (bad policy, input, prompt, request, provenance or manifest, missing file, witness or internal error), or a clap usage error", "domain": "error" }
   },
-  "refusal_codes": [
-    "E_BAD_POLICY",
-    "E_BAD_INPUT",
-    "E_BAD_PROMPT",
-    "E_BAD_REQUEST",
-    "E_BAD_PROVENANCE",
-    "E_BAD_MANIFEST",
-    "E_MISSING_FILE",
-    "E_WITNESS_ERROR",
-    "E_INTERNAL"
+  "refusals": [
+    { "code": "E_BAD_POLICY", "message": "Boundary policy failed to parse or validate", "action": "Fix the policy YAML against `airlock --schema`" },
+    { "code": "E_BAD_INPUT", "message": "An input artifact or argument is malformed or unusable", "action": "Run `airlock --help` and correct the input" },
+    { "code": "E_BAD_PROMPT", "message": "prompt_payload.json is malformed or not a prompt airlock assembled", "action": "Re-run `airlock assemble`" },
+    { "code": "E_BAD_REQUEST", "message": "The transport-wrapped model request is malformed or unsupported", "action": "Check the request against `airlock verify --help`" },
+    { "code": "E_BAD_PROVENANCE", "message": "prompt_provenance.json is malformed or inconsistent with the prompt", "action": "Re-run `airlock assemble`" },
+    { "code": "E_BAD_MANIFEST", "message": "airlock_manifest.json is malformed", "action": "Re-run `airlock verify` to regenerate the manifest" },
+    { "code": "E_MISSING_FILE", "message": "A required file does not exist", "action": "Create or correct the path" },
+    { "code": "E_WITNESS_ERROR", "message": "The witness ledger could not be read or queried", "action": "Check EPISTEMIC_WITNESS and the ledger path, or use `--no-witness`" },
+    { "code": "E_INTERNAL", "message": "Unexpected internal state", "action": "Report this with the refusal detail" }
   ],
+  "env_vars": [
+    { "name": "EPISTEMIC_WITNESS", "description": "Override the witness ledger path", "default": "~/.cmdrvl/state/witness/witness.jsonl" },
+    { "name": "NO_COLOR", "description": "Disable ANSI color in human output (airlock emits none when piped)" },
+    { "name": "SOURCE_DATE_EPOCH", "description": "Fixed Unix timestamp used instead of the wall clock for reproducible output" },
+    { "name": "TERM", "description": "TERM=dumb disables ANSI color in human output" }
+  ],
+  "formats": ["json", "text"],
+  "side_effects": {
+    "reads_files": true,
+    "writes_files": true,
+    "network": false,
+    "writes_witness": true,
+    "notes": "assemble and verify write the paths given by --out/--provenance-out and append one witness record unless --no-witness is set; explain, witness, doctor, capabilities and robot-docs are read-only and never open or create the witness ledger for writing."
+  },
+  "pipeline": {
+    "upstream": ["vacuum", "hash", "fingerprint", "benchmark", "assess"],
+    "downstream": ["lock", "pack", "catalog"]
+  },
   "witness": {
     "tool_name": "airlock",
-    "recording_commands": [
-      "assemble",
-      "verify"
-    ],
-    "non_recording_commands": [
-      "explain",
-      "doctor",
-      "witness"
-    ],
-    "outcomes": [
-      "ASSEMBLED",
-      "VERIFIED",
-      "VERIFY_PARTIAL",
-      "REFUSAL"
-    ]
-  },
-  "output_mode": "json",
-  "output_schema": "airlock.v0.schema.json"
+    "recording_commands": ["assemble", "verify"],
+    "non_recording_commands": ["explain", "doctor", "capabilities", "robot-docs", "witness"],
+    "outcomes": ["ASSEMBLED", "VERIFIED", "VERIFY_PARTIAL", "REFUSAL"]
+  }
 }

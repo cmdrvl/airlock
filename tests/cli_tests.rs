@@ -92,19 +92,41 @@ fn test_describe_emits_operator_json() {
         .clone();
     let describe = read_json_output(&output);
 
+    assert_eq!(describe["schema_version"], "operator.v1");
     assert_eq!(describe["name"], "airlock");
-    assert_eq!(describe["output_schema"], "airlock.v0.schema.json");
-    assert!(
-        describe["subcommands"]["assemble"]["usage"]
-            .as_str()
-            .unwrap()
-            .contains("airlock assemble")
+    assert_eq!(describe["tool_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        describe["invocation"]["output_schema"],
+        "airlock.v0.schema.json"
     );
+    // Legacy operator.v0 spellings must be gone.
+    assert!(describe.get("version").is_none());
+    assert!(describe.get("subcommands").is_none());
+    assert!(describe.get("pipeline_position").is_none());
+
+    let names: Vec<&str> = describe["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| command["name"].as_str().unwrap())
+        .collect();
+    for required in [
+        "assemble",
+        "verify",
+        "explain",
+        "witness",
+        "capabilities",
+        "robot-docs",
+        "doctor",
+    ] {
+        assert!(names.contains(&required), "missing command {required}");
+    }
     assert!(
-        describe["subcommands"]["doctor"]["usage"]
-            .as_str()
+        describe["invocation"]["usage"]
+            .as_array()
             .unwrap()
-            .contains("airlock doctor")
+            .iter()
+            .any(|usage| usage.as_str().unwrap().contains("airlock assemble"))
     );
 }
 
@@ -145,23 +167,33 @@ fn test_bare_invocation_prints_agent_entrypoints() {
 
     let stdout = String::from_utf8(output).unwrap();
     assert!(stdout.contains("Usage: airlock"));
-    assert!(stdout.contains("airlock --robot-triage"));
+    assert!(stdout.contains("airlock doctor triage --json"));
     assert!(stdout.contains("airlock capabilities --json"));
     assert!(stdout.contains("airlock robot-docs guide"));
 }
 
 #[test]
-fn test_top_level_robot_triage_alias_is_json() {
-    let output = airlock_cmd()
+fn test_top_level_robot_triage_alias_is_the_triage_report() {
+    let alias = airlock_cmd()
         .arg("--robot-triage")
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
+    let canonical = airlock_cmd()
+        .args(["doctor", "triage", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
 
-    let value = read_json_output(&output);
-    assert_eq!(value["schema"], "airlock.doctor.triage.v1");
+    assert_eq!(alias, canonical);
+    let value = read_json_output(&alias);
+    assert_eq!(value["schema_version"], "cmdrvl.doctor.v1");
+    assert_eq!(value["mode"], "triage");
+    assert_eq!(value["healthy"], true);
     assert_eq!(
         value["summary"]["capabilities"],
         "airlock capabilities --json"
@@ -170,46 +202,58 @@ fn test_top_level_robot_triage_alias_is_json() {
 }
 
 #[test]
-fn test_top_level_capabilities_alias_is_json() {
-    let output = airlock_cmd()
+fn test_top_level_capabilities_json_is_the_describe_contract() {
+    let capabilities = airlock_cmd()
         .args(["capabilities", "--json"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
+    let describe = airlock_cmd()
+        .arg("--describe")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
 
-    let value = read_json_output(&output);
-    assert_eq!(value["schema"], "airlock.doctor.capabilities.v1");
-    assert_eq!(
-        value["agent_entrypoints"]["robot_docs"],
-        "airlock robot-docs guide"
-    );
+    assert_eq!(capabilities, describe);
+    let value = read_json_output(&capabilities);
+    assert_eq!(value["schema_version"], "operator.v1");
     assert!(
         value["commands"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|command| command["name"] == "explain --json")
+            .any(|command| command["name"] == "explain")
     );
-    assert_eq!(
-        value["composition"]["family"]["name"],
-        "cmdrvl-boundary-attestation"
-    );
-    assert_eq!(
-        value["composition"]["role"],
-        "boundary attestation primitive between deterministic evidence and model execution"
-    );
-    assert!(
-        value["composition"]["canonical_chain"][0]
-            .as_str()
-            .is_some_and(|command| command.contains("airlock assemble --policy <POLICY>"))
-    );
-    assert!(
-        value["composition"]["canonical_chain"][2]
-            .as_str()
-            .is_some_and(|command| command.contains("pack seal airlock_manifest.json"))
-    );
+    assert_eq!(value["exit_codes"]["0"]["domain"], "positive");
+    assert_eq!(value["exit_codes"]["1"]["domain"], "negative");
+    assert_eq!(value["exit_codes"]["2"]["domain"], "error");
+    let refusals: Vec<&str> = value["refusals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|refusal| refusal["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(refusals.len(), 9);
+    assert!(refusals.iter().all(|code| code.starts_with("E_")));
+}
+
+#[test]
+fn test_capabilities_without_json_is_human_text() {
+    let output = airlock_cmd()
+        .arg("capabilities")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.starts_with("airlock capabilities"));
+    assert!(serde_json::from_str::<Value>(&stdout).is_err());
 }
 
 #[test]
@@ -243,7 +287,7 @@ fn test_json_typo_has_agent_hint() {
 
     let stderr = String::from_utf8(output).unwrap();
     assert!(stderr.contains("did you mean `--json`"));
-    assert!(stderr.contains("airlock --robot-triage"));
+    assert!(stderr.contains("airlock doctor triage --json"));
 }
 
 #[test]
@@ -261,10 +305,23 @@ fn test_doctor_health_json_is_read_only() {
 
     assert_doctor_side_effects_absent(dir.path(), &witness_path);
     let payload = read_json_output(&output);
-    assert_eq!(payload["schema"], "airlock.doctor.health.v1");
+    assert_eq!(payload["schema_version"], "cmdrvl.doctor.v1");
+    assert_eq!(payload["mode"], "health");
     assert_eq!(payload["tool"], "airlock");
+    assert_eq!(payload["tool_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(payload["healthy"], true);
+    assert!(
+        payload["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| finding["severity"] == "info")
+    );
+    // Additive pre-v1 detail fields stay.
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["read_only"], true);
+    assert_eq!(payload["read_only_contract"], "cmdrvl.read_only_doctor.v1");
+    assert!(payload["contract"].is_null());
     assert_eq!(payload["witness"]["opened"], false);
     assert_eq!(payload["witness"]["appended"], false);
     assert_eq!(payload["witness"]["directory_created"], false);
@@ -296,7 +353,9 @@ fn test_doctor_capabilities_json_has_no_fixers_or_side_effects() {
 
     assert_doctor_side_effects_absent(dir.path(), &witness_path);
     let payload = read_json_output(&output);
-    assert_eq!(payload["schema"], "airlock.doctor.capabilities.v1");
+    assert_eq!(payload["schema_version"], "cmdrvl.doctor.v1");
+    assert_eq!(payload["mode"], "capabilities");
+    assert_eq!(payload["healthy"], true);
     assert_eq!(payload["fixers"].as_array().map(Vec::len), Some(0));
     assert_eq!(payload["config_footprint"]["self_contained"], true);
 
@@ -306,6 +365,69 @@ fn test_doctor_capabilities_json_has_no_fixers_or_side_effects() {
             .values()
             .all(|enabled| enabled.as_bool() == Some(false))
     );
+
+    // `contract` is exactly the `capabilities --json` document.
+    let capabilities = airlock_cmd_in(dir.path(), &witness_path)
+        .args(["capabilities", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(payload["contract"], read_json_output(&capabilities));
+
+    assert_eq!(
+        payload["agent_entrypoints"]["robot_docs"],
+        "airlock robot-docs guide"
+    );
+    assert_eq!(
+        payload["agent_entrypoints"]["triage_json"],
+        "airlock doctor triage --json"
+    );
+    assert_eq!(
+        payload["composition"]["family"]["name"],
+        "cmdrvl-boundary-attestation"
+    );
+    assert_eq!(
+        payload["composition"]["role"],
+        "boundary attestation primitive between deterministic evidence and model execution"
+    );
+    assert!(
+        payload["composition"]["canonical_chain"][0]
+            .as_str()
+            .is_some_and(|command| command.contains("airlock assemble --policy <POLICY>"))
+    );
+    assert!(
+        payload["composition"]["canonical_chain"][2]
+            .as_str()
+            .is_some_and(|command| command.contains("pack seal airlock_manifest.json"))
+    );
+    assert_doctor_side_effects_absent(dir.path(), &witness_path);
+}
+
+#[test]
+fn test_doctor_health_alias_matches_doctor_json() {
+    let dir = tempdir().unwrap();
+    let witness_path = dir.path().join("witness").join("ledger.jsonl");
+
+    let canonical = airlock_cmd_in(dir.path(), &witness_path)
+        .args(["doctor", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let alias = airlock_cmd_in(dir.path(), &witness_path)
+        .args(["doctor", "health", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(canonical, alias);
+    assert_eq!(read_json_output(&canonical)["mode"], "health");
+    assert_doctor_side_effects_absent(dir.path(), &witness_path);
 }
 
 #[test]
@@ -314,6 +436,13 @@ fn test_doctor_robot_triage_json_is_machine_readable() {
     let witness_path = dir.path().join("witness").join("ledger.jsonl");
 
     let output = airlock_cmd_in(dir.path(), &witness_path)
+        .args(["doctor", "triage", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let alias = airlock_cmd_in(dir.path(), &witness_path)
         .args(["doctor", "--robot-triage"])
         .assert()
         .success()
@@ -322,15 +451,40 @@ fn test_doctor_robot_triage_json_is_machine_readable() {
         .clone();
 
     assert_doctor_side_effects_absent(dir.path(), &witness_path);
+    assert_eq!(output, alias);
     let payload = read_json_output(&output);
-    assert_eq!(payload["schema"], "airlock.doctor.triage.v1");
+    assert_eq!(payload["schema_version"], "cmdrvl.doctor.v1");
+    assert_eq!(payload["mode"], "triage");
+    assert_eq!(payload["healthy"], true);
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["summary"]["failed_checks"], 0);
-    assert_eq!(payload["findings"].as_array().map(Vec::len), Some(0));
+    assert_eq!(payload["next_actions"].as_array().map(Vec::len), Some(0));
+    assert!(
+        payload["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| finding["severity"] == "info")
+    );
     assert_eq!(
         payload["config_footprint"]["deprecation_notices"],
         "~/.cmdrvl/notices/deprecated-paths.jsonl"
     );
+}
+
+#[test]
+fn test_doctor_triage_without_json_is_human_text() {
+    let output = airlock_cmd()
+        .args(["doctor", "triage"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.starts_with("airlock doctor triage: healthy"));
+    assert!(serde_json::from_str::<Value>(&stdout).is_err());
 }
 
 #[test]
@@ -367,6 +521,7 @@ fn test_doctor_help_is_available() {
     let stdout = String::from_utf8(output).unwrap();
     assert!(stdout.contains("health"));
     assert!(stdout.contains("capabilities"));
+    assert!(stdout.contains("triage"));
     assert!(stdout.contains("robot-docs"));
 }
 

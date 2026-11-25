@@ -20,6 +20,7 @@ sha2 = "=0.10"
 assert_cmd = "2"
 jsonschema = "0.28"
 predicates = "3"
+spine-rules = { git = "https://github.com/cmdrvl/spine-rules" }
 tempfile = "3"
 
 [profile.release]

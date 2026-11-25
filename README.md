@@ -62,24 +62,36 @@ airlock --version
 ## Quick Start
 
 ```bash
+# 0. Once per machine: create the Ed25519 key that `verify` signs manifests with
+airlock keygen
+
 # 1. Assemble a prompt payload from telemetry inputs + policy
 airlock assemble \
   --policy rules/tournament_baseline.yaml \
   --input strategy_space.json \
   --out prompt_payload.json \
-  --provenance-out prompt_provenance.json
+  --provenance-out prompt_provenance.json \
+  --not-crossed-out not_crossed.json
 
-# 2. Verify the boundary after transport wrapping
+# 2. Verify the boundary after transport wrapping (signs the manifest)
 airlock verify \
   --policy rules/tournament_baseline.yaml \
   --prompt prompt_payload.json \
   --provenance prompt_provenance.json \
   --request request.json \
+  --not-crossed not_crossed.json \
   --out airlock_manifest.json
 
 # 3. Explain the manifest in human-readable form
 airlock explain --manifest airlock_manifest.json
+
+# 4. Check the manifest's signature against the public key
+airlock verify-manifest airlock_manifest.json
 ```
+
+`verify` signs by default and refuses to run without a usable key, so step 0 is
+needed unless you pass `--no-sign` (for CI, which has no key) to get an unsigned
+manifest. Step 4 and the `--not-crossed-out` / `--not-crossed` pair are optional.
 
 ### Egress gate
 
@@ -179,9 +191,14 @@ string-valued `contract` field is now `read_only_contract` (`contract` carries t
 
 ### Configuration Footprint
 
-Airlock has no durable config file, cache, lock, or local secret store. Its only
-implicit managed home path is the shared spine witness ledger:
-`~/.cmdrvl/state/witness/witness.jsonl`.
+Airlock has no durable config file, cache, or lock. It manages two paths under
+your home directory: the shared spine witness ledger
+`~/.cmdrvl/state/witness/witness.jsonl`, and the manifest signing key pair in
+`~/.cmdrvl/secrets/airlock/` (`ed25519.key`, mode 0600, and `ed25519.pub`).
+`airlock keygen` is the only command that creates the secrets directory, and it
+never overwrites a key. `doctor` lists the directory under
+`config_footprint.managed_secret_paths` without opening it. On Unix, Airlock
+refuses to use a signing key that group or others can read.
 
 `EPISTEMIC_WITNESS` remains an explicit operator override. When the override is
 not set, first use copies a legacy `~/.epistemic/witness.jsonl` or
@@ -200,6 +217,13 @@ Boundary mode: ANNOTATED
 
 Raw document artifacts: absent
 Derived filing text: present
+
+Bytes crossed: 18204
+Attestation: self_attested (written by airlock verify, not by a send or gate receipt)
+Signature: ed25519 by blake3:9f8e7d... (explain does not check it; run airlock verify-manifest)
+Left out of the request: 2 fields (values are never stored):
+  - html_path [FORBIDDEN_KEY] blake3:9451fd...
+  - operator_note [NOT_ALLOWED] blake3:e492e0...
 
 Why strict telemetry-only was not earned:
   - mutator_context.challenge_observation
@@ -322,8 +346,14 @@ airlock assemble \
   --provenance-out <PATH>   # Output prompt_provenance.json
   --boundary-mode <MODE>    # ANNOTATED (default) or TELEMETRY_ONLY
   --system-prompt <PATH>    # Optional system prompt file
+  --not-crossed-out <PATH>  # Optional: write the inventory of input fields that did not cross
   --no-witness              # Skip witness ledger recording
 ```
+
+`--not-crossed-out` writes an `airlock.not_crossed.v1` file listing every input
+field that did not reach the prompt: its path, the hash of the input artifact it
+came from, the hash of its value, and why it stayed behind. The values themselves
+are never written. Pass the file to `verify --not-crossed`.
 
 ### `airlock verify`
 
@@ -337,6 +367,8 @@ airlock verify \
   --request <PATH>          # Transport-wrapped request (JSON)
   --out <PATH>              # Output airlock_manifest.json (alias: --output)
   --require-claim <LEVEL>   # Optional: fail if claim is below this level
+  --not-crossed <PATH>      # Optional: not_crossed.json from assemble --not-crossed-out
+  --no-sign                 # Write the manifest without a signature (for CI without a key)
   --no-witness              # Skip witness ledger recording
 ```
 
@@ -350,6 +382,18 @@ or altered message, or undeclared transport field, produces a
 achieved claim to `BOUNDARY_FAILED`. The finding does not echo the altered
 message content.
 
+`verify` writes an `airlock.v0.3` manifest (see [Manifest versions](#manifest-versions)).
+`--not-crossed` copies the entries of an inventory from `assemble --not-crossed-out`
+into it. `verify` refuses (`E_BAD_PROVENANCE`) an inventory that belongs to a
+different policy, prompt payload, or boundary mode, or that has a malformed entry.
+Without `--not-crossed` the manifest records no inventory, which is not the same
+as an empty one.
+
+By default `verify` then signs the manifest with the key that `airlock keygen`
+created. It loads that key before it reads any input, so with no usable key it
+refuses (`E_BAD_INPUT`, `next_command: airlock keygen`) instead of quietly
+writing an unsigned manifest. `--no-sign` writes the manifest without a signature.
+
 ### `airlock explain`
 
 Manifest rendering as human-readable text or deterministic explanation JSON.
@@ -362,11 +406,69 @@ airlock explain --manifest <PATH> [--json]
 mode, manifest hash, proof hashes, blocked paths, findings, provenance summary,
 and next commands.
 
+For an `airlock.v0.3` manifest, `explain` also shows `bytes_crossed`,
+`attestation`, the signature's algorithm and signer fingerprint, and what was
+left out of the request: path, reason and value hash per field, never a value.
+A missing inventory reads "not recorded" and an empty one reads "nothing", because
+they are different claims. `--json` adds `bytes_crossed`, `attestation`,
+`not_crossed` and `signature`, with `null` for a member the manifest lacks
+(`signature: null` is an unsigned manifest; `not_crossed: null` is a `verify` run
+that was given no inventory; `[]` means nothing was left out). `signature.checked`
+is always `false`: `explain` does not verify the signature, `verify-manifest` does,
+and the signature bytes are not repeated. An `airlock.v0.2` manifest explains
+exactly as it did before v0.3.
+
 `--manifest` also accepts an `airlock.gate.v1` gate receipt. The output then says
 what the gate did (denied, forwarded, forwarded with an incomplete response, or
 authorized but not delivered), the request and response sizes and hashes, the
 matched manifest, any limit that tripped, and why each finding was raised;
 `--json` emits `airlock.explain_gate.v1`.
+
+### `airlock keygen`
+
+Create the Ed25519 key pair that `verify` signs manifests with.
+
+```bash
+airlock keygen
+```
+
+Writes `ed25519.key` (the secret seed, hex, mode 0600) and `ed25519.pub` under
+`~/.cmdrvl/secrets/airlock/` and prints JSON with the public key, its fingerprint
+(`blake3:` over the 32 raw public-key bytes) and both paths. The secret is never
+printed. `keygen` refuses (`E_BAD_INPUT`) when either file already exists, because
+it never overwrites a key, and when the home directory is not set. It records
+nothing in the witness ledger.
+
+### `airlock verify-manifest`
+
+Check the signature on a manifest.
+
+```bash
+airlock verify-manifest <MANIFEST> [--pubkey <PATH>]
+```
+
+`--pubkey` defaults to `~/.cmdrvl/secrets/airlock/ed25519.pub`. A valid signature
+exits `0` with `{"command":"verify-manifest","verified":true,...}` naming the
+signer fingerprint. Anything else is a refusal (exit `2`): `E_BAD_MANIFEST` with
+`detail.reason` one of `unsigned`, `signature_mismatch`, `fingerprint_mismatch`,
+`unsupported_manifest_version`, `unsupported_algorithm`, `malformed_signature` or
+`not_an_object`, or `E_MISSING_FILE` for a missing manifest or key.
+
+The signature covers the RFC 8785 canonical JSON of the whole manifest with its
+`signature` member removed, so changing any other member, including one this
+version does not know about, fails it. The public key is not embedded in the
+manifest. The `public_key_fingerprint` it records only lets a wrong key fail with
+`fingerprint_mismatch` instead of `signature_mismatch`; it sits inside the
+excluded member, so the signature, not the fingerprint, is what authenticates.
+Verification uses the strict Ed25519 check, so a small-order public key cannot
+forge a signature. An `airlock.v0.2` manifest has no signature and is refused as
+`unsupported_manifest_version`.
+
+Two limits to know. `verify-manifest` checks the parsed JSON, so a manifest with a
+repeated object key is read as `serde_json` reads it (the last value wins) and is
+not rejected. And `airlock gate` accepts `airlock.v0.2` and `airlock.v0.3`
+manifests but does not check their signatures. `verify-manifest` records nothing
+in the witness ledger.
 
 ### `airlock doctor`
 
@@ -429,6 +531,7 @@ Refusals emit structured JSON to stdout with a `refusal.code` field
 | Variable | Effect |
 |----------|--------|
 | `EPISTEMIC_WITNESS` | Override the witness ledger path (default `~/.cmdrvl/state/witness/witness.jsonl`) |
+| `HOME` (or `USERPROFILE`) | Where the signing key pair lives, `~/.cmdrvl/secrets/airlock/`. `keygen`, `verify` and `verify-manifest` refuse when it is unset or empty; there is no relative-path fallback. |
 | `SOURCE_DATE_EPOCH` | Unix seconds. Pins the `verify` manifest `timestamp`, so identical inputs produce a byte-identical manifest. A set but malformed value is an `E_BAD_INPUT` refusal (exit 2, `detail.env`/`value`/`expected`), never a silent fallback to the clock. Witness records keep the real wall clock. |
 | `NO_COLOR`, `TERM=dumb` | Airlock does not colorize output. No surface emits an ANSI escape when piped, with or without these set, and `NO_COLOR` wins over `CLICOLOR_FORCE` (regression-tested). |
 
@@ -487,6 +590,27 @@ This is the difference between Airlock and the rest of the spine:
 
 If an auditor asks "what did the model actually see?", the answer is in
 Airlock artifacts, not in operator memory.
+
+### Manifest versions
+
+`airlock.v0.2` is the earlier manifest. `airlock.v0.3`, which `verify` now writes,
+adds four members, none of which a v0.2 manifest may carry (the schema forbids
+it). Existing v0.2 manifests stay valid and unchanged, and `airlock gate` reads
+both versions.
+
+| Member | Meaning |
+|--------|---------|
+| `bytes_crossed` | Length in bytes of the RFC 8785 canonical request JSON that `request_payload_hash` covers |
+| `attestation` | `self_attested`: written by `airlock verify`. `transmitted` and `gated` are reserved for send and gate receipts and are not written yet |
+| `not_crossed` | Only when `verify` was given `--not-crossed`: one entry per input field that did not cross, with `path`, `source_artifact_hash`, `value_hash` and `reason` (`NOT_ALLOWED`, `FORBIDDEN_KEY`, `DERIVED_TEXT_EXCLUDED` or `SHADOWED_BY_EARLIER_INPUT`) |
+| `signature` | Absent under `--no-sign`. `{algorithm: "ed25519", public_key_fingerprint, value}` over the manifest without this member |
+
+`value_hash` is `blake3` over the RFC 8785 canonical JSON of the value that stayed
+behind (an integer beyond 2^53, which that form refuses, hashes as its exact
+decimal digits). The value itself is never stored, so the inventory proves a field
+was left out and lets someone who holds the value confirm it was that one. It
+covers the inputs `assemble` was given; it says nothing about anything else that
+might have been left out of the request.
 
 ## Policy
 
@@ -551,9 +675,17 @@ includes detector findings from the manifest.
 - what claim level was achieved
 - why stronger claims failed
 - which exact prompt fragments were `TELEMETRY` vs `DERIVED_TEXT`
+- how many bytes crossed (`bytes_crossed`, v0.3)
+- which input fields stayed behind and why, by hash, when `verify` was given the inventory (v0.3)
+- that a signed manifest has not changed since it was signed with a given key (`verify-manifest`)
 
 ### Airlock does not prove
 
+- who holds the signing key, or that it was not copied: the key is local and
+  self-issued, so a signature shows the manifest is unaltered since signing, not
+  who signed it
+- that a v0.3 manifest was witnessed by anything but `airlock verify`
+  (`attestation: self_attested`); `airlock gate` does not check signatures
 - that the source document is true
 - that the parser extracted the right facts
 - that the model response is correct

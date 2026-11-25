@@ -78,7 +78,7 @@
     },
     {
       "name": "witness",
-      "description": "Query the local witness ledger (`query`, `last`, `count`) without recording witness entries. `query`, `last` and `count` currently exit 1 when no records match.",
+      "description": "Query the local witness ledger (`query`, `last`, `count`) without recording witness entries. An empty result (no ledger, no records, or a filter that matches nothing) is success: exit 0, with `[]` from `query --json`, `{\"count\":0}` from `count --json` and `null` from `last --json`. A ledger or filter that cannot be read or parsed is a refusal (exit 2).",
       "subcommands": ["query", "last", "count"],
       "options": [
         { "name": "json", "flag": "--json", "type": "flag", "description": "Emit machine-readable JSON" }
@@ -117,8 +117,8 @@
     }
   ],
   "exit_codes": {
-    "0": { "meaning": "VERIFY_PASS: the command completed and any --require-claim was met; also a healthy doctor and every read-only discovery surface (a verify that earns BOUNDARY_FAILED without --require-claim still exits 0 with an honest manifest verdict)", "domain": "positive" },
-    "1": { "meaning": "VERIFY_PARTIAL: verification completed but the achieved claim fell below --require-claim; also `doctor` reporting an unhealthy state (an error finding); also `witness query|last|count` when no records match", "domain": "negative" },
+    "0": { "meaning": "VERIFY_PASS: the command completed and any --require-claim was met; also a healthy doctor, every read-only discovery surface, and any `witness query|last|count`, including one with an empty result (a verify that earns BOUNDARY_FAILED without --require-claim still exits 0 with an honest manifest verdict)", "domain": "positive" },
+    "1": { "meaning": "VERIFY_PARTIAL: verification completed but the achieved claim fell below --require-claim; also `doctor` reporting an unhealthy state (an error finding)", "domain": "negative" },
     "2": { "meaning": "REFUSAL or CLI/usage error: a structured refusal envelope on stdout (bad policy, input, prompt, request, provenance or manifest, missing file, witness or internal error), or a clap usage error", "domain": "error" }
   },
   "refusals": [

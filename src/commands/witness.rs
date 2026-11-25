@@ -17,6 +17,13 @@ pub fn run(args: WitnessCommands) -> u8 {
     run_with_writer(args, &witness::default_witness_path(), &mut stdout)
 }
 
+// Exit codes for the read-only witness commands: an empty result (no ledger, no records, or
+// a filter that matches nothing) is success, exit 0, per the spine-rules family contract.
+// Exit 1 is reserved for a negative verdict or an unhealthy doctor and is never used here.
+// Anything that stops the ledger being read or the filters being parsed is a refusal,
+// exit 2. Only the exit code reports "nothing matched": `query --json` prints `[]`,
+// `count --json` prints `{"count":0}` and `last --json` prints `null`.
+
 fn run_with_writer(args: WitnessCommands, ledger_path: &Path, stdout: &mut impl Write) -> u8 {
     match args {
         WitnessCommands::Query(args) => run_query(args, ledger_path, stdout),
@@ -49,7 +56,7 @@ fn run_query(args: WitnessQueryArgs, ledger_path: &Path, stdout: &mut impl Write
         }
     }
 
-    if records.is_empty() { 1 } else { 0 }
+    0
 }
 
 fn run_last(args: WitnessLastArgs, ledger_path: &Path, stdout: &mut impl Write) -> u8 {
@@ -73,7 +80,6 @@ fn run_last(args: WitnessLastArgs, ledger_path: &Path, stdout: &mut impl Write) 
                 let _ = writeln!(stdout, "Inputs: {}", input_summary(&record));
                 let _ = writeln!(stdout, "Stdout bytes: {}", record.stdout_bytes);
             }
-            0
         }
         None => {
             if args.json {
@@ -81,9 +87,10 @@ fn run_last(args: WitnessLastArgs, ledger_path: &Path, stdout: &mut impl Write) 
             } else {
                 let _ = writeln!(stdout, "No witness records found");
             }
-            1
         }
     }
+
+    0
 }
 
 fn run_count(args: WitnessCountArgs, ledger_path: &Path, stdout: &mut impl Write) -> u8 {
@@ -103,7 +110,7 @@ fn run_count(args: WitnessCountArgs, ledger_path: &Path, stdout: &mut impl Write
         let _ = writeln!(stdout, "{count}");
     }
 
-    if count == 0 { 1 } else { 0 }
+    0
 }
 
 fn parse_filters(
@@ -426,7 +433,7 @@ mod tests {
             &ledger_path,
             &mut stdout,
         );
-        assert_eq!(empty_exit, 1);
+        assert_eq!(empty_exit, 0, "an empty ledger is success, not exit 1");
         assert_eq!(
             String::from_utf8(stdout.clone()).unwrap(),
             "No witness records found\n"
@@ -547,9 +554,51 @@ mod tests {
             &mut json_stdout,
         );
 
-        assert_eq!(json_exit, 1);
+        assert_eq!(json_exit, 0, "a count of 0 is success, not exit 1");
         let value: Value = serde_json::from_slice(&json_stdout).unwrap();
         assert_eq!(value["count"], 0);
+    }
+
+    #[test]
+    fn query_with_no_matches_exits_zero_and_prints_an_empty_array() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let absent_ledger = tempdir.path().join("witness.jsonl");
+        let filters = || WitnessFilterArgs {
+            tool: None,
+            since: None,
+            until: None,
+            outcome: None,
+            input_hash: None,
+            limit: None,
+        };
+
+        let mut json_stdout = Vec::new();
+        let json_exit = run_with_writer(
+            WitnessCommands::Query(WitnessQueryArgs {
+                filters: filters(),
+                json: true,
+            }),
+            &absent_ledger,
+            &mut json_stdout,
+        );
+        assert_eq!(json_exit, 0, "an empty query result is success, not exit 1");
+        let value: Value = serde_json::from_slice(&json_stdout).unwrap();
+        assert_eq!(value, json!([]));
+
+        let mut text_stdout = Vec::new();
+        let text_exit = run_with_writer(
+            WitnessCommands::Query(WitnessQueryArgs {
+                filters: filters(),
+                json: false,
+            }),
+            &absent_ledger,
+            &mut text_stdout,
+        );
+        assert_eq!(text_exit, 0);
+        assert_eq!(
+            String::from_utf8(text_stdout).unwrap(),
+            "No witness records found\n"
+        );
     }
 
     #[test]

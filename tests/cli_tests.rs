@@ -1354,6 +1354,204 @@ fn test_witness_count() {
     assert_eq!(value["count"], 2);
 }
 
+/// One way a witness ledger can hold no usable records.
+struct EmptyLedger {
+    label: &'static str,
+    /// `None` leaves the ledger path absent; `Some` writes these bytes to it.
+    contents: Option<&'static str>,
+}
+
+/// spine-rules family contract (al-4u3): an empty read/query result is success. Exit 0,
+/// never 1, and the stdout shape is unchanged: `[]`, `{"count":0}` and `null`.
+#[test]
+fn test_witness_empty_results_exit_zero_across_empty_ledgers() {
+    let states = [
+        EmptyLedger {
+            label: "absent ledger",
+            contents: None,
+        },
+        EmptyLedger {
+            label: "empty file",
+            contents: Some(""),
+        },
+        EmptyLedger {
+            label: "only blank and corrupt lines",
+            contents: Some("\n{not json}\n   \n"),
+        },
+    ];
+
+    for state in &states {
+        let dir = tempdir().unwrap();
+        let ledger_path = dir.path().join("witness.jsonl");
+        if let Some(contents) = state.contents {
+            fs::write(&ledger_path, contents).unwrap();
+        }
+
+        let run = |args: &[&str]| -> String {
+            let output = airlock_cmd()
+                .env("EPISTEMIC_WITNESS", &ledger_path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{}: `airlock {}` must exit 0 on an empty result (stderr: {})",
+                state.label,
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+
+        assert_eq!(
+            read_json_output(run(&["witness", "query", "--json"]).as_bytes()),
+            json!([]),
+            "{}: query --json",
+            state.label
+        );
+        assert_eq!(
+            run(&["witness", "query"]),
+            "No witness records found\n",
+            "{}: query",
+            state.label
+        );
+        assert_eq!(
+            read_json_output(run(&["witness", "count", "--json"]).as_bytes()),
+            json!({"count": 0}),
+            "{}: count --json",
+            state.label
+        );
+        assert_eq!(run(&["witness", "count"]), "0\n", "{}: count", state.label);
+        assert_eq!(
+            read_json_output(run(&["witness", "last", "--json"]).as_bytes()),
+            Value::Null,
+            "{}: last --json",
+            state.label
+        );
+        assert_eq!(
+            run(&["witness", "last"]),
+            "No witness records found\n",
+            "{}: last",
+            state.label
+        );
+
+        if state.contents.is_none() {
+            assert!(
+                !ledger_path.exists(),
+                "{}: read-only witness commands must not create the ledger",
+                state.label
+            );
+        }
+    }
+}
+
+#[test]
+fn test_witness_non_matching_filter_exits_zero() {
+    let dir = tempdir().unwrap();
+    let ledger_path = dir.path().join("witness.jsonl");
+    write_witness_ledger(
+        &ledger_path,
+        &[
+            sample_witness_record(
+                "verify",
+                "VERIFIED",
+                "2024-01-15T10:30:00Z",
+                "blake3:aaa111",
+            ),
+            sample_witness_record(
+                "assemble",
+                "ASSEMBLED",
+                "2024-01-16T10:30:00Z",
+                "blake3:bbb222",
+            ),
+        ],
+    );
+
+    // Control: the ledger really holds records, so the empty answers below come from the
+    // filters and not from a ledger that was never read.
+    let control = airlock_cmd()
+        .env("EPISTEMIC_WITNESS", &ledger_path)
+        .args(["witness", "query", "--json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(read_json_output(&control).as_array().unwrap().len(), 2);
+
+    let non_matching: [[&str; 2]; 3] = [
+        ["--outcome", "NO_SUCH_OUTCOME"],
+        ["--since", "2999-01-01T00:00:00Z"],
+        ["--input-hash", "no-such-hash"],
+    ];
+    for filter in non_matching {
+        let query = airlock_cmd()
+            .env("EPISTEMIC_WITNESS", &ledger_path)
+            .args(["witness", "query"])
+            .args(filter)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_eq!(
+            query.status.code(),
+            Some(0),
+            "witness query {filter:?} must exit 0 with no matches (stderr: {})",
+            String::from_utf8_lossy(&query.stderr)
+        );
+        assert_eq!(
+            read_json_output(&query.stdout),
+            json!([]),
+            "witness query {filter:?}"
+        );
+
+        let count = airlock_cmd()
+            .env("EPISTEMIC_WITNESS", &ledger_path)
+            .args(["witness", "count"])
+            .args(filter)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_eq!(
+            count.status.code(),
+            Some(0),
+            "witness count {filter:?} must exit 0 when the count is 0 (stderr: {})",
+            String::from_utf8_lossy(&count.stderr)
+        );
+        assert_eq!(
+            read_json_output(&count.stdout),
+            json!({"count": 0}),
+            "witness count {filter:?}"
+        );
+    }
+}
+
+/// The other side of the boundary: exit 0 is for "nothing matched", never for "could not
+/// look". A ledger that cannot be read still refuses with exit 2.
+#[test]
+fn test_witness_unreadable_ledger_still_refuses_with_exit_two() {
+    let dir = tempdir().unwrap();
+    // A directory where the ledger should be: the path exists and opens, then fails to read.
+    let ledger_path = dir.path().join("witness.jsonl");
+    fs::create_dir(&ledger_path).unwrap();
+
+    for args in [
+        ["witness", "query", "--json"],
+        ["witness", "count", "--json"],
+        ["witness", "last", "--json"],
+    ] {
+        let output = airlock_cmd()
+            .env("EPISTEMIC_WITNESS", &ledger_path)
+            .args(args)
+            .assert()
+            .code(2)
+            .get_output()
+            .stdout
+            .clone();
+        assert_refusal_code(&output, "E_WITNESS_ERROR");
+    }
+}
+
 #[test]
 fn test_witness_append_failure_preserves_exit() {
     let dir = tempdir().unwrap();

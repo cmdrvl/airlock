@@ -339,6 +339,11 @@ Airlock emits three artifacts:
 | `prompt_provenance.json` | Source map: every prompt fragment traced to its upstream artifact, policy rule, and boundary class |
 | `airlock_manifest.json` | Primary proof artifact: hashes, claim verdict, findings, blocked reasons, provenance summary |
 
+The OpenAI Chat Completions adapter represents structured user-message content
+as a single text content part containing deterministic compact JSON. Its
+`unwrap()` method restores the assembled messages from that wire form so request
+binding can compare them with the original prompt.
+
 `prompt_provenance.json` records, for each emitted prompt fragment:
 
 - where in the prompt it landed

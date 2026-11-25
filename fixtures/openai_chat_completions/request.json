@@ -1,0 +1,1 @@
+{"messages":[{"content":"You are a careful boundary verifier.","role":"system"},{"content":[{"text":"{\"benchmark_summary\":{\"coverage\":0.98},\"challenge_profile\":{\"page_count\":12}}","type":"text"}],"role":"user"}],"model":"gpt-5"}

@@ -698,6 +698,13 @@ Adapters should not define the policy model. They should only map assembled
 prompt payloads into vendor-specific request shapes. An adapter is a function
 from `(prompt_payload, transport_config) → request_payload`, nothing more.
 
+The OpenAI Chat Completions adapter emits structured user-message content as
+one text content part containing deterministic compact JSON. Its `unwrap()`
+operation restores the assembled prompt messages from that wire representation
+before request-to-prompt binding is evaluated. The conformance fixture is
+validated against the OpenAI-published Chat Completions request schema; other
+provider request schemas belong with their corresponding adapters.
+
 ---
 
 ## Artifact Model

@@ -496,6 +496,8 @@ The implementation-grade detail lives in
 
 - **Spec and roadmap:** [docs/airlock_plan.md](./docs/airlock_plan.md)
 - **Agent guidance:** [AGENTS.md](./AGENTS.md)
+- **Harness-specific notes:** [Claude Code](./CLAUDE.md), [Gemini CLI](./GEMINI.md),
+  [Codex](./CODEX.md)
 
 If README and plan disagree, the plan wins.
 

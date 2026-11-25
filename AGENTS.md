@@ -123,6 +123,8 @@ airlock --version
 
 - **Spec:** [docs/airlock_plan.md](./docs/airlock_plan.md)
 - **Operator framing:** [README.md](./README.md)
+- **Harness notes:** [CLAUDE.md](./CLAUDE.md), [GEMINI.md](./GEMINI.md),
+  [CODEX.md](./CODEX.md)
 
 If code, README, and plan disagree, the plan wins.
 

@@ -405,11 +405,26 @@ fn strict_manifest_mode_forwards_only_a_preverified_canonical_request_hash() {
     let request: Value = serde_json::from_slice(&request_bytes).unwrap();
     let manifest_dir = temp.path().join("manifests");
     std::fs::create_dir(&manifest_dir).unwrap();
-    std::fs::copy(
-        root.join("fixtures/clean_telemetry_only/expected_manifest.json"),
-        manifest_dir.join("verified.json"),
-    )
-    .unwrap();
+    let verified_manifest = manifest_dir.join("verified.json");
+    let verification = Command::new(env!("CARGO_BIN_EXE_airlock"))
+        .args(["verify", "--policy"])
+        .arg(root.join("fixtures/clean_telemetry_only/policy.yaml"))
+        .arg("--prompt")
+        .arg(root.join("fixtures/clean_telemetry_only/expected_prompt_payload.json"))
+        .arg("--provenance")
+        .arg(root.join("fixtures/clean_telemetry_only/expected_prompt_provenance.json"))
+        .arg("--request")
+        .arg(root.join("fixtures/clean_telemetry_only/request.json"))
+        .arg("--out")
+        .arg(&verified_manifest)
+        .arg("--no-witness")
+        .output()
+        .unwrap();
+    assert!(
+        verification.status.success(),
+        "fixture verification failed: {}",
+        String::from_utf8_lossy(&verification.stderr)
+    );
     let origin = start_origin();
     let witness_path = temp.path().join("witness.jsonl");
     let gate = start_gate(

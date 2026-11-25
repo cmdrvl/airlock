@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::assembler::{self, InputArtifact, PromptProvenance};
+use crate::assembler::{self, InputArtifact, NotCrossedInventory, PromptProvenance};
 use crate::cli::{AssembleArgs, VERIFY_PASS};
 use crate::hash::{blake3_hash, jcs};
 use crate::policy::{hash_policy, load_policy};
@@ -67,12 +67,27 @@ fn run_with_writers(
             .write_to(stdout);
         }
     };
+    let not_crossed_bytes = args.not_crossed_out.as_ref().map(|_| {
+        NotCrossedInventory::new(
+            assembly.prompt_provenance.policy_hash.clone(),
+            assembly.prompt_payload_hash.clone(),
+            args.boundary_mode,
+            assembly.not_crossed.clone(),
+        )
+        .to_canonical_json()
+        .into_bytes()
+    });
     let provenance_bytes = assemble_provenance_bytes(assembly.prompt_provenance);
 
     if let Err(refusal) = write_output_file(&args.out, &prompt_bytes) {
         return refusal.write_to(stdout);
     }
     if let Err(refusal) = write_output_file(&args.provenance_out, &provenance_bytes) {
+        return refusal.write_to(stdout);
+    }
+    if let (Some(path), Some(bytes)) = (&args.not_crossed_out, &not_crossed_bytes)
+        && let Err(refusal) = write_output_file(path, bytes)
+    {
         return refusal.write_to(stdout);
     }
 
@@ -271,6 +286,7 @@ claim_levels:
             boundary_mode: BoundaryMode::Annotated,
             out: tempdir.join("prompt_payload.json"),
             provenance_out: tempdir.join("prompt_provenance.json"),
+            not_crossed_out: None,
             no_witness: false,
         }
     }

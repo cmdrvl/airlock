@@ -120,6 +120,62 @@ fn test_v0_2_manifest_may_not_carry_v0_3_fields() {
     }
 }
 
+fn not_crossed_entry() -> Value {
+    serde_json::json!({
+        "path": "mutator_context.challenge_observation",
+        "source_artifact_hash":
+            "blake3:7f1fda7875ce52060297be56ccde65cf7643d682e9b909d01f54f722da4fa2c9",
+        "value_hash": "blake3:7fd5eb36a784795c4c915242a702e52739953f2356455a0cb790c51694e90060",
+        "reason": "DERIVED_TEXT_EXCLUDED",
+    })
+}
+
+#[test]
+fn test_not_crossed_is_optional_on_v0_3_and_validated_when_present() {
+    let schema = compile_schema("schemas/airlock.v0.schema.json");
+    let valid = read_json(&repo_root().join(GOLDEN_V0_3[0]));
+    assert!(valid.get("not_crossed").is_none());
+
+    for inventory in [
+        serde_json::json!([]),
+        serde_json::json!([not_crossed_entry()]),
+    ] {
+        let mut manifest = valid.clone();
+        manifest["not_crossed"] = inventory;
+        assert!(schema.is_valid(&manifest), "{manifest}");
+    }
+
+    let mut unknown_reason = not_crossed_entry();
+    unknown_reason["reason"] = Value::from("BECAUSE");
+    let mut stored_value = not_crossed_entry();
+    stored_value["value"] = Value::from("the withheld text");
+    let mut bad_hash = not_crossed_entry();
+    bad_hash["value_hash"] = Value::from("sha256:abc");
+    let mut no_reason = not_crossed_entry();
+    no_reason.as_object_mut().unwrap().remove("reason");
+    for (label, entry) in [
+        ("unknown reason", unknown_reason),
+        ("a stored value", stored_value),
+        ("malformed hash", bad_hash),
+        ("missing reason", no_reason),
+    ] {
+        let mut manifest = valid.clone();
+        manifest["not_crossed"] = serde_json::json!([entry]);
+        assert!(!schema.is_valid(&manifest), "{label} must not validate");
+    }
+}
+
+#[test]
+fn test_v0_2_manifest_may_not_carry_not_crossed() {
+    let schema = compile_schema("schemas/airlock.v0.schema.json");
+    let mut manifest =
+        read_json(&repo_root().join("fixtures/clean_telemetry_only/expected_manifest.json"));
+    assert_eq!(manifest["manifest_version"], "airlock.v0.2");
+    manifest["not_crossed"] = serde_json::json!([]);
+
+    assert!(!schema.is_valid(&manifest));
+}
+
 #[test]
 fn test_unknown_version_and_bad_v0_3_field_values_fail_schema() {
     let schema = compile_schema("schemas/airlock.v0.schema.json");

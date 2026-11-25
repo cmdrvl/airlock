@@ -1,5 +1,9 @@
+pub mod not_crossed;
 pub mod provenance;
 
+pub use not_crossed::{
+    NOT_CROSSED_VERSION, NotCrossedEntry, NotCrossedInventory, NotCrossedReason,
+};
 pub use provenance::{BoundaryClass, PromptProvenance, ProvenanceRecord, TransformationKind};
 
 use std::collections::BTreeSet;
@@ -26,6 +30,9 @@ pub struct AssemblyResult {
     pub prompt_provenance: PromptProvenance,
     pub prompt_payload_hash: String,
     pub system_prompt_hash: String,
+    /// Every input field that did not cross the boundary, with the reason. See
+    /// [`not_crossed`].
+    pub not_crossed: Vec<NotCrossedEntry>,
 }
 
 pub fn assemble(
@@ -60,11 +67,16 @@ pub fn assemble(
         ),
     ];
 
+    let mut crossing_rules = Vec::with_capacity(policy.allowed_keys.len());
     for (rule_index, rule) in policy.allowed_keys.iter().enumerate() {
         let boundary_class = classify_rule(policy, &rule.key_path, rule.boundary_class)?;
-        if boundary_mode == BoundaryMode::TelemetryOnly
-            && matches!(boundary_class, BoundaryClass::DerivedText)
-        {
+        let excluded = boundary_mode == BoundaryMode::TelemetryOnly
+            && matches!(boundary_class, BoundaryClass::DerivedText);
+        crossing_rules.push(not_crossed::CrossingRule {
+            key_path: rule.key_path.clone(),
+            excluded,
+        });
+        if excluded {
             continue;
         }
 
@@ -123,11 +135,14 @@ pub fn assemble(
 
     ensure_provenance_coverage(&prompt_payload, &prompt_provenance)?;
 
+    let not_crossed = not_crossed::inventory(inputs, &crossing_rules, &policy.forbidden_keys);
+
     Ok(AssemblyResult {
         prompt_payload,
         prompt_provenance,
         prompt_payload_hash,
         system_prompt_hash,
+        not_crossed,
     })
 }
 

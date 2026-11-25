@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmdrvl.com/schemas/airlock_not_crossed.v1.schema.json",
+  "title": "airlock not-crossed inventory v1",
+  "description": "Written by airlock assemble --not-crossed-out and read by airlock verify --not-crossed: every input field that did not cross the boundary. Values are never stored, only a hash of each.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": "airlock.not_crossed.v1"
+    },
+    "policy_hash": {
+      "$ref": "#/$defs/blake3Hash"
+    },
+    "prompt_payload_hash": {
+      "$ref": "#/$defs/blake3Hash"
+    },
+    "boundary_mode": {
+      "type": "string",
+      "enum": [
+        "ANNOTATED",
+        "TELEMETRY_ONLY"
+      ]
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    }
+  },
+  "required": [
+    "version",
+    "policy_hash",
+    "prompt_payload_hash",
+    "boundary_mode",
+    "entries"
+  ],
+  "$defs": {
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Dotted object keys with [i] array indexes, as in the policy's allowed keys.",
+          "type": "string",
+          "minLength": 1
+        },
+        "source_artifact_hash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "value_hash": {
+          "description": "blake3(RFC 8785 JCS(value)); integers beyond 2^53 hash as exact decimal digits.",
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "NOT_ALLOWED",
+            "FORBIDDEN_KEY",
+            "DERIVED_TEXT_EXCLUDED",
+            "SHADOWED_BY_EARLIER_INPUT"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "source_artifact_hash",
+        "value_hash",
+        "reason"
+      ]
+    }
+  }
+}

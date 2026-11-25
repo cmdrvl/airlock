@@ -499,6 +499,7 @@ mod tests {
             timestamp: "2026-03-26T14:00:00Z".to_string(),
             bytes_crossed: Some(1234),
             attestation: Some(Attestation::SelfAttested),
+            not_crossed: None,
         }
     }
 

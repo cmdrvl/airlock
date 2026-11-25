@@ -1288,6 +1288,42 @@ fn gate_still_forwards_against_a_v0_2_manifest_during_the_transition() {
     assert_eq!(origin.count.load(Ordering::Acquire), 1);
 }
 
+/// A v0.3 manifest that lists what did not cross still authorizes its request: the gate reads
+/// the field (it is part of the manifest type, not an unknown key) and ignores it.
+#[test]
+fn gate_forwards_against_a_v0_3_manifest_that_carries_a_not_crossed_inventory() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let path = manifest_dir.join("clean_telemetry_only.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(manifest["manifest_version"], "airlock.v0.3");
+    manifest["not_crossed"] = serde_json::json!([{
+        "path": "operator_note",
+        "source_artifact_hash":
+            "blake3:7f1fda7875ce52060297be56ccde65cf7643d682e9b909d01f54f722da4fa2c9",
+        "value_hash": "blake3:e492e079dfe5a48a0b35ecfe64592fdde152b4d1a00f577e649d06a47a80bf24",
+        "reason": "NOT_ALLOWED",
+    }]);
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let origin = start_origin();
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+
+    let (status, _) = post(
+        &client(),
+        gate.address,
+        &serde_json::to_vec(&request).unwrap(),
+    );
+
+    assert_eq!(status, 200);
+    assert_eq!(origin.count.load(Ordering::Acquire), 1);
+}
+
 fn gate_startup_with_manifest(manifest: &Value) -> (Option<i32>, String) {
     let temp = tempfile::tempdir().unwrap();
     let manifest_dir = temp.path().join("manifests");

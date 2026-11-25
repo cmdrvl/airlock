@@ -11,7 +11,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::assembler::{BoundaryClass, PromptProvenance};
+use crate::assembler::{BoundaryClass, NotCrossedEntry, PromptProvenance};
 use crate::hash::blake3_hash;
 use crate::output::{canonical_json, canonical_json_bytes};
 use crate::types::{
@@ -109,6 +109,12 @@ pub struct AirlockManifest {
     /// Present from v0.3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<Attestation>,
+    /// Every input field that did not cross the boundary: path, source artifact, value hash
+    /// and reason, never the value. From v0.3, and only when `verify` was given the not-crossed
+    /// inventory of the assemble run. Absent means no inventory was supplied, which is not the
+    /// same as an empty list: an empty list says nothing was left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_crossed: Option<Vec<NotCrossedEntry>>,
 }
 
 impl AirlockManifest {
@@ -183,6 +189,7 @@ pub struct ManifestBuilder {
     timestamp: Option<String>,
     bytes_crossed: Option<u64>,
     attestation: Option<Attestation>,
+    not_crossed: Option<Vec<NotCrossedEntry>>,
 }
 
 impl ManifestBuilder {
@@ -310,6 +317,12 @@ impl ManifestBuilder {
         self
     }
 
+    /// Record the not-crossed inventory. Leave it unset when none was supplied.
+    pub fn not_crossed(mut self, not_crossed: Vec<NotCrossedEntry>) -> Self {
+        self.not_crossed = Some(not_crossed);
+        self
+    }
+
     pub fn build(self) -> Result<AirlockManifest, ManifestBuildError> {
         let binding_status = require(self.binding_status, "binding_status")?;
         let boundary_mode = require(self.boundary_mode, "boundary_mode")?;
@@ -390,6 +403,16 @@ impl ManifestBuilder {
         validate_rfc3339_timestamp(&timestamp)?;
         let bytes_crossed = require(self.bytes_crossed, "bytes_crossed")?;
         let attestation = require(self.attestation, "attestation")?;
+        if let Some(entries) = &self.not_crossed {
+            for entry in entries {
+                validate_non_empty_field("not_crossed.path", &entry.path)?;
+                validate_blake3_hash(
+                    "not_crossed.source_artifact_hash",
+                    &entry.source_artifact_hash,
+                )?;
+                validate_blake3_hash("not_crossed.value_hash", &entry.value_hash)?;
+            }
+        }
 
         Ok(AirlockManifest {
             manifest_version: AIRLOCK_MANIFEST_VERSION.to_string(),
@@ -416,6 +439,7 @@ impl ManifestBuilder {
             timestamp,
             bytes_crossed: Some(bytes_crossed),
             attestation: Some(attestation),
+            not_crossed: self.not_crossed,
         })
     }
 }
@@ -525,7 +549,7 @@ fn boundary_class_name(boundary_class: BoundaryClass) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assembler::{ProvenanceRecord, TransformationKind};
+    use crate::assembler::{NotCrossedReason, ProvenanceRecord, TransformationKind};
     use crate::hash::blake3_hash;
 
     fn sample_hash(label: &str) -> String {
@@ -698,6 +722,68 @@ mod tests {
             without_attestation.build().unwrap_err().to_string(),
             "missing required field: attestation"
         );
+    }
+
+    fn not_crossed_entry(path: &str) -> NotCrossedEntry {
+        NotCrossedEntry {
+            path: path.to_string(),
+            source_artifact_hash: sample_hash("source"),
+            value_hash: sample_hash("value"),
+            reason: NotCrossedReason::NotAllowed,
+        }
+    }
+
+    #[test]
+    fn an_absent_inventory_and_an_empty_one_are_different_statements() {
+        let absent = serde_json::to_value(sample_manifest()).unwrap();
+        assert!(
+            absent.get("not_crossed").is_none(),
+            "no inventory supplied must not serialize as an empty one"
+        );
+
+        let empty = serde_json::to_value(sample_builder().not_crossed(Vec::new()).build().unwrap())
+            .unwrap();
+        assert_eq!(empty["not_crossed"], serde_json::json!([]));
+
+        let listed = serde_json::to_value(
+            sample_builder()
+                .not_crossed(vec![not_crossed_entry("extra.field")])
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(listed["not_crossed"][0]["path"], "extra.field");
+        assert_eq!(listed["not_crossed"][0]["reason"], "NOT_ALLOWED");
+    }
+
+    #[test]
+    fn builder_rejects_a_malformed_not_crossed_entry() {
+        let mut bad_hash = not_crossed_entry("a");
+        bad_hash.value_hash = "sha256:abc".to_string();
+        let mut bad_source = not_crossed_entry("a");
+        bad_source.source_artifact_hash = "blake3:short".to_string();
+        let blank_path = not_crossed_entry("  ");
+
+        for (entry, expected) in [
+            (
+                bad_hash,
+                "invalid field not_crossed.value_hash: must use blake3:{64 hex} format",
+            ),
+            (
+                bad_source,
+                "invalid field not_crossed.source_artifact_hash: must use blake3:{64 hex} format",
+            ),
+            (
+                blank_path,
+                "invalid field not_crossed.path: must not be empty",
+            ),
+        ] {
+            let error = sample_builder()
+                .not_crossed(vec![entry])
+                .build()
+                .unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
     }
 
     #[test]

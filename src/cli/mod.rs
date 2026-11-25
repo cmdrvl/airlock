@@ -176,6 +176,12 @@ pub struct AssembleArgs {
     #[arg(long = "provenance-out", help = "Path to write prompt_provenance.json")]
     pub provenance_out: PathBuf,
 
+    #[arg(
+        long = "not-crossed-out",
+        help = "Optional path to write not_crossed.json: every input field that did not cross, as path, source artifact hash, value hash and reason (values are never written)"
+    )]
+    pub not_crossed_out: Option<PathBuf>,
+
     #[arg(long = "no-witness", help = "Skip ambient witness ledger recording")]
     pub no_witness: bool,
 }
@@ -216,6 +222,12 @@ pub struct VerifyArgs {
         help = "Minimum acceptable claim: BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT, or STRICT_TELEMETRY_ONLY"
     )]
     pub require_claim: Option<ClaimLevel>,
+
+    #[arg(
+        long = "not-crossed",
+        help = "Optional not_crossed.json from airlock assemble --not-crossed-out; its entries are copied into the manifest. Without it the manifest records no negative inventory"
+    )]
+    pub not_crossed: Option<PathBuf>,
 
     #[arg(long = "no-witness", help = "Skip ambient witness ledger recording")]
     pub no_witness: bool,

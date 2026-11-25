@@ -5,7 +5,9 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::adapter::{self, TransportDeclaration};
-use crate::assembler::PromptProvenance;
+use crate::assembler::{
+    NOT_CROSSED_VERSION, NotCrossedEntry, NotCrossedInventory, PromptProvenance,
+};
 use crate::cli::{VERIFY_PARTIAL, VERIFY_PASS, VerifyArgs};
 use crate::hash::{blake3_hash, jcs, jcs_blake3_hash};
 use crate::manifest::{Attestation, ManifestBuilder};
@@ -13,7 +15,7 @@ use crate::output::{SOURCE_DATE_EPOCH_ENV, now_utc};
 use crate::policy::{self, AirlockPolicy};
 use crate::refusal::RefusalEnvelope;
 use crate::scanner;
-use crate::types::UpstreamArtifact;
+use crate::types::{BoundaryMode, UpstreamArtifact};
 use crate::witness::{self, WitnessRecord};
 
 pub fn run(args: VerifyArgs) -> u8 {
@@ -138,6 +140,15 @@ fn run_with_writers(
     }
 
     let boundary_mode = prompt_provenance.boundary_mode;
+    let not_crossed = match args.not_crossed.as_deref() {
+        Some(path) => {
+            match load_not_crossed(path, &policy_hash, &prompt_payload_hash, boundary_mode) {
+                Ok(loaded) => Some(loaded),
+                Err(refusal) => return refusal.write_to(stdout),
+            }
+        }
+        None => None,
+    };
     let system_prompt_hash = match system_prompt_hash(&prompt_value) {
         Ok(hash) => hash,
         Err(refusal) => return refusal.write_to(stdout),
@@ -182,7 +193,7 @@ fn run_with_writers(
         Err(refusal) => return refusal.write_to(stdout),
     };
 
-    let manifest = match ManifestBuilder::new()
+    let builder = ManifestBuilder::new()
         .binding_status(verify_result.binding_status)
         .boundary_mode(boundary_mode)
         .policy_id(policy.policy_id.clone())
@@ -203,9 +214,12 @@ fn run_with_writers(
         .blocked_reasons(verify_result.blocked_reasons)
         .timestamp(manifest_instant.to_rfc3339())
         .bytes_crossed(bytes_crossed)
-        .attestation(Attestation::SelfAttested)
-        .build()
-    {
+        .attestation(Attestation::SelfAttested);
+    let builder = match &not_crossed {
+        Some(loaded) => builder.not_crossed(loaded.entries.clone()),
+        None => builder,
+    };
+    let manifest = match builder.build() {
         Ok(manifest) => manifest,
         Err(error) => {
             return RefusalEnvelope::internal(
@@ -245,25 +259,32 @@ fn run_with_writers(
     } else {
         "VERIFIED"
     };
+    let mut witness_inputs = vec![
+        WitnessRecord::input(args.policy.display().to_string(), policy_hash),
+        WitnessRecord::input(
+            args.prompt.display().to_string(),
+            manifest.prompt_payload_hash.clone(),
+        ),
+        WitnessRecord::input(
+            args.provenance.display().to_string(),
+            manifest.prompt_provenance_hash.clone(),
+        ),
+        WitnessRecord::input(
+            args.request.display().to_string(),
+            manifest.request_payload_hash.clone(),
+        ),
+    ];
+    if let (Some(path), Some(loaded)) = (args.not_crossed.as_deref(), &not_crossed) {
+        witness_inputs.push(WitnessRecord::input(
+            path.display().to_string(),
+            loaded.content_hash.clone(),
+        ));
+    }
     let witness_record = WitnessRecord::new(
         "verify",
         witness_outcome,
         exit_code,
-        vec![
-            WitnessRecord::input(args.policy.display().to_string(), policy_hash),
-            WitnessRecord::input(
-                args.prompt.display().to_string(),
-                manifest.prompt_payload_hash.clone(),
-            ),
-            WitnessRecord::input(
-                args.provenance.display().to_string(),
-                manifest.prompt_provenance_hash.clone(),
-            ),
-            WitnessRecord::input(
-                args.request.display().to_string(),
-                manifest.request_payload_hash.clone(),
-            ),
-        ],
+        witness_inputs,
         json!({
             "boundary_mode": boundary_mode,
             "require_claim": args.require_claim,
@@ -342,6 +363,96 @@ fn read_json_bytes(
             )
         }
     })
+}
+
+/// A not-crossed inventory accepted by verify: the entries to copy into the manifest and the
+/// hash of the file they came from, for the witness record.
+struct LoadedNotCrossed {
+    entries: Vec<NotCrossedEntry>,
+    content_hash: String,
+}
+
+/// Read the inventory `assemble --not-crossed-out` wrote and check it belongs to this run: the
+/// same policy, the same prompt payload and the same boundary mode. One from another run, or
+/// with unknown fields or malformed entries, is refused rather than copied into the manifest.
+fn load_not_crossed(
+    path: &Path,
+    policy_hash: &str,
+    prompt_payload_hash: &str,
+    boundary_mode: BoundaryMode,
+) -> Result<LoadedNotCrossed, RefusalEnvelope> {
+    let bytes = read_json_bytes(
+        path,
+        RefusalEnvelope::bad_input,
+        "failed to read not-crossed inventory",
+        "",
+    )?;
+    let inventory: NotCrossedInventory = serde_json::from_slice(&bytes).map_err(|error| {
+        RefusalEnvelope::bad_provenance(
+            "not-crossed inventory is not a valid airlock.not_crossed.v1 document",
+            json!({
+                "path": path.display().to_string(),
+                "error": error.to_string(),
+            }),
+        )
+    })?;
+    let mismatch = |what: &str, expected: &str, actual: &str| {
+        RefusalEnvelope::bad_provenance(
+            format!("not-crossed inventory does not match this run: {what}"),
+            json!({
+                "path": path.display().to_string(),
+                "expected": expected,
+                "actual": actual,
+            }),
+        )
+    };
+    if inventory.version != NOT_CROSSED_VERSION {
+        return Err(mismatch(
+            "unsupported version",
+            NOT_CROSSED_VERSION,
+            &inventory.version,
+        ));
+    }
+    if inventory.policy_hash != policy_hash {
+        return Err(mismatch("policy_hash", policy_hash, &inventory.policy_hash));
+    }
+    if inventory.prompt_payload_hash != prompt_payload_hash {
+        return Err(mismatch(
+            "prompt_payload_hash",
+            prompt_payload_hash,
+            &inventory.prompt_payload_hash,
+        ));
+    }
+    if inventory.boundary_mode != boundary_mode {
+        return Err(mismatch(
+            "boundary_mode",
+            &boundary_mode.to_string(),
+            &inventory.boundary_mode.to_string(),
+        ));
+    }
+    if let Some(entry) = inventory.entries.iter().find(|entry| {
+        entry.path.trim().is_empty()
+            || !is_blake3_hash(&entry.source_artifact_hash)
+            || !is_blake3_hash(&entry.value_hash)
+    }) {
+        return Err(RefusalEnvelope::bad_provenance(
+            "not-crossed inventory has a malformed entry",
+            json!({
+                "path": path.display().to_string(),
+                "entry_path": entry.path,
+            }),
+        ));
+    }
+    Ok(LoadedNotCrossed {
+        content_hash: blake3_hash(&bytes),
+        entries: inventory.entries,
+    })
+}
+
+fn is_blake3_hash(value: &str) -> bool {
+    value
+        .strip_prefix("blake3:")
+        .is_some_and(|hex| hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
 }
 
 fn canonical_policy_hash(policy: &AirlockPolicy) -> String {
@@ -481,6 +592,7 @@ mod tests {
             transport: None,
             out: dir.path().join("manifest.json"),
             require_claim: None,
+            not_crossed: None,
             no_witness: false,
         }
     }

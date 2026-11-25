@@ -111,6 +111,13 @@
         "transmitted",
         "gated"
       ]
+    },
+    "not_crossed": {
+      "description": "airlock.v0.3 and later, only when verify was given the assemble run's not-crossed inventory. Every input field that did not cross the boundary; values are never stored. Absent means no inventory was supplied; an empty array means nothing was left out.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/notCrossedEntry"
+      }
     }
   },
   "allOf": [
@@ -139,6 +146,11 @@
             {
               "required": [
                 "attestation"
+              ]
+            },
+            {
+              "required": [
+                "not_crossed"
               ]
             }
           ]
@@ -188,6 +200,37 @@
         "BOUNDARY_FAILED",
         "RAW_DOCUMENT_ABSENT",
         "STRICT_TELEMETRY_ONLY"
+      ]
+    },
+    "notCrossedEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_artifact_hash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "value_hash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "NOT_ALLOWED",
+            "FORBIDDEN_KEY",
+            "DERIVED_TEXT_EXCLUDED",
+            "SHADOWED_BY_EARLIER_INPUT"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "source_artifact_hash",
+        "value_hash",
+        "reason"
       ]
     },
     "finding": {

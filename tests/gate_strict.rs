@@ -59,6 +59,13 @@ fn start_origin_replying(reply: Vec<u8>) -> Origin {
 /// Like `start_origin_replying`, but the origin waits `delay` before it answers. The wait
 /// ends early when the origin is dropped, so a slow origin never slows a test down.
 fn start_origin_after(reply: Vec<u8>, delay: Duration) -> Origin {
+    start_origin_answering(vec![(200, reply)], delay)
+}
+
+/// A mock provider that answers its n-th request with the n-th `(status, body)` of `answers`
+/// (the last one again once they run out), after waiting `delay`.
+fn start_origin_answering(answers: Vec<(u16, Vec<u8>)>, delay: Duration) -> Origin {
+    assert!(!answers.is_empty(), "an origin needs at least one answer");
     let server = Server::http("127.0.0.1:0").unwrap();
     let address = server.server_addr().to_ip().unwrap();
     let count = Arc::new(AtomicUsize::new(0));
@@ -84,12 +91,15 @@ fn start_origin_after(reply: Vec<u8>, delay: Duration) -> Origin {
                 .lock()
                 .unwrap()
                 .push(Received { headers, body });
-            thread_count.fetch_add(1, Ordering::AcqRel);
+            let position = thread_count.fetch_add(1, Ordering::AcqRel);
             let answer_at = Instant::now() + delay;
             while Instant::now() < answer_at && !thread_stop.load(Ordering::Acquire) {
                 thread::sleep(Duration::from_millis(20));
             }
-            let _ = request.respond(Response::from_data(reply.clone()));
+            let (status, body) = &answers[position.min(answers.len() - 1)];
+            let _ = request.respond(
+                Response::from_data(body.clone()).with_status_code(tiny_http::StatusCode(*status)),
+            );
         }
     });
     Origin {
@@ -2198,4 +2208,508 @@ fn the_gate_refuses_to_start_on_an_upstream_proxy_it_cannot_use() {
             "{bad}: the refusal printed the credential"
         );
     }
+}
+
+// --- chained turns (al-3pz G11) -------------------------------------------------------------
+//
+// A manifest that carries a chain link says its request was built from the reply the model gave
+// to the turn before. The strict gate must find that the reply came through it. Every
+// conversation here is built by the real `assemble` and `verify`; the receipts `assemble` is
+// given are written by hand, in the world's own directory and never in a gate's `--out-dir`, so
+// a gate only knows an exchange if it forwarded it (or was handed a receipt for it on purpose).
+
+const CHAIN_ZERO_HASH: &str =
+    "blake3:0000000000000000000000000000000000000000000000000000000000000000";
+
+fn repo_file(relative: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
+fn read_json_file(path: &Path) -> Value {
+    serde_json::from_slice(
+        &std::fs::read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display())),
+    )
+    .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+fn write_json_file(path: &Path, value: &Value) {
+    std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+}
+
+/// The hash the gate computes for the manifest at `path`.
+fn manifest_gate_hash(path: &Path) -> String {
+    serde_json::from_slice::<airlock::manifest::AirlockManifest>(&std::fs::read(path).unwrap())
+        .unwrap()
+        .hash()
+}
+
+fn provenance_gate_hash(value: &Value) -> String {
+    serde_json::from_value::<airlock::assembler::PromptProvenance>(value.clone())
+        .unwrap()
+        .hash()
+}
+
+/// The reply the model gave to turn `turn`, as the bytes the gate hashes. Each turn's reply is
+/// different, so a receipt for the wrong reply is distinguishable from the right one.
+fn chain_reply(turn: usize) -> Vec<u8> {
+    let mut reply = read_json_file(&repo_file("fixtures/chain/anthropic_messages_reply.json"));
+    reply["content"][1]["text"] = json!(format!("This is the reply to turn {turn}."));
+    serde_json::to_vec(&reply).unwrap()
+}
+
+/// A receipt in the shape the gate writes for a forwarded 200 exchange that matched a manifest.
+fn chain_receipt(response: &[u8], matched_manifest_hash: &str) -> Value {
+    json!({
+        "gate_version": "airlock.gate.v1",
+        "mode": "strict-manifest",
+        "achieved_claim": "STRICT_TELEMETRY_ONLY",
+        "request_hash": airlock::hash::blake3_hash(b"fixture request"),
+        "response_hash": airlock::hash::blake3_hash(response),
+        "upstream_status": 200,
+        "blocked": false,
+        "findings": [],
+        "timestamp": "2026-11-25T00:00:00Z",
+        "matched_manifest_hash": matched_manifest_hash,
+    })
+}
+
+struct ChainWorld {
+    dir: tempfile::TempDir,
+    /// Manifests and prompt provenance files, as `--manifest-dir` wants them.
+    lib: PathBuf,
+    /// The receipts `assemble` was given: not a gate's `--out-dir`.
+    receipts: PathBuf,
+    requests: Vec<Value>,
+}
+
+impl ChainWorld {
+    /// `turns` turns, numbered from 0. Turn `n` follows turn `n - 1` and its reply.
+    fn build(turns: usize) -> ChainWorld {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let receipts = dir.path().join("receipts");
+        std::fs::create_dir(&lib).unwrap();
+        std::fs::create_dir(&receipts).unwrap();
+        let mut world = ChainWorld {
+            dir,
+            lib,
+            receipts,
+            requests: Vec::new(),
+        };
+        for turn in 0..turns {
+            let request = world.add_turn(turn);
+            world.requests.push(request);
+        }
+        world
+    }
+
+    fn manifest(&self, turn: usize) -> PathBuf {
+        self.lib.join(format!("turn{turn}.manifest.json"))
+    }
+
+    fn provenance(&self, turn: usize) -> PathBuf {
+        self.lib.join(format!("turn{turn}.provenance.json"))
+    }
+
+    fn manifest_hash(&self, turn: usize) -> String {
+        manifest_gate_hash(&self.manifest(turn))
+    }
+
+    /// The request body turn `turn` sends.
+    fn body(&self, turn: usize) -> Vec<u8> {
+        serde_json::to_vec(&self.requests[turn]).unwrap()
+    }
+
+    fn run(&self, what: &str, command: &mut Command) {
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{what}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn add_turn(&self, turn: usize) -> Value {
+        let stem = format!("turn{turn}");
+        let prompt = self.dir.path().join(format!("{stem}.prompt.json"));
+        let mut assemble = Command::new(env!("CARGO_BIN_EXE_airlock"));
+        assemble
+            .args(["assemble", "--policy"])
+            .arg(repo_file("fixtures/chain/policy.yaml"))
+            .arg("--input")
+            .arg(repo_file("fixtures/annotated_mode/strategy_space.json"))
+            .arg("--system-prompt")
+            .arg(repo_file("fixtures/annotated_mode/system_prompt.txt"))
+            .args(["--boundary-mode", "TELEMETRY_ONLY", "--out"])
+            .arg(&prompt)
+            .arg("--provenance-out")
+            .arg(self.provenance(turn))
+            .arg("--no-witness");
+        if turn > 0 {
+            let reply_path = self.dir.path().join(format!("{stem}.reply.json"));
+            std::fs::write(&reply_path, chain_reply(turn - 1)).unwrap();
+            let receipt_path = self.receipts.join(format!("{stem}.receipt.json"));
+            write_json_file(
+                &receipt_path,
+                &chain_receipt(&chain_reply(turn - 1), &self.manifest_hash(turn - 1)),
+            );
+            assemble
+                .arg("--prior-receipt")
+                .arg(&receipt_path)
+                .arg("--response")
+                .arg(&reply_path)
+                .args(["--response-adapter", "anthropic_messages"])
+                .arg("--prior-manifest")
+                .arg(self.manifest(turn - 1));
+        }
+        self.run(&format!("assemble {stem}"), &mut assemble);
+
+        let request = json!({
+            "model": "gpt-5",
+            "messages": read_json_file(&prompt)["messages"].clone(),
+        });
+        let request_path = self.dir.path().join(format!("{stem}.request.json"));
+        write_json_file(&request_path, &request);
+        let mut verify = Command::new(env!("CARGO_BIN_EXE_airlock"));
+        verify
+            .args(["verify", "--no-sign", "--policy"])
+            .arg(repo_file("fixtures/chain/policy.yaml"))
+            .arg("--prompt")
+            .arg(&prompt)
+            .arg("--provenance")
+            .arg(self.provenance(turn))
+            .arg("--request")
+            .arg(&request_path)
+            .arg("--out")
+            .arg(self.manifest(turn))
+            .arg("--no-witness");
+        self.run(&format!("verify {stem}"), &mut verify);
+
+        // The gate forwards only a bound manifest; fail here, in the builder, if it is not one.
+        let manifest = read_json_file(&self.manifest(turn));
+        assert_eq!(manifest["binding_status"], "BOUND", "{stem}: {manifest}");
+        assert_eq!(
+            manifest["manifest_version"],
+            if turn == 0 {
+                "airlock.v0.3"
+            } else {
+                "airlock.v0.4"
+            },
+            "{stem}"
+        );
+        request
+    }
+
+    /// Replace turn `turn`'s provenance with `edit` of it, and point its manifest at the new one,
+    /// so the manifest and its provenance still agree about the hash: only what is inside differs.
+    fn edit_provenance(&self, turn: usize, edit: impl FnOnce(&mut Value)) {
+        let mut provenance = read_json_file(&self.provenance(turn));
+        edit(&mut provenance);
+        write_json_file(&self.provenance(turn), &provenance);
+        let mut manifest = read_json_file(&self.manifest(turn));
+        manifest["prompt_provenance_hash"] = json!(provenance_gate_hash(&provenance));
+        write_json_file(&self.manifest(turn), &manifest);
+    }
+
+    /// Put into `directory` the receipt a gate would have written had it forwarded turn `turn`.
+    fn write_receipt_for(&self, turn: usize, directory: &Path) {
+        std::fs::create_dir_all(directory).unwrap();
+        write_json_file(
+            &directory.join(format!("hand-written-turn{turn}.json")),
+            &chain_receipt(&chain_reply(turn), &self.manifest_hash(turn)),
+        );
+    }
+
+    /// `airlock chain verify` of turn `turn`'s manifest over this world's library.
+    fn chain_verify(&self, turn: usize, with_receipts: bool) -> (Option<i32>, Value) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_airlock"));
+        command
+            .args(["chain", "verify"])
+            .arg(self.manifest(turn))
+            .arg("--manifest-dir")
+            .arg(&self.lib);
+        if with_receipts {
+            command.arg("--receipt-dir").arg(&self.receipts);
+        }
+        let output = command.output().unwrap();
+        let body = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "stdout is not one JSON document ({error}): {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output.status.code(), body)
+    }
+
+    /// A strict gate over this world's library. `name` keeps each gate's witness ledger apart.
+    fn gate(&self, upstream: SocketAddr, out_dir: &Path, name: &str) -> GateProcess {
+        start_strict_gate(
+            upstream,
+            &self.lib,
+            out_dir,
+            &self.dir.path().join(format!("{name}.witness.jsonl")),
+            &[],
+        )
+    }
+}
+
+/// An origin that answers the n-th request it gets with the reply to turn n.
+fn chain_origin(turns: usize) -> Origin {
+    start_origin_answering(
+        (0..turns).map(|turn| (200, chain_reply(turn))).collect(),
+        Duration::ZERO,
+    )
+}
+
+fn assert_chain_denied(status: u16, refusal: &Value, rule_id: &str) {
+    assert_eq!(status, 403, "{refusal}");
+    assert_eq!(refusal["code"], "E_GATE_DENIED", "{refusal}");
+    assert_eq!(refusal["findings"][0]["rule_id"], rule_id, "{refusal}");
+    assert_valid_gate_document(refusal);
+}
+
+#[test]
+fn an_honest_chain_is_admitted_turn_after_turn_by_one_gate() {
+    let world = ChainWorld::build(3);
+    let origin = chain_origin(3);
+    let gate = world.gate(origin.address, &world.dir.path().join("out"), "honest");
+
+    // Each reply is relayed to the client in full before the next turn is sent, which is when
+    // a client that has the reply can build the next turn: the gate must know the exchange by then.
+    for turn in 0..3 {
+        let (status, reply) = post(&client(), gate.address, &world.body(turn));
+        assert_eq!(status, 200, "turn {turn}: {reply}");
+        assert_eq!(
+            reply,
+            serde_json::from_slice::<Value>(&chain_reply(turn)).unwrap(),
+            "turn {turn}: the reply came from the origin"
+        );
+    }
+    assert_eq!(origin.count.load(Ordering::Acquire), 3);
+}
+
+#[test]
+fn a_chained_turn_whose_prior_reply_the_gate_never_forwarded_is_denied() {
+    let world = ChainWorld::build(2);
+    // `chain verify` is satisfied by the hand-written receipt: it checks that the files agree.
+    let (code, report) = world.chain_verify(1, true);
+    assert_eq!(code, Some(0), "{report}");
+
+    let origin = chain_origin(2);
+    let out_dir = world.dir.path().join("out");
+    let gate = world.gate(origin.address, &out_dir, "unforwarded");
+    let (status, refusal) = post(&client(), gate.address, &world.body(1));
+
+    assert_chain_denied(status, &refusal, "REQUEST_CHAIN_RESPONSE_NOT_FORWARDED");
+    assert_eq!(
+        origin.count.load(Ordering::Acquire),
+        0,
+        "a denied request must never reach the origin"
+    );
+    assert!(
+        wait_for_stderr(&gate, "this gate has not forwarded the response"),
+        "{}",
+        gate.stderr_text()
+    );
+    let receipts = read_receipts(&out_dir);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["blocked"], true);
+    assert_valid_gate_document(&receipts[0]);
+
+    // The first turn of the conversation has nothing before it, so the same gate admits it.
+    assert_eq!(post(&client(), gate.address, &world.body(0)).0, 200);
+}
+
+#[test]
+fn a_chained_turn_is_admitted_after_the_gate_forwarded_the_reply_it_followed() {
+    let world = ChainWorld::build(2);
+    let out_dir = world.dir.path().join("out");
+
+    // One run of the gate forwards the first turn, so its receipt is in the receipt directory.
+    {
+        let origin = chain_origin(1);
+        let gate = world.gate(origin.address, &out_dir, "first-run");
+        assert_eq!(post(&client(), gate.address, &world.body(0)).0, 200);
+        wait_for_recorded(
+            &out_dir,
+            &world.dir.path().join("first-run.witness.jsonl"),
+            1,
+        );
+    }
+
+    // A new run in the same receipt directory knows that exchange: it admits the next turn.
+    let origin = start_origin_answering(vec![(200, chain_reply(1))], Duration::ZERO);
+    let gate = world.gate(origin.address, &out_dir, "second-run");
+    assert!(
+        wait_for_stderr(
+            &gate,
+            "1 forwarded exchange(s) read back from the receipts in"
+        ),
+        "{}",
+        gate.stderr_text()
+    );
+    assert_eq!(post(&client(), gate.address, &world.body(1)).0, 200);
+
+    // A run whose receipt directory is empty does not.
+    let origin = chain_origin(2);
+    let gate = world.gate(
+        origin.address,
+        &world.dir.path().join("elsewhere"),
+        "empty-run",
+    );
+    let (status, refusal) = post(&client(), gate.address, &world.body(1));
+    assert_chain_denied(status, &refusal, "REQUEST_CHAIN_RESPONSE_NOT_FORWARDED");
+}
+
+#[test]
+fn a_link_that_cannot_be_resolved_is_denied_for_the_reason_chain_verify_gives() {
+    type Tamper = fn(&ChainWorld);
+    let cases: [(&str, Tamper); 6] = [
+        ("prior_manifest_not_found", |world| {
+            std::fs::remove_file(world.manifest(0)).unwrap();
+        }),
+        ("turn_index_mismatch", |world| {
+            let mut manifest = read_json_file(&world.manifest(1));
+            manifest["chain"]["turn_index"] = json!(5);
+            write_json_file(&world.manifest(1), &manifest);
+        }),
+        ("provenance_not_found", |world| {
+            std::fs::remove_file(world.provenance(1)).unwrap();
+        }),
+        ("provenance_chain_mismatch", |world| {
+            world.edit_provenance(1, |provenance| {
+                provenance["chain"]["turn_index"] = json!(9);
+            });
+        }),
+        ("model_output_hash_missing", |world| {
+            world.edit_provenance(1, |provenance| {
+                provenance["records"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|record| record["policy_rule_id"] != "chain.model_output");
+            });
+        }),
+        ("model_output_hash_ambiguous", |world| {
+            world.edit_provenance(1, |provenance| {
+                let record = provenance["records"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|record| record["policy_rule_id"] == "chain.model_output")
+                    .unwrap();
+                record["source_artifact_hash"] = json!(CHAIN_ZERO_HASH);
+            });
+        }),
+    ];
+    for (reason, tamper) in cases {
+        let world = ChainWorld::build(2);
+        tamper(&world);
+
+        // The command that reads the same directory refuses for the same reason.
+        let (code, body) = world.chain_verify(1, false);
+        assert_eq!(code, Some(2), "{reason}: {body}");
+        assert_eq!(body["refusal"]["detail"]["reason"], reason, "{body}");
+
+        let origin = chain_origin(2);
+        let gate = world.gate(origin.address, &world.dir.path().join("out"), "tampered");
+        let (status, refusal) = post(&client(), gate.address, &world.body(1));
+        assert_chain_denied(status, &refusal, "REQUEST_CHAIN_UNRESOLVED");
+        assert_eq!(origin.count.load(Ordering::Acquire), 0, "{reason}");
+        assert!(
+            wait_for_stderr(&gate, &format!("chained request refused: {reason} ")),
+            "{reason}: {}",
+            gate.stderr_text()
+        );
+    }
+}
+
+#[test]
+fn a_receipt_written_by_hand_into_the_gates_out_dir_is_trusted_at_startup() {
+    // A limit, pinned so the documentation of it stays true: a gate receipt is unsigned, and the
+    // exchanges a gate knows at startup are the receipts in its --out-dir. Whoever can write that
+    // directory can add an exchange to it.
+    let world = ChainWorld::build(2);
+    let out_dir = world.dir.path().join("out");
+    world.write_receipt_for(0, &out_dir);
+    let origin = start_origin_answering(vec![(200, chain_reply(1))], Duration::ZERO);
+    let gate = world.gate(origin.address, &out_dir, "hand-written");
+
+    assert_eq!(post(&client(), gate.address, &world.body(1)).0, 200);
+    assert_eq!(origin.count.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn the_gate_walks_a_chain_to_its_root_and_checks_every_link() {
+    // Turn 2 follows turn 1 follows turn 0. Seeding both earlier exchanges admits turn 2.
+    let world = ChainWorld::build(3);
+    let both = world.dir.path().join("both");
+    world.write_receipt_for(0, &both);
+    world.write_receipt_for(1, &both);
+    let origin = start_origin_answering(vec![(200, chain_reply(2))], Duration::ZERO);
+    let gate = world.gate(origin.address, &both, "both");
+    assert_eq!(post(&client(), gate.address, &world.body(2)).0, 200);
+    drop(gate);
+
+    // Only turn 1's exchange is known: the first link is fine, the second is not.
+    let only_last = world.dir.path().join("only-last");
+    world.write_receipt_for(1, &only_last);
+    let origin = chain_origin(3);
+    let gate = world.gate(origin.address, &only_last, "only-last");
+    let (status, refusal) = post(&client(), gate.address, &world.body(2));
+    assert_chain_denied(status, &refusal, "REQUEST_CHAIN_RESPONSE_NOT_FORWARDED");
+    assert!(
+        wait_for_stderr(&gate, &world.manifest_hash(0)),
+        "the refusal should name the manifest whose reply was never forwarded: {}",
+        gate.stderr_text()
+    );
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
+    drop(gate);
+
+    // Both exchanges are known but the root manifest is gone: only a walk of two links finds out.
+    std::fs::remove_file(world.manifest(0)).unwrap();
+    let origin = chain_origin(3);
+    let gate = world.gate(origin.address, &both, "no-root");
+    let (status, refusal) = post(&client(), gate.address, &world.body(2));
+    assert_chain_denied(status, &refusal, "REQUEST_CHAIN_UNRESOLVED");
+    assert!(
+        wait_for_stderr(&gate, "chained request refused: prior_manifest_not_found "),
+        "{}",
+        gate.stderr_text()
+    );
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn a_reply_that_was_not_a_success_is_not_a_forwarded_response() {
+    // The bytes are exactly what turn 1 admitted, but the upstream answered 500: an error body
+    // is not model output, so no exchange is recorded and turn 1 is refused.
+    let world = ChainWorld::build(2);
+    let origin = start_origin_answering(vec![(500, chain_reply(0))], Duration::ZERO);
+    let gate = world.gate(origin.address, &world.dir.path().join("out"), "error-reply");
+
+    let (status, _) = post(&client(), gate.address, &world.body(0));
+    assert_eq!(status, 500, "the gate relays the upstream's status");
+    let (status, refusal) = post(&client(), gate.address, &world.body(1));
+
+    assert_chain_denied(status, &refusal, "REQUEST_CHAIN_RESPONSE_NOT_FORWARDED");
+    assert_eq!(origin.count.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn gate_refuses_to_start_when_a_file_in_the_manifest_dir_is_neither_manifest_nor_provenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, _) = bound_manifest_dir(temp.path());
+    std::fs::write(manifest_dir.join("stray.json"), br#"{"hello":1}"#).unwrap();
+
+    let stderr = gate_refuses_to_start(strict_gate_command(
+        "127.0.0.1:9".parse().unwrap(),
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &[],
+    ));
+
+    assert!(stderr.contains("invalid Airlock manifest"), "{stderr}");
 }

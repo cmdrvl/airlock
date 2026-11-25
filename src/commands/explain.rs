@@ -147,6 +147,12 @@ fn gate_rule_explanation(rule_id: &str) -> Option<&'static str> {
         "REQUEST_CLAIM_BELOW_REQUIRED" => {
             "the manifest bound to this request claims less than --require-claim asks for"
         }
+        "REQUEST_CHAIN_UNRESOLVED" => {
+            "the manifest bound to this request is a later turn of a conversation, and a link back to its first turn could not be followed: a manifest or provenance file is missing or they disagree (the gate's stderr names which)"
+        }
+        "REQUEST_CHAIN_RESPONSE_NOT_FORWARDED" => {
+            "the manifest bound to this request was built from a model reply this gate never forwarded, so the reply did not come through this gate"
+        }
         "REQUEST_SCAN_REFUSED" => {
             "the request body could not be read, parsed or screened, or was over the size limit"
         }
@@ -1258,6 +1264,37 @@ mod tests {
         );
         assert!(rendered.contains("Recorded: 2026-11-25T12:00:00Z"));
         assert!(!rendered.contains("Upstream response:"));
+    }
+
+    #[test]
+    fn explain_gives_a_sentence_for_each_chain_refusal_the_gate_raises() {
+        for (rule_id, fragment) in [
+            (
+                "REQUEST_CHAIN_UNRESOLVED",
+                "a link back to its first turn could not be followed",
+            ),
+            (
+                "REQUEST_CHAIN_RESPONSE_NOT_FORWARDED",
+                "a model reply this gate never forwarded",
+            ),
+        ] {
+            let receipt = GateReceipt::new(
+                "strict-manifest",
+                "BOUNDARY_FAILED",
+                SAMPLE_HASH,
+                true,
+                vec![gate_finding("CONVERSATION_CHAIN", rule_id)],
+            );
+
+            let (exit_code, rendered) = explain_gate(&receipt, false);
+
+            assert_eq!(exit_code, 0);
+            assert!(
+                rendered.contains(&format!("  - {rule_id} [CONVERSATION_CHAIN]")),
+                "{rendered}"
+            );
+            assert!(rendered.contains(fragment), "{rule_id}: {rendered}");
+        }
     }
 
     #[test]

@@ -1142,10 +1142,22 @@ fn start_strict_gate(
 }
 
 fn wait_for_forwarded_receipt(directory: &Path) -> (PathBuf, Value) {
+    wait_for_forwarded_receipt_not_in(directory, &BTreeSet::new())
+}
+
+/// The forwarded receipt in `directory` that is not one of `known`: the one the gate wrote
+/// since `known` was taken, in a directory several runs of the gate share.
+fn wait_for_forwarded_receipt_not_in(
+    directory: &Path,
+    known: &BTreeSet<PathBuf>,
+) -> (PathBuf, Value) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         for entry in fs::read_dir(directory).into_iter().flatten().flatten() {
             let path = entry.path();
+            if known.contains(&path) {
+                continue;
+            }
             if let Some(receipt) = fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -2730,6 +2742,10 @@ fn explain_reports_the_chain_in_text_and_json_and_says_nothing_for_other_version
 
 /// One request through a real strict-manifest gate in front of an origin that answers `reply`:
 /// the receipt the gate wrote (path and contents) and the bytes the client got back.
+///
+/// Every run of the gate shares one receipt directory. The gate reads the exchanges it forwarded
+/// before back from the receipts there, which is how a gate restarted for each turn (it loads its
+/// manifests at startup) still knows that the reply a chained turn follows came through it.
 fn exchange_through_gate(
     work: &Work,
     stem: &str,
@@ -2738,7 +2754,13 @@ fn exchange_through_gate(
     reply: &[u8],
 ) -> (PathBuf, Value, Vec<u8>) {
     let origin = start_origin(reply.to_vec());
-    let receipts = work.path(&format!("{stem}.receipts"));
+    let receipts = work.path("gate.receipts");
+    let known: BTreeSet<PathBuf> = fs::read_dir(&receipts)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
     let gate = start_strict_gate(
         origin.address,
         manifests,
@@ -2767,7 +2789,7 @@ fn exchange_through_gate(
         .read_to_end(&mut relayed)
         .expect("read relayed response");
     assert_eq!(relayed, reply, "{stem}: the gate relays the origin's bytes");
-    let (path, receipt) = wait_for_forwarded_receipt(&receipts);
+    let (path, receipt) = wait_for_forwarded_receipt_not_in(&receipts, &known);
     drop(gate);
     (path, receipt, relayed)
 }
@@ -2821,11 +2843,18 @@ fn a_three_turn_chain_runs_through_the_real_gate_with_v0_4_manifests() {
     );
 
     // The gate starts with a v0.4 manifest in its directory and forwards the request it matches.
+    // It also needs the turn's prompt provenance there: the gate checks that the reply this turn
+    // follows came through it, and the provenance is where the turn names that reply.
     fs::copy(
         work.path("turn1.manifest.json"),
         manifests.join("turn1.json"),
     )
     .expect("copy turn 1 manifest");
+    fs::copy(
+        work.path("turn1.provenance.json"),
+        manifests.join("turn1.provenance.json"),
+    )
+    .expect("copy turn 1 provenance");
     let (receipt1_path, receipt1, relayed1) = exchange_through_gate(
         &work,
         "gate1",
@@ -2861,8 +2890,8 @@ fn a_three_turn_chain_runs_through_the_real_gate_with_v0_4_manifests() {
         "each link names its own prior manifest"
     );
 
-    // The whole conversation, checked against what the real gate wrote. The gate's own manifest
-    // directory may hold only manifests, so the verifier gets a library of its own.
+    // The whole conversation, checked against what the real gate wrote. The verifier gets a
+    // library of its own: copies of the manifests and provenance files, not the gate's directory.
     let library = work.path("library");
     fs::create_dir(&library).expect("library dir");
     for stem in ["turn0", "turn1", "turn2"] {

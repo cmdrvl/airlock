@@ -119,7 +119,7 @@ pub struct GateArgs {
 
     #[arg(
         long = "manifest-dir",
-        help = "Pre-verified Airlock manifests required by strict-manifest mode"
+        help = "Pre-verified Airlock manifests required by strict-manifest mode, plus the prompt provenance files of chained turns"
     )]
     pub manifest_dir: Option<PathBuf>,
 

@@ -299,6 +299,13 @@ A request denied by the gate leaves a receipt in `--out-dir` and a witness
 record; a request forwarded to the provider leaves a receipt with the response
 hash and upstream status.
 
+If you use chained conversations (`airlock.v0.4` manifests), the gate reads its own
+receipts in `--out-dir` back at startup to learn which replies it forwarded, so keep
+the same `--out-dir` across restarts, and put each chained turn's prompt provenance
+file in `--manifest-dir` beside its manifest. Anyone who can write `--out-dir` can
+add an exchange there (a gate receipt is unsigned), so give it to the gate account
+alone, like the rest of the gate's state. See the README, under `airlock gate`.
+
 ## 4. Read the refusals and receipts
 
 A refused request gets a JSON body (`airlock.gate_refusal.v1`) whose `code` says
@@ -306,7 +313,7 @@ why:
 
 | Code | HTTP | Meaning |
 | ---- | ---- | ------- |
-| `E_GATE_DENIED` | 403 | Strict-manifest mode did not forward the request: no bound manifest matches its canonical hash, the manifest claims less than `--require-claim`, the body is unreadable, malformed or over `--max-request-bytes`, or the request target is invalid. |
+| `E_GATE_DENIED` | 403 | Strict-manifest mode did not forward the request: no bound manifest matches its canonical hash, the manifest claims less than `--require-claim`, the body is unreadable, malformed or over `--max-request-bytes`, the request target is invalid, or the request is a chained turn (an `airlock.v0.4` manifest) whose earlier reply this gate did not forward (finding class `CONVERSATION_CHAIN`, rule `REQUEST_CHAIN_UNRESOLVED` or `REQUEST_CHAIN_RESPONSE_NOT_FORWARDED`). |
 | `BOUNDARY_FAILED` | 403 | Policy-proxy mode found something in the request, or could not screen it. |
 | `UPSTREAM_UNAVAILABLE` | 502 | The gate admitted the request but the upstream could not be reached or did not answer within `--timeout-seconds`. |
 | `GATE_BUSY` | 503 | The gate already has 32 requests in flight. |

@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::adapter::{self, PartKind, TransportDeclaration};
+use crate::assembler::PromptProvenance;
 use crate::cli::{GateArgs, GateMode, REFUSAL, VERIFY_PASS};
+use crate::commands::gate_chain::{ChainIndex, ForwardedExchanges};
 use crate::hash::blake3_hash;
 use crate::manifest::AirlockManifest;
 use crate::manifest::gate::{GateLimit, GateReceipt, GateRefusal};
@@ -63,6 +65,10 @@ struct GateState {
     policy_hash: Option<String>,
     scanner: Option<Arc<boundary_detectors::Scanner>>,
     strict_manifests: Arc<BTreeMap<String, StrictManifestEntry>>,
+    /// Every manifest and provenance file's chain link, for the check of a chained turn.
+    chain: Arc<ChainIndex>,
+    /// The exchanges this gate has forwarded: what a chained turn's link must find.
+    forwarded: Arc<ForwardedExchanges>,
     /// Fingerprint of the key signed manifests were checked against at startup, if any.
     signature_key_fingerprint: Option<String>,
     out_dir: PathBuf,
@@ -105,7 +111,7 @@ pub fn run(args: GateArgs) -> u8 {
     };
 
     let mut signature_key_fingerprint = None;
-    let (policy, transport, policy_hash, scanner, strict_manifests) = match args.mode {
+    let (policy, transport, policy_hash, scanner, strict_manifests, chain) = match args.mode {
         GateMode::PolicyProxy => {
             if args.manifest_dir.is_some() {
                 let _ = writeln!(
@@ -173,6 +179,7 @@ pub fn run(args: GateArgs) -> u8 {
                 Some(policy_hash),
                 Some(scanner),
                 Arc::new(BTreeMap::new()),
+                ChainIndex::default(),
             )
         }
         GateMode::StrictManifest => {
@@ -197,15 +204,22 @@ pub fn run(args: GateArgs) -> u8 {
                     return REFUSAL;
                 }
             };
-            let manifests = match load_strict_manifests(directory, signature_key.as_ref()) {
-                Ok(manifests) => manifests,
+            let library = match load_strict_manifests(directory, signature_key.as_ref()) {
+                Ok(library) => library,
                 Err(message) => {
                     let _ = writeln!(stderr, "airlock gate: {message}");
                     return REFUSAL;
                 }
             };
             signature_key_fingerprint = signature_key.as_ref().map(signing::fingerprint);
-            (None, None, None, None, Arc::new(manifests))
+            (
+                None,
+                None,
+                None,
+                None,
+                Arc::new(library.index),
+                library.chain,
+            )
         }
     };
 
@@ -215,6 +229,19 @@ pub fn run(args: GateArgs) -> u8 {
             "airlock gate: cannot create receipt directory: {error}"
         );
         return REFUSAL;
+    }
+    // What a chained turn's link looks for is an exchange this gate forwarded. A gate that was
+    // restarted knows the ones its earlier runs wrote receipts for.
+    let forwarded = Arc::new(ForwardedExchanges::default());
+    let mut exchanges_read_back = None;
+    if args.mode == GateMode::StrictManifest {
+        match forwarded.seed_from_receipts(&args.out_dir) {
+            Ok(found) => exchanges_read_back = Some(found),
+            Err(message) => {
+                let _ = writeln!(stderr, "airlock gate: {message}; refusing to start");
+                return REFUSAL;
+            }
+        }
     }
 
     let timeout = Duration::from_secs(args.timeout_seconds);
@@ -240,6 +267,8 @@ pub fn run(args: GateArgs) -> u8 {
         policy_hash,
         scanner,
         strict_manifests,
+        chain: Arc::new(chain),
+        forwarded,
         signature_key_fingerprint,
         out_dir: args.out_dir,
         no_witness: args.no_witness,
@@ -260,6 +289,13 @@ pub fn run(args: GateArgs) -> u8 {
     let active = Arc::new(AtomicUsize::new(0));
     let bound_address = server.server_addr().to_ip().unwrap_or(listen);
     let _ = writeln!(stderr, "airlock gate listening on {bound_address}");
+    if let Some(found) = exchanges_read_back {
+        let _ = writeln!(
+            stderr,
+            "airlock gate: {found} forwarded exchange(s) read back from the receipts in {}",
+            state.out_dir.display()
+        );
+    }
     match &upstream_proxy {
         Some((url, _)) => {
             let _ = writeln!(
@@ -428,12 +464,20 @@ fn configured_signature_key(explicit: Option<&Path>) -> Result<Option<VerifyingK
         .map_err(|error| format!("{error}; refusing to start"))
 }
 
+/// What the strict-manifest directory holds: the manifests a request body can match, and every
+/// manifest and provenance file's chain link for the check of a chained turn.
+struct StrictLibrary {
+    index: BTreeMap<String, StrictManifestEntry>,
+    chain: ChainIndex,
+}
+
 fn load_strict_manifests(
     directory: &Path,
     signature_key: Option<&VerifyingKey>,
-) -> Result<BTreeMap<String, StrictManifestEntry>, String> {
+) -> Result<StrictLibrary, String> {
     let entries = fs::read_dir(directory).map_err(|_| "strict-manifest directory is unreadable")?;
     let mut manifests = BTreeMap::new();
+    let mut chain = ChainIndex::default();
     for entry in entries {
         let entry = entry.map_err(|_| "strict-manifest directory could not be read")?;
         let path = entry.path();
@@ -446,6 +490,18 @@ fn load_strict_manifests(
             return Err("strict-manifest directory contains a non-regular JSON entry".to_owned());
         }
         let bytes = fs::read(&path).map_err(|_| "strict-manifest entry is unreadable")?;
+        // A prompt provenance file (the other half of a chained turn, which `airlock chain
+        // verify` reads from the same directory) has no manifest_version. It is indexed for the
+        // chain check and is never a manifest a request can match. Any other file without a
+        // manifest_version is no more welcome than it ever was.
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
+        if value.get("manifest_version").is_none() {
+            let provenance: PromptProvenance = serde_json::from_value(value)
+                .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
+            chain.add_provenance(&provenance);
+            continue;
+        }
         let manifest: AirlockManifest = serde_json::from_slice(&bytes)
             .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
         if !crate::manifest::is_supported_manifest_version(&manifest.manifest_version) {
@@ -476,8 +532,6 @@ fn load_strict_manifests(
         if let Some(key) = signature_key
             && manifest.signature.is_some()
         {
-            let value: Value = serde_json::from_slice(&bytes)
-                .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
             signing::verify_value(&value, key).map_err(|failure| {
                 format!(
                     "strict-manifest entry {} has a signature that does not verify: {failure}; refusing to start",
@@ -485,6 +539,14 @@ fn load_strict_manifests(
                 )
             })?;
         }
+        // Every manifest takes part in the chain check, bound or not: a link may name a prior
+        // manifest the gate would not itself forward, and the check then says so.
+        let manifest_hash = manifest.hash();
+        chain.add_manifest(
+            manifest_hash.clone(),
+            manifest.chain.clone(),
+            manifest.prompt_provenance_hash.clone(),
+        );
         if !matches!(
             manifest.achieved_claim,
             ClaimLevel::RawDocumentAbsent | ClaimLevel::StrictTelemetryOnly
@@ -495,7 +557,7 @@ fn load_strict_manifests(
         let key = manifest.request_payload_hash.clone();
         let value = StrictManifestEntry {
             achieved_claim: manifest.achieved_claim,
-            manifest_hash: manifest.hash(),
+            manifest_hash,
         };
         manifests
             .entry(key)
@@ -508,7 +570,10 @@ fn load_strict_manifests(
             })
             .or_insert(value);
     }
-    Ok(manifests)
+    Ok(StrictLibrary {
+        index: manifests,
+        chain,
+    })
 }
 
 /// The gate's own liveness endpoint. The path is reserved for every method, so a request to
@@ -779,6 +844,29 @@ fn handle_request(mut request: Request, state: &GateState) {
                 );
                 return;
             }
+            // A chained turn is forwarded only if the gate forwarded the reply it was built
+            // from, back to the start of its conversation. A manifest with no chain link has
+            // nothing before it and passes.
+            if let Err(fault) = state.chain.check(&manifest.manifest_hash, &state.forwarded) {
+                let _ = writeln!(
+                    io::stderr(),
+                    "airlock gate: chained request refused: {fault}"
+                );
+                let finding = EgressFinding {
+                    artifact_class: "CONVERSATION_CHAIN".to_owned(),
+                    rule_id: fault.rule_id().to_owned(),
+                    key_path: None,
+                    span_hash: None,
+                };
+                deny_request(
+                    request,
+                    state,
+                    &[finding],
+                    &canonical_request_hash,
+                    Some(received),
+                );
+                return;
+            }
             (
                 canonical_request_hash,
                 manifest.achieved_claim.to_string(),
@@ -986,9 +1074,20 @@ fn forward_request(request: Request, state: &GateState, body: &[u8], admitted: A
         }
     }
     let digest = Arc::new(Mutex::new(ResponseDigest::default()));
-    let reader = HashingReader {
-        inner: upstream_response.into_body().into_reader(),
+    // Only a successful response to a request that matched a manifest can be the reply a later
+    // chained turn is built from (an error body is not model output).
+    let exchange = admitted
+        .matched_manifest_hash
+        .clone()
+        .filter(|_| (200..300).contains(&status))
+        .map(|matched_manifest_hash| (matched_manifest_hash, Arc::clone(&state.forwarded)));
+    let reader = ExchangeRecorder {
+        inner: HashingReader {
+            inner: upstream_response.into_body().into_reader(),
+            digest: Arc::clone(&digest),
+        },
         digest: Arc::clone(&digest),
+        exchange,
     };
     let proxy_response = Response::new(StatusCode(status), response_headers, reader, None, None);
     let response_result = request.respond(proxy_response);
@@ -1211,6 +1310,37 @@ impl<R: Read> Read for HashingReader<R> {
     }
 }
 
+/// Records the exchange a response completes, at the moment the gate reads the end of the
+/// upstream body. That is before the client is told the response is complete and before the
+/// receipt file is written (it is written after the response has gone out), so a client that
+/// sends its next turn as soon as it has the reply finds the exchange already recorded. A body
+/// that ends in an error is never recorded: the hash would cover only part of the reply.
+struct ExchangeRecorder<R> {
+    inner: R,
+    digest: Arc<Mutex<ResponseDigest>>,
+    exchange: Option<(String, Arc<ForwardedExchanges>)>,
+}
+
+impl<R: Read> Read for ExchangeRecorder<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if read == 0
+            && !buffer.is_empty()
+            && let Some((matched_manifest_hash, forwarded)) = self.exchange.take()
+        {
+            let response_hash = {
+                let digest = self
+                    .digest
+                    .lock()
+                    .map_err(|_| io::Error::other("response digest poisoned"))?;
+                format!("blake3:{}", digest.hasher.finalize().to_hex())
+            };
+            forwarded.record(&matched_manifest_hash, &response_hash);
+        }
+        Ok(read)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1285,6 +1415,7 @@ mod tests {
         assert!(
             load_strict_manifests(directory.path(), None)
                 .unwrap()
+                .index
                 .is_empty()
         );
     }

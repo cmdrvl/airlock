@@ -197,6 +197,33 @@ does not name. To go through a proxy, pass `--upstream-proxy http://host:port`
 (`http` or `https`, no credentials, path, query or fragment; `socks5` is refused at
 startup). The proxy is outside what Airlock verifies.
 
+A strict-manifest gate also checks the conversation behind a chained turn (an
+`airlock.v0.4` manifest, see Chained turns). It forwards such a request only if it
+forwarded the reply that turn follows, and the same for every earlier turn back to
+the first. A request whose manifest has no chain link (a first turn, or any v0.2 or
+v0.3 manifest) is not checked this way. To make that possible:
+
+- put each chained turn's prompt provenance file (`assemble --provenance-out`) in
+  `--manifest-dir` next to its manifest. The gate reads both, as `chain verify`
+  does, and any other JSON file there still stops startup;
+- keep the same `--out-dir` from one run of the gate to the next. The gate knows an
+  exchange because it forwarded it in this run, or because it finds its receipt in
+  `--out-dir` at startup. It loads manifests once, at startup, so a new turn's
+  manifest needs a restart, and a gate started on an empty `--out-dir` has forwarded
+  nothing yet.
+
+Only a 2xx response to a request that matched a manifest counts. A request that
+fails this check is refused with HTTP 403 `E_GATE_DENIED`, finding class
+`CONVERSATION_CHAIN`, and never reaches the upstream: `REQUEST_CHAIN_UNRESOLVED`
+when a link cannot be followed (a manifest or provenance file is missing or they
+disagree; stderr names the same reason `chain verify` would), or
+`REQUEST_CHAIN_RESPONSE_NOT_FORWARDED` when every link resolves but this gate never
+forwarded the reply. The limits: the gate receipt is unsigned, so whoever can write
+`--out-dir` can add an exchange to it; if two manifests in the directory are for the
+same request bytes the gate uses one of them (the stronger claim, else whichever it
+read first) and checks the chain only for that one; and the gate holds about 200
+bytes in memory per exchange it has seen.
+
 The optional `--transport` declaration pins a provider adapter, or supplies
 the JSON pointers required by `generic_json`. Without it, the gate selects a
 provider adapter from each request's shape and refuses conflicting
@@ -448,7 +475,8 @@ What the claim does with an earlier turn:
 The gate receipt is unsigned JSON. These checks show that the hashes of the
 response, the receipt and the prior manifest agree with each other. They do not
 show who wrote the receipt, so the link is only as strong as your custody of that
-file. `airlock chain verify` rechecks a whole conversation later.
+file. `airlock chain verify` rechecks a whole conversation later. A strict-manifest
+gate checks the same links live, as described under `airlock gate`.
 
 ### `airlock verify`
 
@@ -989,6 +1017,9 @@ came from.
 - for a chained turn: which earlier manifest it follows and which response bytes
   it carried, by hash, and that those hashes agree with a gate receipt's
   (`chain verify`, v0.4)
+- that a strict-manifest gate forwarded a chained turn only after it had forwarded
+  the reply that turn follows, link by link, as far as the gate's own receipts go
+  (see the limits under `airlock gate`)
 
 ### Airlock does not prove
 
@@ -1007,7 +1038,8 @@ came from.
 - who wrote a gate receipt: an `airlock.gate.v1` receipt is unsigned, so a chained
   turn's link to its earlier response is only as strong as your custody of the
   receipt and the response file. `assemble` and `chain verify` show that the hashes
-  agree, not that a gate produced them
+  agree, not that a gate produced them, and a gate that reads its own receipts back at
+  startup trusts whoever can write its `--out-dir`
 - that a tool result is true or came from the tool it names: `declared_tool_results`
   records that you vouch for those bytes
 - that the witness ledger is complete or unaltered: the `prev_hash` chain

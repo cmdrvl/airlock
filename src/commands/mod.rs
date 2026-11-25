@@ -3,6 +3,7 @@ pub mod chain_verify;
 pub mod doctor;
 pub mod explain;
 pub mod gate;
+pub mod gate_chain;
 pub mod keygen;
 pub mod send;
 pub mod verify;

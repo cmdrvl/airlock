@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::adapter::{OPENAI_CHAT_COMPLETIONS_ADAPTER_NAME, OpenAiChatCompletionsAdapter};
+use crate::adapter::{self, TransportDeclaration};
 use crate::assembler::PromptProvenance;
 use crate::cli::{VERIFY_PARTIAL, VERIFY_PASS, VerifyArgs};
 use crate::hash::blake3_hash;
@@ -115,19 +115,41 @@ fn run_with_writers(
         Ok(hash) => hash,
         Err(refusal) => return refusal.write_to(stdout),
     };
-    let (model_id, adapter_name) = match request_transport_metadata(&request_value) {
-        Ok(metadata) => metadata,
+    let declared_transport = match args.transport.as_deref() {
+        Some(path) => match read_json_typed::<TransportDeclaration>(
+            path,
+            RefusalEnvelope::bad_input,
+            "failed to read transport declaration",
+            "transport declaration is not a valid transport JSON object",
+        ) {
+            Ok(declaration) => Some(declaration),
+            Err(refusal) => return refusal.write_to(stdout),
+        },
+        None => None,
+    };
+    let adapter = match adapter::select(&request_value, declared_transport.as_ref()) {
+        Ok(adapter) => adapter,
         Err(refusal) => return refusal.write_to(stdout),
     };
+    let model_id = match adapter.model_id(&request_value) {
+        Some(model_id) => model_id,
+        None => {
+            return RefusalEnvelope::bad_request(
+                "request payload must contain a non-empty model id",
+                json!({ "adapter": adapter.name() }),
+            )
+            .write_to(stdout);
+        }
+    };
+    let adapter_name = adapter.name().to_string();
 
-    let adapter = OpenAiChatCompletionsAdapter;
     let verify_result = match scanner::verify(
         &policy,
         &prompt_value,
         &prompt_provenance,
         &request_value,
         boundary_mode,
-        &adapter,
+        adapter.as_ref(),
     ) {
         Ok(result) => result,
         Err(refusal) => return refusal.write_to(stdout),
@@ -314,38 +336,6 @@ fn system_prompt_hash(prompt_payload: &Value) -> Result<String, RefusalEnvelope>
     Ok(blake3_hash(system_prompt.as_bytes()))
 }
 
-fn request_transport_metadata(
-    request_payload: &Value,
-) -> Result<(String, String), RefusalEnvelope> {
-    let model_id = request_payload
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            RefusalEnvelope::bad_request(
-                "request payload must contain a non-empty model field",
-                json!({ "field": "model" }),
-            )
-        })?;
-
-    let messages_present = request_payload
-        .get("messages")
-        .and_then(Value::as_array)
-        .is_some();
-    if !messages_present {
-        return Err(RefusalEnvelope::bad_request(
-            "request payload must contain a messages array",
-            json!({ "field": "messages" }),
-        ));
-    }
-
-    Ok((
-        model_id.to_string(),
-        OPENAI_CHAT_COMPLETIONS_ADAPTER_NAME.to_string(),
-    ))
-}
-
 fn upstream_inventory(
     prompt_provenance: &PromptProvenance,
     policy: &AirlockPolicy,
@@ -435,6 +425,8 @@ mod tests {
                 ClaimLevel::RawDocumentAbsent,
                 ClaimLevel::StrictTelemetryOnly,
             ],
+            protected_bloom_min_hits: None,
+            allow_multimodal: None,
             extends: Vec::new(),
             source_chain: Vec::new(),
         }
@@ -454,6 +446,7 @@ mod tests {
             prompt: dir.path().join("prompt.json"),
             provenance: dir.path().join("provenance.json"),
             request: dir.path().join("request.json"),
+            transport: None,
             out: dir.path().join("manifest.json"),
             require_claim: None,
             no_witness: false,

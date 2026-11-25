@@ -8,8 +8,8 @@
 use serde_json::{Map, Value, json};
 
 use super::{
-    Adapter, PartKind, ScreenablePart, TransportConfig, apply_additional_params, pointer_child,
-    prompt_message, prompt_messages, validated_model_id, walk_request,
+    Adapter, PartKind, ResponsePart, ScreenablePart, TransportConfig, apply_additional_params,
+    pointer_child, prompt_message, prompt_messages, validated_model_id, walk_request,
 };
 use crate::output::{canonical_json, sort_value};
 use crate::refusal::RefusalEnvelope;
@@ -150,6 +150,85 @@ impl Adapter for AnthropicMessagesAdapter {
         )?;
 
         Ok(sort_value(Value::Object(request)))
+    }
+
+    /// Read `text` and `tool_use` blocks from a Messages response. `thinking`, `redacted_thinking`
+    /// and every other block type are left out, as is an empty text block. An error body, a
+    /// non-assistant role, or a response with nothing to admit is refused.
+    fn unwrap_response(&self, response: &Value) -> Result<Vec<ResponsePart>, RefusalEnvelope> {
+        let bad = |message: &str, field: &str| {
+            RefusalEnvelope::bad_input(
+                message.to_string(),
+                json!({ "field": field, "adapter": ANTHROPIC_MESSAGES_ADAPTER_NAME }),
+            )
+        };
+        let object = response
+            .as_object()
+            .ok_or_else(|| bad("response must be a JSON object", ""))?;
+        if object.get("type").and_then(Value::as_str) != Some("message") {
+            return Err(bad(
+                "response is not an Anthropic message; an error body is not model output",
+                "type",
+            ));
+        }
+        if object.get("role").and_then(Value::as_str) != Some("assistant") {
+            return Err(bad("response role must be assistant", "role"));
+        }
+        let content = object
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or_else(|| bad("response must carry a content array", "content"))?;
+
+        let mut parts = Vec::new();
+        for (index, block) in content.iter().enumerate() {
+            let source_path = format!("content[{index}]");
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    let text = block.get("text").and_then(Value::as_str).ok_or_else(|| {
+                        bad(
+                            "text block must carry a string text",
+                            &format!("{source_path}.text"),
+                        )
+                    })?;
+                    if !text.is_empty() {
+                        parts.push(ResponsePart::Text {
+                            source_path,
+                            text: text.to_string(),
+                        });
+                    }
+                }
+                Some("tool_use") => {
+                    let name = block.get("name").and_then(Value::as_str).ok_or_else(|| {
+                        bad(
+                            "tool_use block must carry a string name",
+                            &format!("{source_path}.name"),
+                        )
+                    })?;
+                    let input = block.get("input").cloned().ok_or_else(|| {
+                        bad(
+                            "tool_use block must carry an input",
+                            &format!("{source_path}.input"),
+                        )
+                    })?;
+                    parts.push(ResponsePart::ToolUse {
+                        id: block.get("id").and_then(Value::as_str).map(str::to_string),
+                        id_source_path: format!("{source_path}.id"),
+                        name: name.to_string(),
+                        input,
+                        input_source_path: format!("{source_path}.input"),
+                        source_path,
+                    });
+                }
+                _ => {}
+            }
+        }
+        if parts.is_empty() {
+            return Err(bad(
+                "response carries no text or tool_use block to admit",
+                "content",
+            ));
+        }
+        Ok(parts)
     }
 
     fn unwrap(&self, request_payload: &Value) -> Result<Value, RefusalEnvelope> {

@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod assembler;
+pub mod chain;
 pub mod cli;
 pub mod commands;
 pub mod hash;

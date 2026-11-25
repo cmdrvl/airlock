@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
 
+use crate::adapter::ResponsePart;
 use crate::hash::blake3_hash;
 use crate::output::{canonical_json_bytes, sort_value};
 use crate::policy::AirlockPolicy;
@@ -35,11 +36,40 @@ pub struct AssemblyResult {
     pub not_crossed: Vec<NotCrossedEntry>,
 }
 
+/// The key under the user message's content that carries an earlier turn's material. Reserved:
+/// no policy rule may allow a path that starts with it, and `verify` treats any message whose
+/// content object has this key as carrying model output.
+pub const PRIOR_TURN_KEY: &str = "prior_turn";
+
+/// `policy_rule_id` on every provenance record copied from an earlier response.
+pub const MODEL_OUTPUT_RULE_ID: &str = "chain.model_output";
+
+/// An earlier turn's model output, ready to enter the prompt. The caller has already checked
+/// `response_hash` against a gate receipt; the assembler does not look at receipts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PriorTurn<'a> {
+    /// `blake3:` hash of the response bytes the parts were read from.
+    pub response_hash: &'a str,
+    pub parts: &'a [ResponsePart],
+}
+
 pub fn assemble(
     policy: &AirlockPolicy,
     inputs: &[InputArtifact],
     system_prompt: &str,
     boundary_mode: BoundaryMode,
+) -> Result<AssemblyResult, RefusalEnvelope> {
+    assemble_with_prior_turn(policy, inputs, system_prompt, boundary_mode, None)
+}
+
+/// [`assemble`], plus an earlier turn's model output under [`PRIOR_TURN_KEY`]. With `None` the
+/// result is byte-for-byte what `assemble` has always produced.
+pub fn assemble_with_prior_turn(
+    policy: &AirlockPolicy,
+    inputs: &[InputArtifact],
+    system_prompt: &str,
+    boundary_mode: BoundaryMode,
+    prior_turn: Option<&PriorTurn<'_>>,
 ) -> Result<AssemblyResult, RefusalEnvelope> {
     validate_inputs(inputs)?;
 
@@ -69,6 +99,12 @@ pub fn assemble(
 
     let mut crossing_rules = Vec::with_capacity(policy.allowed_keys.len());
     for (rule_index, rule) in policy.allowed_keys.iter().enumerate() {
+        if rule.key_path.split('.').next() == Some(PRIOR_TURN_KEY) {
+            return Err(RefusalEnvelope::bad_policy(
+                format!("allowed key cannot start with the reserved name {PRIOR_TURN_KEY}"),
+                json!({ "key_path": rule.key_path, "reserved": PRIOR_TURN_KEY }),
+            ));
+        }
         let boundary_class = classify_rule(policy, &rule.key_path, rule.boundary_class)?;
         let excluded = boundary_mode == BoundaryMode::TelemetryOnly
             && matches!(boundary_class, BoundaryClass::DerivedText);
@@ -101,6 +137,10 @@ pub fn assemble(
                 boundary_class,
             );
         }
+    }
+
+    if let Some(turn) = prior_turn {
+        admit_prior_turn(&mut user_content, &mut records, turn)?;
     }
 
     let user_content = sort_value(user_content);
@@ -175,6 +215,15 @@ fn classify_rule(
         return Err(RefusalEnvelope::internal(
             "allow rule cannot emit FORBIDDEN boundary class",
             json!({ "key_path": key_path }),
+        ));
+    }
+
+    // MODEL_OUTPUT is assigned only by the chain path, after a response hash was checked against
+    // a gate receipt. A policy rule that could name it would let any input field carry the label.
+    if matches!(override_class, Some(BoundaryClass::ModelOutput)) {
+        return Err(RefusalEnvelope::bad_policy(
+            "allow rule cannot assign the MODEL_OUTPUT boundary class",
+            json!({ "key_path": key_path, "boundary_class": "MODEL_OUTPUT" }),
         ));
     }
 
@@ -307,10 +356,97 @@ fn record_value_fragments(
                     vec![BoundaryMode::Annotated, BoundaryMode::TelemetryOnly]
                 }
                 BoundaryClass::DerivedText => vec![BoundaryMode::Annotated],
+                BoundaryClass::ModelOutput => {
+                    vec![BoundaryMode::Annotated, BoundaryMode::TelemetryOnly]
+                }
                 BoundaryClass::Forbidden => Vec::new(),
             },
         }),
     }
+}
+
+/// Put an earlier turn's model output into the user message under [`PRIOR_TURN_KEY`] and record
+/// every leaf copied from the response as MODEL_OUTPUT. The `kind` tags are airlock's own
+/// template text, so they are recorded as template records like the roles.
+fn admit_prior_turn(
+    user_content: &mut Value,
+    records: &mut Vec<ProvenanceRecord>,
+    turn: &PriorTurn<'_>,
+) -> Result<(), RefusalEnvelope> {
+    let base_path = format!("messages[1].content.{PRIOR_TURN_KEY}.model_output");
+    let mut blocks = Vec::with_capacity(turn.parts.len());
+    for (index, part) in turn.parts.iter().enumerate() {
+        let block_path = format!("{base_path}[{index}]");
+        let leaf =
+            |records: &mut Vec<ProvenanceRecord>, field: &str, source_path: &str, value: &Value| {
+                record_value_fragments(
+                    records,
+                    &format!("{block_path}.{field}"),
+                    source_path,
+                    value,
+                    turn.response_hash,
+                    MODEL_OUTPUT_RULE_ID,
+                    BoundaryClass::ModelOutput,
+                );
+            };
+        match part {
+            ResponsePart::Text { source_path, text } => {
+                records.push(synthetic_record(
+                    &format!("{block_path}.kind"),
+                    "text",
+                    &format!("template.{PRIOR_TURN_KEY}.kind"),
+                    "chain.kind",
+                ));
+                leaf(
+                    records,
+                    "text",
+                    &format!("{source_path}.text"),
+                    &Value::String(text.clone()),
+                );
+                blocks.push(json!({ "kind": "text", "text": text }));
+            }
+            ResponsePart::ToolUse {
+                source_path,
+                id,
+                id_source_path,
+                name,
+                input,
+                input_source_path,
+            } => {
+                records.push(synthetic_record(
+                    &format!("{block_path}.kind"),
+                    "tool_use",
+                    &format!("template.{PRIOR_TURN_KEY}.kind"),
+                    "chain.kind",
+                ));
+                let mut block = Map::new();
+                block.insert("kind".to_string(), json!("tool_use"));
+                if let Some(id) = id {
+                    let id_value = Value::String(id.clone());
+                    leaf(records, "id", id_source_path, &id_value);
+                    block.insert("id".to_string(), id_value);
+                }
+                let name_value = Value::String(name.clone());
+                leaf(records, "name", &format!("{source_path}.name"), &name_value);
+                block.insert("name".to_string(), name_value);
+                leaf(records, "input", input_source_path, input);
+                block.insert("input".to_string(), input.clone());
+                blocks.push(Value::Object(block));
+            }
+        }
+    }
+
+    let object = user_content.as_object_mut().ok_or_else(|| {
+        RefusalEnvelope::internal(
+            "user content must be an object to carry a prior turn",
+            json!({ "key": PRIOR_TURN_KEY }),
+        )
+    })?;
+    object.insert(
+        PRIOR_TURN_KEY.to_string(),
+        json!({ "model_output": blocks }),
+    );
+    Ok(())
 }
 
 fn ensure_provenance_coverage(

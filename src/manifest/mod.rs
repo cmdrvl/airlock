@@ -632,6 +632,7 @@ fn boundary_class_name(boundary_class: BoundaryClass) -> &'static str {
     match boundary_class {
         BoundaryClass::Telemetry => "TELEMETRY",
         BoundaryClass::DerivedText => "DERIVED_TEXT",
+        BoundaryClass::ModelOutput => "MODEL_OUTPUT",
         BoundaryClass::Forbidden => "FORBIDDEN",
     }
 }

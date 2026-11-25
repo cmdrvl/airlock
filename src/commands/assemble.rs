@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::assembler::{self, InputArtifact, NotCrossedInventory, PromptProvenance};
+use crate::adapter::{ResponsePart, unwrap_response};
+use crate::assembler::{self, InputArtifact, NotCrossedInventory, PriorTurn, PromptProvenance};
+use crate::chain::check_receipt;
 use crate::cli::{AssembleArgs, VERIFY_PASS};
 use crate::hash::{blake3_hash, jcs};
 use crate::policy::{hash_policy, load_policy};
@@ -44,11 +46,20 @@ fn run_with_writers(
         Err(refusal) => return refusal.write_to(stdout),
     };
 
-    let assembly = match assembler::assemble(
+    let prior_turn = match load_prior_turn(&args, &mut witness_inputs) {
+        Ok(prior_turn) => prior_turn,
+        Err(refusal) => return refusal.write_to(stdout),
+    };
+
+    let assembly = match assembler::assemble_with_prior_turn(
         &policy,
         &input_artifacts,
         &system_prompt,
         args.boundary_mode,
+        prior_turn
+            .as_ref()
+            .map(LoadedPriorTurn::as_prior_turn)
+            .as_ref(),
     ) {
         Ok(assembly) => assembly,
         Err(refusal) => return refusal.write_to(stdout),
@@ -186,6 +197,81 @@ fn load_input_artifacts(
     Ok(artifacts)
 }
 
+/// An earlier turn's response after its receipt check, owning what the assembler borrows.
+struct LoadedPriorTurn {
+    response_hash: String,
+    parts: Vec<ResponsePart>,
+}
+
+impl LoadedPriorTurn {
+    fn as_prior_turn(&self) -> PriorTurn<'_> {
+        PriorTurn {
+            response_hash: &self.response_hash,
+            parts: &self.parts,
+        }
+    }
+}
+
+/// Read `--prior-receipt` and `--response`, check the receipt against the response bytes, and
+/// unwrap the response with the named adapter. `None` when neither flag was given (clap requires
+/// the three flags together). Every failure is a refusal before anything is written.
+fn load_prior_turn(
+    args: &AssembleArgs,
+    witness_inputs: &mut Vec<WitnessInput>,
+) -> Result<Option<LoadedPriorTurn>, RefusalEnvelope> {
+    let (Some(receipt_path), Some(response_path), Some(adapter_name)) = (
+        args.prior_receipt.as_deref(),
+        args.response.as_deref(),
+        args.response_adapter.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+
+    let read = |path: &Path, what: &str| {
+        std::fs::read(path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                RefusalEnvelope::missing_file(path.display().to_string())
+            }
+            _ => RefusalEnvelope::bad_input(
+                format!("failed to read {what} file"),
+                json!({ "path": path.display().to_string(), "error": error.to_string() }),
+            ),
+        })
+    };
+    let receipt_bytes = read(receipt_path, "prior receipt")?;
+    let response_bytes = read(response_path, "response")?;
+
+    let receipt: Value = serde_json::from_slice(&receipt_bytes).map_err(|error| {
+        RefusalEnvelope::bad_input(
+            "prior receipt is not valid JSON",
+            json!({ "path": receipt_path.display().to_string(), "error": error.to_string() }),
+        )
+    })?;
+    let checked = check_receipt(&receipt, &response_bytes)?;
+
+    let response: Value = serde_json::from_slice(&response_bytes).map_err(|error| {
+        RefusalEnvelope::bad_input(
+            "response is not a single JSON document; streamed responses are not supported",
+            json!({ "path": response_path.display().to_string(), "error": error.to_string() }),
+        )
+    })?;
+    let parts = unwrap_response(adapter_name, &response)?;
+
+    witness_inputs.push(WitnessRecord::input(
+        receipt_path.display().to_string(),
+        blake3_hash(&receipt_bytes),
+    ));
+    witness_inputs.push(WitnessRecord::input(
+        response_path.display().to_string(),
+        checked.response_hash.clone(),
+    ));
+
+    Ok(Some(LoadedPriorTurn {
+        response_hash: checked.response_hash,
+        parts,
+    }))
+}
+
 fn load_system_prompt(
     path: Option<&Path>,
     witness_inputs: &mut Vec<WitnessInput>,
@@ -287,6 +373,9 @@ claim_levels:
             out: tempdir.join("prompt_payload.json"),
             provenance_out: tempdir.join("prompt_provenance.json"),
             not_crossed_out: None,
+            prior_receipt: None,
+            response: None,
+            response_adapter: None,
             no_witness: false,
         }
     }

@@ -7,7 +7,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::adapter::Adapter;
-use crate::assembler::PromptProvenance;
+use crate::assembler::{PRIOR_TURN_KEY, PromptProvenance};
 use crate::output::canonical_json;
 use crate::policy::AirlockPolicy;
 use crate::refusal::RefusalEnvelope;
@@ -87,8 +87,20 @@ fn verify_with_adapter(
         &mut forbidden_paths,
     );
 
+    // Model output is found from the prompt's structure, never from provenance labels: a
+    // provenance gap is advisory, so labels an attacker deleted must not lift the claim cap.
+    let model_output_paths = model_output_paths(prompt_payload);
+    let mut model_output_dirty = false;
     for (payload, root_path) in [(prompt_payload, "prompt"), (request_payload, "request")] {
         let detector_scan = detectors::scan_payload(policy, payload, root_path);
+        if root_path == "prompt" {
+            model_output_dirty = detector_scan.findings.iter().any(|finding| {
+                finding
+                    .key_path
+                    .strip_prefix("prompt.")
+                    .is_some_and(|path| path_is_under_any(path, &model_output_paths))
+            });
+        }
         findings.extend(detector_scan.findings);
         for path in detector_scan.blocking_paths {
             if !detector_blocking_paths.contains(&path) {
@@ -123,12 +135,19 @@ fn verify_with_adapter(
     } else {
         BindingStatus::Unbound
     };
+    let model_output = model_output_screen(policy, &model_output_paths, model_output_dirty);
+    let unscreened_model_output_paths = if model_output == ModelOutputScreen::Unscreened {
+        model_output_paths
+    } else {
+        Vec::new()
+    };
     let achieved_claim = derive_claim(
         raw_document_present,
         filing_derived_text_present,
         binding_status,
         boundary_mode,
         !detector_blocking_paths.is_empty(),
+        model_output,
     );
     let blocked_reasons = derive_blocked_reasons(
         achieved_claim,
@@ -137,6 +156,7 @@ fn verify_with_adapter(
         &detector_blocking_paths,
         &derived_text_paths,
         &binding_paths,
+        &unscreened_model_output_paths,
     );
 
     Ok(VerifyResult {
@@ -349,18 +369,87 @@ fn scan_provenance_gaps(
     });
 }
 
+/// Where the model output in a prompt stands against the policy's screen (al-210 ruling D2(b)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelOutputScreen {
+    /// The prompt carries no `prior_turn`.
+    Absent,
+    /// The policy has a blocking detector pack and no detector found anything under `prior_turn`.
+    ScreenedClean,
+    /// Model output crossed without that screen: the policy has no blocking detector pack, or a
+    /// detector reported a hit under `prior_turn`. A blocking hit also fails the boundary; a
+    /// warn-only hit lands here and caps the claim.
+    Unscreened,
+}
+
+/// Where the prompt's `messages[i].content` objects carry [`PRIOR_TURN_KEY`], as bare paths
+/// (`messages[1].content.prior_turn`).
+fn model_output_paths(prompt_payload: &Value) -> Vec<String> {
+    prompt_payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| {
+                    message
+                        .get("content")
+                        .and_then(Value::as_object)
+                        .is_some_and(|content| content.contains_key(PRIOR_TURN_KEY))
+                })
+                .map(|(index, _)| format!("messages[{index}].content.{PRIOR_TURN_KEY}"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True when `path` is one of `roots` or lies beneath one (`root.x` or `root[0]`).
+fn path_is_under_any(path: &str, roots: &[String]) -> bool {
+    roots.iter().any(|root| {
+        path == root
+            || path
+                .strip_prefix(root.as_str())
+                .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('['))
+    })
+}
+
+/// Model output is screened clean only if some enabled detector pack blocks (is not warn-only)
+/// and none reported a hit beneath `prior_turn`. Forbidden keys and patterns apply to model output
+/// like any other text and fail the boundary on their own; they are not what "screened" means here,
+/// because a policy without detector packs would otherwise let free-form model text earn STRICT.
+fn model_output_screen(
+    policy: &AirlockPolicy,
+    model_output_paths: &[String],
+    detector_hit_under_it: bool,
+) -> ModelOutputScreen {
+    if model_output_paths.is_empty() {
+        return ModelOutputScreen::Absent;
+    }
+    let blocking_pack_enabled = policy
+        .detectors
+        .iter()
+        .any(|pack| !policy.detectors_warn_only.contains(pack));
+    if blocking_pack_enabled && !detector_hit_under_it {
+        ModelOutputScreen::ScreenedClean
+    } else {
+        ModelOutputScreen::Unscreened
+    }
+}
+
 fn derive_claim(
     raw_document_present: bool,
     filing_derived_text_present: bool,
     binding_status: BindingStatus,
     boundary_mode: BoundaryMode,
     detector_blocked: bool,
+    model_output: ModelOutputScreen,
 ) -> ClaimLevel {
     if raw_document_present || binding_status == BindingStatus::Unbound || detector_blocked {
         return ClaimLevel::BoundaryFailed;
     }
 
-    if filing_derived_text_present {
+    if filing_derived_text_present || model_output == ModelOutputScreen::Unscreened {
         return ClaimLevel::RawDocumentAbsent;
     }
 
@@ -377,6 +466,7 @@ fn derive_blocked_reasons(
     detector_paths: &[String],
     derived_text_paths: &[String],
     binding_paths: &[String],
+    unscreened_model_output_paths: &[String],
 ) -> Vec<BlockedReason> {
     let mut blocked_reasons = Vec::new();
     let mut sensitive_paths = forbidden_paths.to_vec();
@@ -413,7 +503,12 @@ fn derive_blocked_reasons(
         let (reason, offending_paths) = if !boundary_paths.is_empty() {
             (boundary_reason.to_string(), boundary_paths)
         } else {
-            strict_telemetry_block(boundary_mode, forbidden_paths, derived_text_paths)
+            strict_telemetry_block(
+                boundary_mode,
+                forbidden_paths,
+                derived_text_paths,
+                unscreened_model_output_paths,
+            )
         };
         blocked_reasons.push(BlockedReason {
             claim_attempted: ClaimLevel::StrictTelemetryOnly,
@@ -439,6 +534,7 @@ fn strict_telemetry_block(
     boundary_mode: BoundaryMode,
     forbidden_paths: &[String],
     derived_text_paths: &[String],
+    unscreened_model_output_paths: &[String],
 ) -> (String, Vec<String>) {
     if !forbidden_paths.is_empty() {
         return (
@@ -451,6 +547,13 @@ fn strict_telemetry_block(
         return (
             "filing-derived text crossed the boundary".to_string(),
             derived_text_paths.to_vec(),
+        );
+    }
+
+    if !unscreened_model_output_paths.is_empty() {
+        return (
+            "model output from an earlier turn crossed without a clean screen: the policy needs a blocking detector pack and no detector may report a hit in it".to_string(),
+            unscreened_model_output_paths.to_vec(),
         );
     }
 

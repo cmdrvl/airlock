@@ -64,6 +64,7 @@
             "enum": [
               "TELEMETRY",
               "DERIVED_TEXT",
+              "MODEL_OUTPUT",
               "FORBIDDEN"
             ]
           },

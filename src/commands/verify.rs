@@ -603,6 +603,7 @@ fn boundary_class_label(record: &crate::assembler::ProvenanceRecord) -> String {
     match record.boundary_class {
         crate::assembler::BoundaryClass::Telemetry => "telemetry".to_string(),
         crate::assembler::BoundaryClass::DerivedText => "derived_text".to_string(),
+        crate::assembler::BoundaryClass::ModelOutput => "model_output".to_string(),
         crate::assembler::BoundaryClass::Forbidden => "forbidden".to_string(),
     }
 }

@@ -8,9 +8,9 @@
 use serde_json::{Map, Value, json};
 
 use super::{
-    Adapter, PartKind, ScreenablePart, TransportConfig, apply_additional_params, chat_media_parts,
-    classify_inline_file, classify_reference, pointer_child, prompt_message, prompt_messages,
-    validated_model_id, validated_temperature, walk_request,
+    Adapter, PartKind, ResponsePart, ScreenablePart, TransportConfig, apply_additional_params,
+    chat_media_parts, classify_inline_file, classify_reference, pointer_child, prompt_message,
+    prompt_messages, validated_model_id, validated_temperature, walk_request,
 };
 use crate::output::{canonical_json, sort_value};
 use crate::refusal::RefusalEnvelope;
@@ -145,6 +145,111 @@ impl Adapter for OpenAiResponsesAdapter {
         )?;
 
         Ok(sort_value(Value::Object(request)))
+    }
+
+    /// Read assistant `output_text` and `function_call` items from a Responses object. Reasoning
+    /// items, refusals and every other item type are left out, as is empty text. A function call's
+    /// `arguments` string is parsed when it is valid JSON and kept as a string when it is not, so
+    /// it is screened either way. An error body or a response with nothing to admit is refused.
+    fn unwrap_response(&self, response: &Value) -> Result<Vec<ResponsePart>, RefusalEnvelope> {
+        let bad = |message: &str, field: &str| {
+            RefusalEnvelope::bad_input(
+                message.to_string(),
+                json!({ "field": field, "adapter": OPENAI_RESPONSES_ADAPTER_NAME }),
+            )
+        };
+        let object = response
+            .as_object()
+            .ok_or_else(|| bad("response must be a JSON object", ""))?;
+        if object.get("object").and_then(Value::as_str) != Some("response") {
+            return Err(bad("response is not an OpenAI Responses object", "object"));
+        }
+        if object.get("error").is_some_and(|error| !error.is_null()) {
+            return Err(bad(
+                "response carries an error and is not model output",
+                "error",
+            ));
+        }
+        let output = object
+            .get("output")
+            .and_then(Value::as_array)
+            .ok_or_else(|| bad("response must carry an output array", "output"))?;
+
+        let mut parts = Vec::new();
+        for (index, item) in output.iter().enumerate() {
+            let source_path = format!("output[{index}]");
+            match item.get("type").and_then(Value::as_str) {
+                Some("message")
+                    if item.get("role").and_then(Value::as_str) == Some("assistant") =>
+                {
+                    let content =
+                        item.get("content")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| {
+                                bad(
+                                    "message item must carry a content array",
+                                    &format!("{source_path}.content"),
+                                )
+                            })?;
+                    for (part_index, part) in content.iter().enumerate() {
+                        if part.get("type").and_then(Value::as_str) != Some("output_text") {
+                            continue;
+                        }
+                        let part_path = format!("{source_path}.content[{part_index}]");
+                        let text = part.get("text").and_then(Value::as_str).ok_or_else(|| {
+                            bad(
+                                "output_text part must carry a string text",
+                                &format!("{part_path}.text"),
+                            )
+                        })?;
+                        if !text.is_empty() {
+                            parts.push(ResponsePart::Text {
+                                source_path: part_path,
+                                text: text.to_string(),
+                            });
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    let name = item.get("name").and_then(Value::as_str).ok_or_else(|| {
+                        bad(
+                            "function_call item must carry a string name",
+                            &format!("{source_path}.name"),
+                        )
+                    })?;
+                    let arguments =
+                        item.get("arguments")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                bad(
+                                    "function_call item must carry string arguments",
+                                    &format!("{source_path}.arguments"),
+                                )
+                            })?;
+                    let input = serde_json::from_str::<Value>(arguments)
+                        .unwrap_or_else(|_| Value::String(arguments.to_string()));
+                    parts.push(ResponsePart::ToolUse {
+                        id: item
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        id_source_path: format!("{source_path}.call_id"),
+                        name: name.to_string(),
+                        input,
+                        input_source_path: format!("{source_path}.arguments"),
+                        source_path,
+                    });
+                }
+                _ => {}
+            }
+        }
+        if parts.is_empty() {
+            return Err(bad(
+                "response carries no assistant text or function_call item to admit",
+                "output",
+            ));
+        }
+        Ok(parts)
     }
 
     fn unwrap(&self, request_payload: &Value) -> Result<Value, RefusalEnvelope> {

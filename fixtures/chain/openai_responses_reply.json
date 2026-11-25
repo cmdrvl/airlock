@@ -1,0 +1,37 @@
+{
+  "id": "resp_fx_0001",
+  "object": "response",
+  "created_at": 1790000000,
+  "status": "completed",
+  "model": "gpt-5",
+  "output": [
+    {
+      "type": "reasoning",
+      "id": "rs_fx_0001",
+      "summary": [{"type": "summary_text", "text": "REASONING-MARKER-NOT-ADMITTED"}]
+    },
+    {
+      "type": "message",
+      "id": "msg_fx_0001",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Family F-17 ranks highest on header coverage; I will look up its lineage.",
+          "annotations": []
+        },
+        {"type": "refusal", "refusal": "REFUSAL-MARKER-NOT-ADMITTED"}
+      ]
+    },
+    {
+      "type": "function_call",
+      "id": "fc_fx_0001",
+      "call_id": "call_fx_0001",
+      "name": "lineage_lookup",
+      "arguments": "{\"family_id\":\"F-17\",\"depth\":2}",
+      "status": "completed"
+    }
+  ],
+  "usage": {"input_tokens": 120, "output_tokens": 48, "total_tokens": 168}
+}

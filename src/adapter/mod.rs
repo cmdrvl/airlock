@@ -121,6 +121,54 @@ pub enum PartKind {
     RemoteReference,
 }
 
+/// Adapters whose provider responses `assemble --response` can read. D6 of al-210: the other
+/// adapters follow once these two are proven.
+pub const RESPONSE_ADAPTER_NAMES: [&str; 2] = [
+    OPENAI_RESPONSES_ADAPTER_NAME,
+    ANTHROPIC_MESSAGES_ADAPTER_NAME,
+];
+
+/// A model-authored block of a provider response that may enter the next prompt as MODEL_OUTPUT.
+///
+/// Only assistant text and tool calls are admitted. Reasoning or thinking blocks, refusals and any
+/// other block type are left out: leaving content out can only shrink what crosses.
+/// `source_path` locates the block in the response in the dotted, bracketed style provenance
+/// uses, for example `content[1]` or `output[0].content[0]`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponsePart {
+    Text {
+        source_path: String,
+        text: String,
+    },
+    ToolUse {
+        source_path: String,
+        /// The provider's call id, when the block carries one. Used to match a tool result.
+        id: Option<String>,
+        /// `content[1].id` on Anthropic, `output[1].call_id` on OpenAI.
+        id_source_path: String,
+        name: String,
+        input: Value,
+        /// Where `input` came from. For OpenAI function calls the arguments are a JSON string
+        /// and this names that string; paths below it continue inside the parsed JSON.
+        input_source_path: String,
+    },
+}
+
+/// Read the model-authored parts of a provider response, by adapter name.
+pub fn unwrap_response(
+    adapter_name: &str,
+    response: &Value,
+) -> Result<Vec<ResponsePart>, RefusalEnvelope> {
+    match adapter_name {
+        OPENAI_RESPONSES_ADAPTER_NAME => OpenAiResponsesAdapter.unwrap_response(response),
+        ANTHROPIC_MESSAGES_ADAPTER_NAME => AnthropicMessagesAdapter.unwrap_response(response),
+        _ => Err(RefusalEnvelope::bad_input(
+            "this adapter has no response unwrapper",
+            json!({ "adapter": adapter_name, "supported": RESPONSE_ADAPTER_NAMES }),
+        )),
+    }
+}
+
 pub trait Adapter {
     fn name(&self) -> &str;
 
@@ -135,6 +183,17 @@ pub trait Adapter {
 
     /// Restore the canonical prompt messages from a vendor request envelope.
     fn unwrap(&self, request_payload: &Value) -> Result<Value, RefusalEnvelope>;
+
+    /// The model-authored parts of a provider response, in document order.
+    ///
+    /// Refuses by default: an adapter reads responses only once it has an unwrapper that was
+    /// tested against that provider's response shape. See [`RESPONSE_ADAPTER_NAMES`].
+    fn unwrap_response(&self, _response: &Value) -> Result<Vec<ResponsePart>, RefusalEnvelope> {
+        Err(RefusalEnvelope::bad_input(
+            "this adapter has no response unwrapper",
+            json!({ "adapter": self.name(), "supported": RESPONSE_ADAPTER_NAMES }),
+        ))
+    }
 
     /// The model identifier carried by a request, or `None` when the request has none.
     fn model_id(&self, request_payload: &Value) -> Option<String> {

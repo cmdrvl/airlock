@@ -35,6 +35,9 @@ pub enum TransformationKind {
 pub enum BoundaryClass {
     Telemetry,
     DerivedText,
+    /// Text a model wrote in an earlier turn, admitted through `assemble --response` after the
+    /// response's hash was checked against a gate receipt. Never assigned by a policy rule.
+    ModelOutput,
     Forbidden,
 }
 
@@ -166,6 +169,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&BoundaryClass::DerivedText).unwrap(),
             "\"DERIVED_TEXT\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BoundaryClass::ModelOutput).unwrap(),
+            "\"MODEL_OUTPUT\""
+        );
+        assert_eq!(
+            serde_json::from_str::<BoundaryClass>("\"MODEL_OUTPUT\"").unwrap(),
+            BoundaryClass::ModelOutput
         );
         assert_eq!(
             serde_json::to_string(&BoundaryClass::Forbidden).unwrap(),

@@ -199,6 +199,27 @@ pub struct AssembleArgs {
     )]
     pub not_crossed_out: Option<PathBuf>,
 
+    #[arg(
+        long = "prior-receipt",
+        requires_all = ["response", "response_adapter"],
+        help = "Gate receipt (airlock.gate.v1) that recorded the earlier response. Its response_hash must equal the hash of --response, it must be an admitted 2xx exchange, and it must name a matched manifest. A receipt is unsigned JSON, so this link is only as strong as the file's custody"
+    )]
+    pub prior_receipt: Option<PathBuf>,
+
+    #[arg(
+        long,
+        requires_all = ["prior_receipt", "response_adapter"],
+        help = "Provider response body from the earlier turn, exactly as received (JSON, not a stream). Its text and tool calls enter the prompt as MODEL_OUTPUT under prior_turn"
+    )]
+    pub response: Option<PathBuf>,
+
+    #[arg(
+        long = "response-adapter",
+        requires_all = ["prior_receipt", "response"],
+        help = "Provider that produced --response: openai_responses or anthropic_messages"
+    )]
+    pub response_adapter: Option<String>,
+
     #[arg(long = "no-witness", help = "Skip ambient witness ledger recording")]
     pub no_witness: bool,
 }

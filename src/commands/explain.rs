@@ -209,7 +209,7 @@ mod tests {
     use super::*;
     use crate::manifest::{AIRLOCK_MANIFEST_VERSION, ProvenanceSummary};
     use crate::refusal::REFUSAL_OUTCOME;
-    use crate::types::{BoundaryMode, UpstreamArtifact};
+    use crate::types::{BindingStatus, BoundaryMode, UpstreamArtifact};
 
     fn sample_manifest(
         achieved_claim: ClaimLevel,
@@ -224,6 +224,7 @@ mod tests {
 
         AirlockManifest {
             manifest_version: AIRLOCK_MANIFEST_VERSION.to_string(),
+            binding_status: BindingStatus::Bound,
             boundary_mode: BoundaryMode::Annotated,
             policy_id: "tournament_baseline".to_string(),
             policy_hash: "blake3:1111111111111111111111111111111111111111111111111111111111111111"

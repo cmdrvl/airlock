@@ -277,6 +277,16 @@ airlock verify \
   --no-witness              # Skip witness ledger recording
 ```
 
+Before deriving a claim, `verify` unwraps the transport request through its
+adapter and compares every message, in order, with the assembled prompt. This
+includes the system prompt. It also flags top-level request fields outside
+the adapter's declared transport schema. The manifest records
+`binding_status: BOUND` for an exact match. Any missing, appended, reordered,
+or altered message, or undeclared transport field, produces a
+`REQUEST_UNBOUND` finding, records `binding_status: UNBOUND`, and sets the
+achieved claim to `BOUNDARY_FAILED`. The finding does not echo the altered
+message content.
+
 ### `airlock explain`
 
 Manifest rendering as human-readable text or deterministic explanation JSON.

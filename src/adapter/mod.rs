@@ -6,6 +6,49 @@ use crate::refusal::RefusalEnvelope;
 
 pub const OPENAI_CHAT_COMPLETIONS_ADAPTER_NAME: &str = "openai_chat_completions";
 
+// `schemas/openai_chat_completions_request.schema.json` is generated from the
+// OpenAI OpenAPI schema and identifies its source commit in `x-airlock-source`.
+// Keep this allowlist aligned with CreateChatCompletionRequest's properties.
+const OPENAI_CHAT_COMPLETIONS_TRANSPORT_KEYS: &[&str] = &[
+    "audio",
+    "frequency_penalty",
+    "function_call",
+    "functions",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "messages",
+    "metadata",
+    "modalities",
+    "model",
+    "moderation",
+    "n",
+    "parallel_tool_calls",
+    "prediction",
+    "presence_penalty",
+    "prompt_cache_key",
+    "prompt_cache_options",
+    "prompt_cache_retention",
+    "reasoning_effort",
+    "response_format",
+    "safety_identifier",
+    "seed",
+    "service_tier",
+    "stop",
+    "store",
+    "stream",
+    "stream_options",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p",
+    "user",
+    "verbosity",
+    "web_search_options",
+];
+
 const RESERVED_REQUEST_KEYS: [&str; 5] = [
     "messages",
     "model",
@@ -38,6 +81,9 @@ impl TransportConfig {
 pub trait Adapter {
     fn name(&self) -> &str;
 
+    /// Top-level request keys declared by the vendor transport schema.
+    fn transport_keys(&self) -> &'static [&'static str];
+
     fn wrap(
         &self,
         prompt_payload: &Value,
@@ -54,6 +100,10 @@ pub struct OpenAiChatCompletionsAdapter;
 impl Adapter for OpenAiChatCompletionsAdapter {
     fn name(&self) -> &str {
         OPENAI_CHAT_COMPLETIONS_ADAPTER_NAME
+    }
+
+    fn transport_keys(&self) -> &'static [&'static str] {
+        OPENAI_CHAT_COMPLETIONS_TRANSPORT_KEYS
     }
 
     fn wrap(

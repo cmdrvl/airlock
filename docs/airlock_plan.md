@@ -1404,16 +1404,18 @@ zero `airlock` entries, no manifest exists on disk, and the only wired caller
 "boundary-recorder" request built from metadata while the actual document goes
 to Textract / Document AI.
 
-Two defects block the core promise:
+One defect still blocks the full core promise:
 
-1. **Verify does not bind the request to the prompt.** The scanner pattern-
-   scans `request.json` against the filing denylist only. A request with a full
-   PII record appended to the assembled messages still earns
-   `STRICT_TELEMETRY_ONLY` (reproduced 2026-09-02). Injected HTML / sec.gov
-   URLs are caught; anything else passes.
-2. **Nothing ties `request.json` to the bytes that leave the machine.** The
+1. **Nothing ties `request.json` to the bytes that leave the machine.** The
    manifest hashes a file the caller chose. There is no proxy, shim, or send
    path, so "the model never saw X" is a self-attestation.
+
+The Phase A request-binding gap is closed by `al-1ay`: `verify` unwraps the
+request through its adapter, compares the ordered messages (including the
+system prompt) with the assembled prompt, and checks top-level keys against
+the adapter's declared transport schema. A mismatch earns `REQUEST_UNBOUND`,
+sets `binding_status` to `UNBOUND`, and caps the achieved claim at
+`BOUNDARY_FAILED`. A match records `binding_status: BOUND` in manifest v0.2.
 
 Collateral (cmdrvl-gtm `TSG_SKU_AI_AUDIT_READINESS.md`) also promises a
 "signed declaration", "bytes crossed", and a "what did NOT cross" list; the
@@ -1468,8 +1470,11 @@ A manifest is a **commitment** to one boundary crossing:
 
 ### Phase A — make the manifest true (0.4)
 
-1. Binding invariant in `verify` (P0). New fixture reproducing the PII-append
-   case. Adapter trait gains `unwrap` and `transport_keys`.
+1. Binding invariant in `verify` (P0, landed as `al-1ay`). The adapter
+   `unwrap` compares ordered messages, while `transport_keys` rejects
+   undeclared top-level fields. The PII-append fixture and altered, reordered,
+   removed-message, and extra-key tests produce `REQUEST_UNBOUND` and
+   `BOUNDARY_FAILED`; clean requests remain `BOUND`.
 2. **Detector packs** in policy (`detectors:`), implemented in a shared
    `boundary-detectors` crate so veil's broker can scan spine-tool output with
    the same packs: secrets (key shapes, PEM headers, JWT, Shannon entropy ≥ 3.5
@@ -1478,10 +1483,10 @@ A manifest is a **commitment** to one boundary crossing:
    filesystem paths. Literal packs via Aho-Corasick, shapes via regex,
    deterministic, values never echoed (matched spans are hashed). Findings
    class `DETECTED_SENSITIVE`.
-3. Manifest v0.2: `bytes_crossed`, `not_crossed[]` (every input field dropped,
+3. Remaining manifest v0.2 work: `bytes_crossed`, `not_crossed[]` (every input field dropped,
    forbidden key stripped, or derived-text path excluded during assemble, with
-   hash and reason), `fragment_merkle_root`, `binding_status`, `signature`,
-   `signer`. `explain --auditor` prints the customs declaration: what crossed,
+   hash and reason), `fragment_merkle_root`, `signature`, and `signer`.
+   `explain --auditor` prints the customs declaration: what crossed,
    what did not, claim, signer, ledger inclusion.
 4. RFC 8785 canonicalization replaces the in-house canonical JSON, with a
    cross-check test against a second implementation.

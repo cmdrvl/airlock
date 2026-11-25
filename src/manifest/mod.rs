@@ -12,9 +12,11 @@ use serde_json::Value;
 use crate::assembler::{BoundaryClass, PromptProvenance};
 use crate::hash::blake3_hash;
 use crate::output::{canonical_json, canonical_json_bytes};
-use crate::types::{BlockedReason, BoundaryMode, ClaimLevel, Finding, UpstreamArtifact};
+use crate::types::{
+    BindingStatus, BlockedReason, BoundaryMode, ClaimLevel, Finding, UpstreamArtifact,
+};
 
-pub const AIRLOCK_MANIFEST_VERSION: &str = "airlock.v0";
+pub const AIRLOCK_MANIFEST_VERSION: &str = "airlock.v0.2";
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Aggregate provenance counts used by explain output.
@@ -44,6 +46,7 @@ impl ProvenanceSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AirlockManifest {
     pub manifest_version: String,
+    pub binding_status: BindingStatus,
     pub boundary_mode: BoundaryMode,
     pub policy_id: String,
     pub policy_hash: String,
@@ -117,6 +120,7 @@ impl AirlockManifest {
 
 #[derive(Debug, Default)]
 pub struct ManifestBuilder {
+    binding_status: Option<BindingStatus>,
     boundary_mode: Option<BoundaryMode>,
     policy_id: Option<String>,
     policy_hash: Option<String>,
@@ -140,6 +144,11 @@ pub struct ManifestBuilder {
 impl ManifestBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn binding_status(mut self, binding_status: BindingStatus) -> Self {
+        self.binding_status = Some(binding_status);
+        self
     }
 
     pub fn boundary_mode(mut self, boundary_mode: BoundaryMode) -> Self {
@@ -248,6 +257,7 @@ impl ManifestBuilder {
     }
 
     pub fn build(self) -> Result<AirlockManifest, ManifestBuildError> {
+        let binding_status = require(self.binding_status, "binding_status")?;
         let boundary_mode = require(self.boundary_mode, "boundary_mode")?;
         let policy_id = require_non_empty(self.policy_id, "policy_id")?;
         let policy_hash = require_non_empty(self.policy_hash, "policy_hash")?;
@@ -327,6 +337,7 @@ impl ManifestBuilder {
 
         Ok(AirlockManifest {
             manifest_version: AIRLOCK_MANIFEST_VERSION.to_string(),
+            binding_status,
             boundary_mode,
             policy_id,
             policy_hash,
@@ -517,6 +528,7 @@ mod tests {
             sample_provenance(&policy_hash, &prompt_payload_hash, BoundaryMode::Annotated);
 
         ManifestBuilder::new()
+            .binding_status(BindingStatus::Bound)
             .boundary_mode(BoundaryMode::Annotated)
             .policy_id("tournament_baseline")
             .policy_hash(policy_hash)
@@ -596,8 +608,9 @@ mod tests {
         assert!(
             manifest
                 .to_canonical_json()
-                .contains("\"manifest_version\":\"airlock.v0\"")
+                .contains("\"manifest_version\":\"airlock.v0.2\"")
         );
+        assert_eq!(manifest.binding_status, BindingStatus::Bound);
     }
 
     #[test]
@@ -665,6 +678,7 @@ mod tests {
         );
 
         let err = ManifestBuilder::new()
+            .binding_status(BindingStatus::Bound)
             .boundary_mode(BoundaryMode::Annotated)
             .policy_id("tournament_baseline")
             .policy_hash(policy_hash)

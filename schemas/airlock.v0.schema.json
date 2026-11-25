@@ -8,7 +8,14 @@
   "properties": {
     "manifest_version": {
       "type": "string",
-      "const": "airlock.v0"
+      "const": "airlock.v0.2"
+    },
+    "binding_status": {
+      "type": "string",
+      "enum": [
+        "BOUND",
+        "UNBOUND"
+      ]
     },
     "boundary_mode": {
       "$ref": "#/$defs/boundaryMode"
@@ -91,6 +98,7 @@
   },
   "required": [
     "manifest_version",
+    "binding_status",
     "boundary_mode",
     "policy_id",
     "policy_hash",

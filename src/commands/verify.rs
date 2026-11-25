@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::adapter::OPENAI_CHAT_COMPLETIONS_ADAPTER_NAME;
+use crate::adapter::{OPENAI_CHAT_COMPLETIONS_ADAPTER_NAME, OpenAiChatCompletionsAdapter};
 use crate::assembler::PromptProvenance;
 use crate::cli::{VERIFY_PARTIAL, VERIFY_PASS, VerifyArgs};
 use crate::hash::blake3_hash;
@@ -120,15 +120,21 @@ fn run_with_writers(
         Err(refusal) => return refusal.write_to(stdout),
     };
 
-    let verify_result = scanner::verify(
+    let adapter = OpenAiChatCompletionsAdapter;
+    let verify_result = match scanner::verify(
         &policy,
         &prompt_value,
         &prompt_provenance,
         &request_value,
         boundary_mode,
-    );
+        &adapter,
+    ) {
+        Ok(result) => result,
+        Err(refusal) => return refusal.write_to(stdout),
+    };
 
     let manifest = match ManifestBuilder::new()
+        .binding_status(verify_result.binding_status)
         .boundary_mode(boundary_mode)
         .policy_id(policy.policy_id.clone())
         .policy_hash(policy_hash.clone())
@@ -493,6 +499,7 @@ mod tests {
         assert_eq!(exit_code, VERIFY_PASS);
         let manifest: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(manifest["achieved_claim"], "STRICT_TELEMETRY_ONLY");
+        assert_eq!(manifest["binding_status"], "BOUND");
         assert!(args.out.exists());
         assert!(ledger_path.exists());
         assert!(stderr.is_empty());
@@ -532,6 +539,7 @@ mod tests {
         assert_eq!(exit_code, VERIFY_PASS);
         let manifest: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(manifest["achieved_claim"], "BOUNDARY_FAILED");
+        assert_eq!(manifest["binding_status"], "UNBOUND");
         assert!(args.out.exists());
         assert!(stderr.is_empty());
     }

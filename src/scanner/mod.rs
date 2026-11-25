@@ -3,14 +3,18 @@ use std::collections::HashSet;
 use regex::Regex;
 use serde_json::Value;
 
+use crate::adapter::Adapter;
 use crate::assembler::PromptProvenance;
+use crate::output::canonical_json;
 use crate::policy::AirlockPolicy;
-use crate::types::{BlockedReason, BoundaryMode, ClaimLevel, Finding};
+use crate::refusal::RefusalEnvelope;
+use crate::types::{BindingStatus, BlockedReason, BoundaryMode, ClaimLevel, Finding};
 
 /// Verification result for one prompt/request boundary check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyResult {
     pub achieved_claim: ClaimLevel,
+    pub binding_status: BindingStatus,
     pub raw_document_present: bool,
     pub filing_derived_text_present: bool,
     pub findings: Vec<Finding>,
@@ -24,10 +28,33 @@ pub fn verify(
     prompt_provenance: &PromptProvenance,
     request_payload: &Value,
     boundary_mode: BoundaryMode,
-) -> VerifyResult {
+    adapter: &dyn Adapter,
+) -> Result<VerifyResult, RefusalEnvelope> {
+    verify_with_adapter(
+        policy,
+        prompt_payload,
+        prompt_provenance,
+        request_payload,
+        boundary_mode,
+        Some(adapter),
+    )
+}
+
+/// Verify policy constraints and bind the request to the assembled prompt using
+/// the selected vendor adapter. A `None` adapter is reserved for scanner unit
+/// tests that exercise policy scanning independently of transport binding.
+fn verify_with_adapter(
+    policy: &AirlockPolicy,
+    prompt_payload: &Value,
+    prompt_provenance: &PromptProvenance,
+    request_payload: &Value,
+    boundary_mode: BoundaryMode,
+    adapter: Option<&dyn Adapter>,
+) -> Result<VerifyResult, RefusalEnvelope> {
     let mut findings = Vec::new();
     let mut forbidden_paths = Vec::new();
     let mut derived_text_paths = Vec::new();
+    let mut binding_paths = Vec::new();
 
     scan_forbidden_keys(
         prompt_payload,
@@ -65,11 +92,27 @@ pub fn verify(
 
     scan_provenance_gaps(prompt_payload, prompt_provenance, &mut findings);
 
+    if let Some(adapter) = adapter {
+        scan_request_binding(
+            prompt_payload,
+            request_payload,
+            adapter,
+            &mut findings,
+            &mut binding_paths,
+        )?;
+    }
+
     let raw_document_present = !forbidden_paths.is_empty();
     let filing_derived_text_present = !derived_text_paths.is_empty();
+    let binding_status = if binding_paths.is_empty() {
+        BindingStatus::Bound
+    } else {
+        BindingStatus::Unbound
+    };
     let achieved_claim = derive_claim(
         raw_document_present,
         filing_derived_text_present,
+        binding_status,
         boundary_mode,
     );
     let blocked_reasons = derive_blocked_reasons(
@@ -77,15 +120,119 @@ pub fn verify(
         boundary_mode,
         &forbidden_paths,
         &derived_text_paths,
+        &binding_paths,
     );
 
-    VerifyResult {
+    Ok(VerifyResult {
         achieved_claim,
+        binding_status,
         raw_document_present,
         filing_derived_text_present,
         findings,
         blocked_reasons,
+    })
+}
+
+#[cfg(test)]
+fn verify_policy_only(
+    policy: &AirlockPolicy,
+    prompt_payload: &Value,
+    prompt_provenance: &PromptProvenance,
+    request_payload: &Value,
+    boundary_mode: BoundaryMode,
+) -> VerifyResult {
+    verify_with_adapter(
+        policy,
+        prompt_payload,
+        prompt_provenance,
+        request_payload,
+        boundary_mode,
+        None,
+    )
+    .expect("policy-only scanning does not inspect adapter messages")
+}
+
+fn scan_request_binding(
+    prompt_payload: &Value,
+    request_payload: &Value,
+    adapter: &dyn Adapter,
+    findings: &mut Vec<Finding>,
+    binding_paths: &mut Vec<String>,
+) -> Result<(), RefusalEnvelope> {
+    if let Some(request) = request_payload.as_object() {
+        for key in request.keys() {
+            if !adapter.transport_keys().contains(&key.as_str()) {
+                let path = key.clone();
+                binding_paths.push(path.clone());
+                findings.push(Finding {
+                    key_path: path,
+                    sample_value: None,
+                    artifact_class: "REQUEST_UNBOUND".to_string(),
+                    matched_rule: "adapter.transport_keys".to_string(),
+                });
+            }
+        }
     }
+
+    let expected_messages = prompt_payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            RefusalEnvelope::bad_prompt(
+                "prompt payload must contain a messages array",
+                serde_json::json!({ "field": "messages" }),
+            )
+        })?;
+    let unwrapped = adapter.unwrap(request_payload)?;
+    let actual_messages = unwrapped
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            RefusalEnvelope::bad_request(
+                "adapter did not expose a messages array",
+                serde_json::json!({ "field": "messages" }),
+            )
+        })?;
+
+    for index in 0..expected_messages.len().max(actual_messages.len()) {
+        match (expected_messages.get(index), actual_messages.get(index)) {
+            (Some(expected), Some(actual)) => {
+                if canonical_json(expected) != canonical_json(actual) {
+                    let path = format!("messages[{index}]");
+                    binding_paths.push(path.clone());
+                    findings.push(Finding {
+                        key_path: path,
+                        sample_value: None,
+                        artifact_class: "REQUEST_UNBOUND".to_string(),
+                        matched_rule: "prompt.messages_match_unwrapped_request".to_string(),
+                    });
+                }
+            }
+            (Some(_), None) => {
+                let path = format!("messages[{index}]");
+                binding_paths.push(path.clone());
+                findings.push(Finding {
+                    key_path: path,
+                    sample_value: None,
+                    artifact_class: "REQUEST_UNBOUND".to_string(),
+                    matched_rule: "prompt.message_missing_from_request".to_string(),
+                });
+            }
+            (None, Some(_)) => {
+                let path = format!("messages[{index}]");
+                binding_paths.push(path.clone());
+                findings.push(Finding {
+                    key_path: path,
+                    sample_value: None,
+                    artifact_class: "REQUEST_UNBOUND".to_string(),
+                    matched_rule: "request.message_not_in_prompt".to_string(),
+                });
+            }
+            (None, None) => continue,
+        }
+    }
+
+    Ok(())
 }
 
 fn scan_forbidden_keys(
@@ -181,9 +328,10 @@ fn scan_provenance_gaps(
 fn derive_claim(
     raw_document_present: bool,
     filing_derived_text_present: bool,
+    binding_status: BindingStatus,
     boundary_mode: BoundaryMode,
 ) -> ClaimLevel {
-    if raw_document_present {
+    if raw_document_present || binding_status == BindingStatus::Unbound {
         return ClaimLevel::BoundaryFailed;
     }
 
@@ -202,20 +350,33 @@ fn derive_blocked_reasons(
     boundary_mode: BoundaryMode,
     forbidden_paths: &[String],
     derived_text_paths: &[String],
+    binding_paths: &[String],
 ) -> Vec<BlockedReason> {
     let mut blocked_reasons = Vec::new();
+    let boundary_paths = unique_paths(forbidden_paths, binding_paths);
+    let boundary_reason = match (forbidden_paths.is_empty(), binding_paths.is_empty()) {
+        (false, false) => {
+            "forbidden material was detected and the request does not match the assembled prompt"
+        }
+        (false, true) => "forbidden material detected in the request boundary",
+        (true, false) => "request does not match the assembled prompt or adapter transport keys",
+        (true, true) => "no boundary failure detected",
+    };
 
     if achieved_claim < ClaimLevel::RawDocumentAbsent {
         blocked_reasons.push(BlockedReason {
             claim_attempted: ClaimLevel::RawDocumentAbsent,
-            reason: "forbidden material detected in the request boundary".to_string(),
-            offending_paths: forbidden_paths.to_vec(),
+            reason: boundary_reason.to_string(),
+            offending_paths: boundary_paths.clone(),
         });
     }
 
     if achieved_claim < ClaimLevel::StrictTelemetryOnly {
-        let (reason, offending_paths) =
-            strict_telemetry_block(boundary_mode, forbidden_paths, derived_text_paths);
+        let (reason, offending_paths) = if !boundary_paths.is_empty() {
+            (boundary_reason.to_string(), boundary_paths)
+        } else {
+            strict_telemetry_block(boundary_mode, forbidden_paths, derived_text_paths)
+        };
         blocked_reasons.push(BlockedReason {
             claim_attempted: ClaimLevel::StrictTelemetryOnly,
             reason,
@@ -224,6 +385,16 @@ fn derive_blocked_reasons(
     }
 
     blocked_reasons
+}
+
+fn unique_paths(first: &[String], second: &[String]) -> Vec<String> {
+    let mut paths = Vec::with_capacity(first.len() + second.len());
+    for path in first.iter().chain(second) {
+        if !paths.contains(path) {
+            paths.push(path.clone());
+        }
+    }
+    paths
 }
 
 fn strict_telemetry_block(
@@ -519,7 +690,7 @@ mod tests {
     #[test]
     fn clean_payload_in_telemetry_only_earns_strict_telemetry_only() {
         let prompt_payload = clean_prompt_payload();
-        let result = verify(
+        let result = verify_policy_only(
             &sample_policy(),
             &prompt_payload,
             &build_provenance(&prompt_payload, BoundaryMode::TelemetryOnly, &[]),
@@ -536,7 +707,7 @@ mod tests {
     #[test]
     fn clean_payload_in_annotated_mode_is_capped_at_raw_document_absent() {
         let prompt_payload = clean_prompt_payload();
-        let result = verify(
+        let result = verify_policy_only(
             &sample_policy(),
             &prompt_payload,
             &build_provenance(&prompt_payload, BoundaryMode::Annotated, &[]),
@@ -569,7 +740,7 @@ mod tests {
             }
         });
 
-        let result = verify(
+        let result = verify_policy_only(
             &sample_policy(),
             &prompt_payload,
             &build_provenance(&prompt_payload, BoundaryMode::Annotated, &[]),
@@ -601,7 +772,7 @@ mod tests {
             "html_path": "/tmp/filing.html"
         });
 
-        let result = verify(
+        let result = verify_policy_only(
             &sample_policy(),
             &prompt_payload,
             &build_provenance(&prompt_payload, BoundaryMode::TelemetryOnly, &[]),
@@ -633,7 +804,7 @@ mod tests {
             ]
         });
 
-        let result = verify(
+        let result = verify_policy_only(
             &sample_policy(),
             &prompt_payload,
             &build_provenance(&prompt_payload, BoundaryMode::TelemetryOnly, &[]),
@@ -654,7 +825,7 @@ mod tests {
     #[test]
     fn provenance_gap_is_recorded_without_degrading_claim() {
         let prompt_payload = clean_prompt_payload();
-        let result = verify(
+        let result = verify_policy_only(
             &sample_policy(),
             &prompt_payload,
             &build_provenance(

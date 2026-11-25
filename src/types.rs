@@ -29,6 +29,18 @@ impl fmt::Display for BoundaryMode {
 }
 
 // ---------------------------------------------------------------------------
+// Request binding status
+// ---------------------------------------------------------------------------
+
+/// Whether the transport request carries exactly the messages assembled by Airlock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BindingStatus {
+    Bound,
+    Unbound,
+}
+
+// ---------------------------------------------------------------------------
 // ClaimLevel
 // ---------------------------------------------------------------------------
 

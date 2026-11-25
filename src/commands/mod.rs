@@ -1,4 +1,5 @@
 pub mod assemble;
+pub mod chain_verify;
 pub mod doctor;
 pub mod explain;
 pub mod gate;

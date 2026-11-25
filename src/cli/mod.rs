@@ -56,6 +56,11 @@ pub enum Commands {
         about = "Check the Ed25519 signature on an airlock manifest"
     )]
     VerifyManifest(VerifyManifestArgs),
+    #[command(
+        subcommand,
+        about = "Check the chain of turns an airlock manifest belongs to"
+    )]
+    Chain(ChainCommands),
     #[command(about = "Render an airlock manifest as text or machine-readable explanation JSON")]
     Explain(ExplainArgs),
     #[command(about = "Read-only health, capabilities, robot docs, and triage for agents")]
@@ -371,6 +376,39 @@ pub struct VerifyManifestArgs {
     #[arg(
         long,
         help = "Public key file (hex, as written by airlock keygen). Defaults to ~/.cmdrvl/secrets/airlock/ed25519.pub"
+    )]
+    pub pubkey: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+pub enum ChainCommands {
+    #[command(about = "Walk a manifest's chain back to turn 0 and check every link")]
+    Verify(ChainVerifyArgs),
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+#[command(
+    after_help = "Examples:\n  airlock chain verify turn3.manifest.json --manifest-dir manifests\n  airlock chain verify turn3.manifest.json --manifest-dir manifests --receipt-dir receipts --pubkey ed25519.pub\n\nThis checks that the hashes of a conversation's manifests, provenance files and gate receipts agree with each other. The gate receipt is unsigned: it does not prove who produced a receipt or a manifest."
+)]
+pub struct ChainVerifyArgs {
+    #[arg(help = "airlock_manifest.json of the newest turn to check")]
+    pub manifest: PathBuf,
+
+    #[arg(
+        long = "manifest-dir",
+        help = "Directory holding the earlier turns' manifests and their prompt provenance files"
+    )]
+    pub manifest_dir: PathBuf,
+
+    #[arg(
+        long = "receipt-dir",
+        help = "Directory of gate receipts. Without it the receipts are not checked, and the report says so"
+    )]
+    pub receipt_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Public key file (hex, as written by airlock keygen). Signed manifests in the chain are checked with it; without it signatures are not checked"
     )]
     pub pubkey: Option<PathBuf>,
 }

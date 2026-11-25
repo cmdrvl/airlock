@@ -521,7 +521,7 @@ fn render_v0_3_fields(output: &mut String, manifest: &AirlockManifest) {
     if let Some(chain) = &manifest.chain {
         writeln!(
             output,
-            "Chain: turn {} of a conversation; it follows the manifest with hash {} (explain reports the link and does not follow it)",
+            "Chain: turn {} of a conversation; it follows the manifest with hash {} (explain reports the link and does not follow it; run airlock chain verify)",
             chain.turn_index, chain.prior_manifest_hash
         )
         .unwrap();

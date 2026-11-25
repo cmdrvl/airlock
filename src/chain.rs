@@ -70,6 +70,41 @@ pub fn check_receipt(
     receipt: &Value,
     response_bytes: &[u8],
 ) -> Result<CheckedReceipt, RefusalEnvelope> {
+    let recorded = receipt_recorded_response_hash(receipt)?;
+
+    let actual = blake3_hash(response_bytes);
+    if recorded != actual {
+        return Err(RefusalEnvelope::bad_input(
+            "response does not match the response_hash in the prior receipt",
+            json!({
+                "field": "prior_receipt.response_hash",
+                "receipt_response_hash": recorded,
+                "response_hash": actual,
+            }),
+        ));
+    }
+
+    let matched_manifest_hash = receipt_matched_manifest_hash(receipt)?;
+
+    Ok(CheckedReceipt {
+        response_hash: actual,
+        matched_manifest_hash: matched_manifest_hash.to_string(),
+    })
+}
+
+/// `(response_hash, matched_manifest_hash)` of a receipt that meets every rule `check_receipt`
+/// applies except the comparison with response bytes, for a caller that has only the hash
+/// (`airlock chain verify` reads the hash from the turn's provenance). Refuses with the same
+/// refusals `check_receipt` gives for the same fault.
+pub fn receipt_hashes(receipt: &Value) -> Result<(String, String), RefusalEnvelope> {
+    let response_hash = receipt_recorded_response_hash(receipt)?;
+    let matched_manifest_hash = receipt_matched_manifest_hash(receipt)?;
+    Ok((response_hash.to_string(), matched_manifest_hash.to_string()))
+}
+
+/// The gate-side rules, in the order `check_receipt` has always applied them, up to and
+/// including the `response_hash` the receipt records.
+fn receipt_recorded_response_hash(receipt: &Value) -> Result<&str, RefusalEnvelope> {
     let object = receipt
         .as_object()
         .ok_or_else(|| bad_receipt("prior receipt must be a JSON object", ""))?;
@@ -93,24 +128,15 @@ pub fn check_receipt(
             "upstream_status",
         ));
     }
-    let recorded = object
+    object
         .get("response_hash")
         .and_then(Value::as_str)
-        .ok_or_else(|| bad_receipt("prior receipt records no response_hash", "response_hash"))?;
+        .ok_or_else(|| bad_receipt("prior receipt records no response_hash", "response_hash"))
+}
 
-    let actual = blake3_hash(response_bytes);
-    if recorded != actual {
-        return Err(RefusalEnvelope::bad_input(
-            "response does not match the response_hash in the prior receipt",
-            json!({
-                "field": "prior_receipt.response_hash",
-                "receipt_response_hash": recorded,
-                "response_hash": actual,
-            }),
-        ));
-    }
-
-    let matched_manifest_hash = object
+/// The manifest the gate matched the forwarded request to, as a canonical hash.
+fn receipt_matched_manifest_hash(receipt: &Value) -> Result<&str, RefusalEnvelope> {
+    receipt
         .get("matched_manifest_hash")
         .and_then(Value::as_str)
         .filter(|hash| is_canonical_blake3_hash(hash))
@@ -119,12 +145,7 @@ pub fn check_receipt(
                 "prior receipt names no matched manifest; only a strict-manifest receipt can anchor a chain",
                 "matched_manifest_hash",
             )
-        })?;
-
-    Ok(CheckedReceipt {
-        response_hash: actual,
-        matched_manifest_hash: matched_manifest_hash.to_string(),
-    })
+        })
 }
 
 fn bad_prior_manifest(message: &str, field: &str, extra: Value) -> RefusalEnvelope {

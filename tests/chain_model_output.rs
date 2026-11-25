@@ -2713,6 +2713,10 @@ fn explain_reports_the_chain_in_text_and_json_and_says_nothing_for_other_version
         text.contains("Chain: turn 1") && text.contains(&hash),
         "{text}"
     );
+    assert!(
+        text.contains("airlock chain verify"),
+        "explain points at the command that follows the link: {text}"
+    );
     let json: Value = serde_json::from_str(&explain(&manifest_path, true)).expect("explain json");
     assert_eq!(json["chain"], link);
 
@@ -2802,7 +2806,7 @@ fn a_three_turn_chain_runs_through_the_real_gate_with_v0_4_manifests() {
     let chain1 = Chain {
         adapter: ANTHROPIC.to_owned(),
         response: work.write("turn0.response.json", &relayed0),
-        receipt: receipt0_path,
+        receipt: receipt0_path.clone(),
         prior_manifest: manifests.join("turn0.json"),
         tool_results: Vec::new(),
     };
@@ -2839,7 +2843,7 @@ fn a_three_turn_chain_runs_through_the_real_gate_with_v0_4_manifests() {
     let chain2 = Chain {
         adapter: ANTHROPIC.to_owned(),
         response: work.write("turn1.response.json", &relayed1),
-        receipt: receipt1_path,
+        receipt: receipt1_path.clone(),
         prior_manifest: manifests.join("turn1.json"),
         tool_results: Vec::new(),
     };
@@ -2855,5 +2859,58 @@ fn a_three_turn_chain_runs_through_the_real_gate_with_v0_4_manifests() {
     assert_ne!(
         manifest2["chain"]["prior_manifest_hash"], manifest1["chain"]["prior_manifest_hash"],
         "each link names its own prior manifest"
+    );
+
+    // The whole conversation, checked against what the real gate wrote. The gate's own manifest
+    // directory may hold only manifests, so the verifier gets a library of its own.
+    let library = work.path("library");
+    fs::create_dir(&library).expect("library dir");
+    for stem in ["turn0", "turn1", "turn2"] {
+        fs::copy(
+            work.path(&format!("{stem}.manifest.json")),
+            library.join(format!("{stem}.manifest.json")),
+        )
+        .expect("copy manifest into the library");
+    }
+    for stem in ["turn1", "turn2"] {
+        fs::copy(
+            work.path(&format!("{stem}.provenance.json")),
+            library.join(format!("{stem}.provenance.json")),
+        )
+        .expect("copy provenance into the library");
+    }
+    let receipts = work.path("all-receipts");
+    fs::create_dir(&receipts).expect("receipts dir");
+    fs::copy(&receipt0_path, receipts.join("receipt0.json")).expect("copy receipt 0");
+    fs::copy(&receipt1_path, receipts.join("receipt1.json")).expect("copy receipt 1");
+    let output = Command::cargo_bin("airlock")
+        .expect("airlock binary")
+        .args(["chain", "verify"])
+        .arg(work.path("turn2.manifest.json"))
+        .arg("--manifest-dir")
+        .arg(&library)
+        .arg("--receipt-dir")
+        .arg(&receipts)
+        .output()
+        .expect("run chain verify");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("chain verify report");
+    assert_eq!(report["verified"], true);
+    assert_eq!(report["turn_index"], 2);
+    assert_eq!(report["receipts_checked"], true);
+    assert_eq!(report["links"][0]["receipt_file"], "receipt1.json");
+    assert_eq!(report["links"][1]["receipt_file"], "receipt0.json");
+    assert_eq!(
+        report["links"][0]["response_hash"],
+        receipt1["response_hash"]
+    );
+    assert_eq!(
+        report["links"][1]["response_hash"],
+        receipt0["response_hash"]
     );
 }

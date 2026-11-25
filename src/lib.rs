@@ -108,6 +108,7 @@ fn dispatch<W: Write, E: Write>(cli: Cli, stdout: &mut W, stderr: &mut E) -> u8 
         Some(Commands::Gate(args)) => commands::gate::run(args),
         Some(Commands::Keygen(args)) => commands::keygen::run(args),
         Some(Commands::VerifyManifest(args)) => commands::verify_manifest::run(args),
+        Some(Commands::Chain(cmd)) => commands::chain_verify::run(cmd),
         Some(Commands::Explain(args)) => commands::explain::run(args),
         Some(Commands::Doctor(args)) => commands::doctor::run(args),
         // `capabilities --json` is the operator.v1 contract, byte-identical to `--describe`.

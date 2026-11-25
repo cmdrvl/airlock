@@ -110,6 +110,10 @@ document references are denied unless the policy explicitly sets
 `protected_bloom_min_hits` policy field defaults to 8.
 Policy regexes also run against bounded base64 and hex decode candidates;
 detector packs recursively decode and rescan within their configured limits.
+Generic detector packs are opt-in through the policy's `detectors` list. A
+`detectors_warn_only` pack still records redacted findings with its JSON pointer
+and matched-span hash in the gate receipt, then permits the request to continue;
+other findings remain blocking.
 
 Strict-manifest mode only accepts manifests with `binding_status: BOUND` and a
 supported achieved claim. The gate parses each request as JSON and hashes its canonical representation.
@@ -499,13 +503,25 @@ claim_levels:
   - BOUNDARY_FAILED
   - RAW_DOCUMENT_ABSENT
   - STRICT_TELEMETRY_ONLY
+
+# Optional. Omitted or empty disables generic detector packs.
+# detectors: [secrets, pii, tabular, blobs, paths]
+# Optional subset of detectors; hits are reported without lowering the claim.
+# detectors_warn_only: [pii]
+# Optional repeated-row threshold for the tabular pack; defaults to 5.
+# tabular_min_rows: 5
 ```
 
 Policies can also compose partial files with `extends: [path-or-id, ...]`.
 References resolve relative to the declaring policy; scalar values come from
 the child, while lists merge in stable order. Forbidden keys and patterns are
-monotonic. The resolved policy hash is independent of include order, and verify
-records each source file hash in the manifest's upstream artifact inventory.
+monotonic. Detector packs are opt-in and inherited by stable union. Enforced
+detector hits lower the claim to `BOUNDARY_FAILED`; `detectors_warn_only` keeps
+the hit in findings while preserving the claim. Findings include the detector
+rule id, JSON path, and matched-span hash, never the sensitive value. The
+resolved policy hash is independent of include order, and verify records each
+source file hash in the manifest's upstream artifact inventory. `explain --json`
+includes detector findings from the manifest.
 
 ## What Airlock Proves vs. What It Does Not
 

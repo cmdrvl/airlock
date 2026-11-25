@@ -332,6 +332,7 @@ mod tests {
                 sample_value: Some("https://www.sec.gov/Archives/example".to_string()),
                 artifact_class: "forbidden_pattern".to_string(),
                 matched_rule: "deny_rules[0]".to_string(),
+                span_hash: None,
             }],
             vec![BlockedReason {
                 claim_attempted: ClaimLevel::StrictTelemetryOnly,

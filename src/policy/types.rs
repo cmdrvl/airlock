@@ -3,6 +3,28 @@ use serde::{Deserialize, Serialize};
 use crate::assembler::BoundaryClass;
 use crate::types::ClaimLevel;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectorPack {
+    Secrets,
+    Pii,
+    Tabular,
+    Blobs,
+    Paths,
+}
+
+impl DetectorPack {
+    pub(crate) fn boundary_pack(self) -> boundary_detectors::Pack {
+        match self {
+            Self::Secrets => boundary_detectors::Pack::Secrets,
+            Self::Pii => boundary_detectors::Pack::Pii,
+            Self::Tabular => boundary_detectors::Pack::Tabular,
+            Self::Blobs => boundary_detectors::Pack::Blobs,
+            Self::Paths => boundary_detectors::Pack::Paths,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AirlockPolicy {
     pub policy_id: String,
@@ -12,8 +34,14 @@ pub struct AirlockPolicy {
     pub forbidden_patterns: Vec<ForbiddenPattern>,
     pub derived_text_paths: Vec<String>,
     pub claim_levels: Vec<ClaimLevel>,
+    #[serde(default)]
+    pub detectors: Vec<DetectorPack>,
+    #[serde(default)]
+    pub detectors_warn_only: Vec<DetectorPack>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected_bloom_min_hits: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tabular_min_rows: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_multimodal: Option<bool>,
     #[serde(skip)]

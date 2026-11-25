@@ -1,3 +1,4 @@
+pub mod detectors;
 pub mod egress;
 
 use std::collections::HashSet;
@@ -55,6 +56,7 @@ fn verify_with_adapter(
 ) -> Result<VerifyResult, RefusalEnvelope> {
     let mut findings = Vec::new();
     let mut forbidden_paths = Vec::new();
+    let mut detector_blocking_paths = Vec::new();
     let mut derived_text_paths = Vec::new();
     let mut binding_paths = Vec::new();
 
@@ -84,6 +86,16 @@ fn verify_with_adapter(
         &mut findings,
         &mut forbidden_paths,
     );
+
+    for (payload, root_path) in [(prompt_payload, "prompt"), (request_payload, "request")] {
+        let detector_scan = detectors::scan_payload(policy, payload, root_path);
+        findings.extend(detector_scan.findings);
+        for path in detector_scan.blocking_paths {
+            if !detector_blocking_paths.contains(&path) {
+                detector_blocking_paths.push(path);
+            }
+        }
+    }
 
     scan_derived_text_fields(
         prompt_payload,
@@ -116,11 +128,13 @@ fn verify_with_adapter(
         filing_derived_text_present,
         binding_status,
         boundary_mode,
+        !detector_blocking_paths.is_empty(),
     );
     let blocked_reasons = derive_blocked_reasons(
         achieved_claim,
         boundary_mode,
         &forbidden_paths,
+        &detector_blocking_paths,
         &derived_text_paths,
         &binding_paths,
     );
@@ -171,6 +185,7 @@ fn scan_request_binding(
                     sample_value: None,
                     artifact_class: "REQUEST_UNBOUND".to_string(),
                     matched_rule: "adapter.transport_keys".to_string(),
+                    span_hash: None,
                 });
             }
         }
@@ -207,6 +222,7 @@ fn scan_request_binding(
                         sample_value: None,
                         artifact_class: "REQUEST_UNBOUND".to_string(),
                         matched_rule: "prompt.messages_match_unwrapped_request".to_string(),
+                        span_hash: None,
                     });
                 }
             }
@@ -218,6 +234,7 @@ fn scan_request_binding(
                     sample_value: None,
                     artifact_class: "REQUEST_UNBOUND".to_string(),
                     matched_rule: "prompt.message_missing_from_request".to_string(),
+                    span_hash: None,
                 });
             }
             (None, Some(_)) => {
@@ -228,6 +245,7 @@ fn scan_request_binding(
                     sample_value: None,
                     artifact_class: "REQUEST_UNBOUND".to_string(),
                     matched_rule: "request.message_not_in_prompt".to_string(),
+                    span_hash: None,
                 });
             }
             (None, None) => continue,
@@ -252,6 +270,7 @@ fn scan_forbidden_keys(
                     sample_value: None,
                     artifact_class: "forbidden_key".to_string(),
                     matched_rule: format!("forbidden_keys[{index}]"),
+                    span_hash: None,
                 });
             }
         }
@@ -277,6 +296,7 @@ fn scan_forbidden_patterns(
                     sample_value: Some(truncate_sample(text)),
                     artifact_class: artifact_class.clone(),
                     matched_rule: format!("forbidden_patterns[{index}]"),
+                    span_hash: None,
                 });
             }
         }
@@ -298,6 +318,7 @@ fn scan_derived_text_fields(
                     sample_value: Some(truncate_sample(&render_value(leaf))),
                     artifact_class: "derived_text_field_hit".to_string(),
                     matched_rule: format!("derived_text_paths[{index}]"),
+                    span_hash: None,
                 });
             }
         }
@@ -322,6 +343,7 @@ fn scan_provenance_gaps(
                 sample_value: None,
                 artifact_class: "provenance_gap".to_string(),
                 matched_rule: "prompt_provenance".to_string(),
+                span_hash: None,
             });
         }
     });
@@ -332,8 +354,9 @@ fn derive_claim(
     filing_derived_text_present: bool,
     binding_status: BindingStatus,
     boundary_mode: BoundaryMode,
+    detector_blocked: bool,
 ) -> ClaimLevel {
-    if raw_document_present || binding_status == BindingStatus::Unbound {
+    if raw_document_present || binding_status == BindingStatus::Unbound || detector_blocked {
         return ClaimLevel::BoundaryFailed;
     }
 
@@ -351,18 +374,31 @@ fn derive_blocked_reasons(
     achieved_claim: ClaimLevel,
     boundary_mode: BoundaryMode,
     forbidden_paths: &[String],
+    detector_paths: &[String],
     derived_text_paths: &[String],
     binding_paths: &[String],
 ) -> Vec<BlockedReason> {
     let mut blocked_reasons = Vec::new();
-    let boundary_paths = unique_paths(forbidden_paths, binding_paths);
-    let boundary_reason = match (forbidden_paths.is_empty(), binding_paths.is_empty()) {
-        (false, false) => {
-            "forbidden material was detected and the request does not match the assembled prompt"
+    let mut sensitive_paths = forbidden_paths.to_vec();
+    for path in detector_paths {
+        if !sensitive_paths.contains(path) {
+            sensitive_paths.push(path.clone());
         }
-        (false, true) => "forbidden material detected in the request boundary",
-        (true, false) => "request does not match the assembled prompt or adapter transport keys",
-        (true, true) => "no boundary failure detected",
+    }
+    let boundary_paths = unique_paths(&sensitive_paths, binding_paths);
+    let boundary_reason = if !detector_paths.is_empty() {
+        "an enabled sensitive-content detector matched a boundary value"
+    } else {
+        match (forbidden_paths.is_empty(), binding_paths.is_empty()) {
+            (false, false) => {
+                "forbidden material was detected and the request does not match the assembled prompt"
+            }
+            (false, true) => "forbidden material detected in the request boundary",
+            (true, false) => {
+                "request does not match the assembled prompt or adapter transport keys"
+            }
+            (true, true) => "no boundary failure detected",
+        }
     };
 
     if achieved_claim < ClaimLevel::RawDocumentAbsent {
@@ -607,7 +643,10 @@ mod tests {
                 ClaimLevel::RawDocumentAbsent,
                 ClaimLevel::StrictTelemetryOnly,
             ],
+            detectors: Vec::new(),
+            detectors_warn_only: Vec::new(),
             protected_bloom_min_hits: None,
+            tabular_min_rows: None,
             allow_multimodal: None,
             extends: Vec::new(),
             source_chain: Vec::new(),
@@ -708,6 +747,62 @@ mod tests {
         assert!(!result.raw_document_present);
         assert!(!result.filing_derived_text_present);
         assert!(result.blocked_reasons.is_empty());
+    }
+
+    #[test]
+    fn enabled_pii_detector_fails_the_claim_unless_marked_warn_only() {
+        let prompt_payload = clean_prompt_payload();
+        let provenance = build_provenance(&prompt_payload, BoundaryMode::TelemetryOnly, &[]);
+        let mut request = request_payload();
+        request["messages"][0]["content"] = serde_json::json!("SSN 123-45-6789");
+
+        let mut enforcing_policy = sample_policy();
+        enforcing_policy
+            .detectors
+            .push(crate::policy::DetectorPack::Pii);
+        let enforced = verify_policy_only(
+            &enforcing_policy,
+            &prompt_payload,
+            &provenance,
+            &request,
+            BoundaryMode::TelemetryOnly,
+        );
+        assert_eq!(enforced.achieved_claim, ClaimLevel::BoundaryFailed);
+        let detector_finding = enforced
+            .findings
+            .iter()
+            .find(|finding| finding.artifact_class == "DETECTED_SENSITIVE")
+            .expect("PII should create a detector finding");
+        assert_eq!(detector_finding.key_path, "request.messages[0].content");
+        assert_eq!(detector_finding.matched_rule, "PII_US_SSN");
+        assert!(detector_finding.sample_value.is_none());
+        assert!(
+            detector_finding
+                .span_hash
+                .as_deref()
+                .unwrap()
+                .starts_with("blake3:")
+        );
+
+        let mut warn_only_policy = enforcing_policy;
+        warn_only_policy
+            .detectors_warn_only
+            .push(crate::policy::DetectorPack::Pii);
+        let warn_only = verify_policy_only(
+            &warn_only_policy,
+            &prompt_payload,
+            &provenance,
+            &request,
+            BoundaryMode::TelemetryOnly,
+        );
+        assert_eq!(warn_only.achieved_claim, ClaimLevel::StrictTelemetryOnly);
+        assert!(warn_only.blocked_reasons.is_empty());
+        assert!(
+            warn_only
+                .findings
+                .iter()
+                .any(|finding| finding.artifact_class == "DETECTED_SENSITIVE")
+        );
     }
 
     #[test]

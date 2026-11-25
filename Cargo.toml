@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 blake3 = "=1.8.2"
-boundary-detectors = { git = "https://github.com/cmdrvl/boundary-detectors", rev = "0d4dd36fc07836dc67becf0647322c5ddd7dc6e8" }
+boundary-detectors = { git = "https://github.com/cmdrvl/boundary-detectors", rev = "679d490964a58f2b0f0c2fbc8a51d05503143e04" }
 chrono = "=0.4.41"
 clap = { version = "=4.5.60", features = ["derive"] }
 regex = "=1.11"

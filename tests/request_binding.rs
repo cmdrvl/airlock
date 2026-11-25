@@ -26,33 +26,58 @@ fn clean_request() -> Value {
 
 fn verify_request(request: &Value) -> Value {
     let dir = tempdir().expect("temporary directory should be created");
-    let request_path = dir.path().join("request.json");
-    let manifest_path = dir.path().join("manifest.json");
+    verify_request_with_policy(
+        request,
+        &repo_file("fixtures/clean_telemetry_only/policy.yaml"),
+        dir.path(),
+    )
+}
+
+fn verify_request_with_policy(request: &Value, policy_path: &Path, output_dir: &Path) -> Value {
+    let request_path = output_dir.join("request.json");
+    let prompt_path = output_dir.join("prompt.json");
+    let provenance_path = output_dir.join("provenance.json");
+    let manifest_path = output_dir.join("manifest.json");
     fs::write(
         &request_path,
         serde_json::to_vec(request).expect("request should serialize"),
     )
     .expect("request should be written");
 
+    Command::cargo_bin("airlock")
+        .expect("airlock binary should build")
+        .current_dir(repo_file("."))
+        .args(["assemble", "--policy"])
+        .arg(policy_path)
+        .arg("--input")
+        .arg(repo_file(
+            "fixtures/clean_telemetry_only/strategy_space.json",
+        ))
+        .arg("--system-prompt")
+        .arg(repo_file("fixtures/clean_telemetry_only/system_prompt.txt"))
+        .args(["--boundary-mode", "TELEMETRY_ONLY", "--out"])
+        .arg(&prompt_path)
+        .arg("--provenance-out")
+        .arg(&provenance_path)
+        .arg("--no-witness")
+        .assert()
+        .success();
+
     let output = Command::cargo_bin("airlock")
         .expect("airlock binary should build")
         .current_dir(repo_file("."))
-        .args([
-            "verify",
-            "--policy",
-            "fixtures/clean_telemetry_only/policy.yaml",
-            "--prompt",
-            "fixtures/clean_telemetry_only/expected_prompt_payload.json",
-            "--provenance",
-            "fixtures/clean_telemetry_only/expected_prompt_provenance.json",
-            "--request",
-            request_path.to_str().expect("request path should be UTF-8"),
-            "--out",
-            manifest_path
-                .to_str()
-                .expect("manifest path should be UTF-8"),
-            "--no-witness",
-        ])
+        .arg("verify")
+        .arg("--policy")
+        .arg(policy_path)
+        .arg("--prompt")
+        .arg(&prompt_path)
+        .arg("--provenance")
+        .arg(&provenance_path)
+        .arg("--request")
+        .arg(&request_path)
+        .arg("--out")
+        .arg(&manifest_path)
+        .arg("--no-witness")
         .assert()
         .success()
         .get_output()
@@ -133,7 +158,16 @@ fn unchanged_wrapped_request_is_bound_and_schema_valid() {
 #[test]
 fn appended_pii_fixture_is_unbound_without_echoing_the_pii() {
     let request = read_json("fixtures/request_unbound_pii/request.json");
-    let manifest = verify_request(&request);
+    let temp = tempdir().expect("temporary directory should be created");
+    let policy_path = temp.path().join("detector-policy.yaml");
+    let base_policy = fs::read_to_string(repo_file("fixtures/clean_telemetry_only/policy.yaml"))
+        .expect("baseline policy should be readable");
+    fs::write(
+        &policy_path,
+        format!("{base_policy}\ndetectors:\n  - pii\n"),
+    )
+    .expect("detector policy should be written");
+    let manifest = verify_request_with_policy(&request, &policy_path, temp.path());
     let rendered = serde_json::to_string(&manifest).unwrap();
 
     assert_eq!(manifest["binding_status"], "UNBOUND");
@@ -148,8 +182,61 @@ fn appended_pii_fixture_is_unbound_without_echoing_the_pii() {
                     && finding["key_path"] == "messages[2]"
             })
     );
+    let detector_finding = manifest["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["artifact_class"] == "DETECTED_SENSITIVE")
+        .expect("enabled PII detector should flag the appended value");
+    assert_eq!(detector_finding["matched_rule"], "PII_US_SSN");
+    assert!(
+        detector_finding["span_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("blake3:")
+    );
     assert!(!rendered.contains("123-45-6789"));
     assert!(!rendered.contains("alice"));
+
+    let explanation = Command::cargo_bin("airlock")
+        .unwrap()
+        .args(["explain", "--manifest"])
+        .arg(temp.path().join("manifest.json"))
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let explanation: Value = serde_json::from_slice(&explanation).unwrap();
+    assert!(
+        explanation["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["artifact_class"] == "DETECTED_SENSITIVE")
+    );
+    let rendered_explanation = serde_json::to_string(&explanation).unwrap();
+    assert!(!rendered_explanation.contains("123-45-6789"));
+    assert!(!rendered_explanation.contains("alice"));
+}
+
+#[test]
+fn clean_telemetry_fixture_has_no_hits_when_all_detector_packs_are_enabled() {
+    let temp = tempdir().expect("temporary directory should be created");
+    let policy_path = temp.path().join("detector-policy.yaml");
+    let base_policy = fs::read_to_string(repo_file("fixtures/clean_telemetry_only/policy.yaml"))
+        .expect("baseline policy should be readable");
+    fs::write(
+        &policy_path,
+        format!(
+            "{base_policy}\ndetectors:\n  - secrets\n  - pii\n  - tabular\n  - blobs\n  - paths\n"
+        ),
+    )
+    .expect("detector policy should be written");
+    let manifest = verify_request_with_policy(&clean_request(), &policy_path, temp.path());
+    assert_eq!(manifest["achieved_claim"], "STRICT_TELEMETRY_ONLY");
+    assert!(manifest["findings"].as_array().unwrap().is_empty());
 }
 
 #[test]

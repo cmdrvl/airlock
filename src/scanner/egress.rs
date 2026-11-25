@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::hash::blake3_hash;
-use crate::policy::AirlockPolicy;
+use crate::policy::{AirlockPolicy, DetectorPack};
 
 pub const MAX_GATE_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_PROTECTED_BLOOM_BYTES: usize = 67_108_904;
@@ -21,12 +21,17 @@ const MAX_DECODED_BYTES: usize = MAX_GATE_REQUEST_BYTES * 4;
 pub struct EgressFinding {
     pub artifact_class: String,
     pub rule_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressScan {
     pub request_hash: String,
     pub findings: Vec<EgressFinding>,
+    pub blocking: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,15 +113,28 @@ fn check_private_bloom_permissions(_path: &Path, _metadata: &fs::Metadata) -> Re
     Ok(())
 }
 
-pub fn egress_scanner(bloom: Option<ShingleBloom>, min_hits: usize) -> Scanner {
+pub fn egress_scanner(
+    policy: &AirlockPolicy,
+    bloom: Option<ShingleBloom>,
+    min_hits: usize,
+) -> Scanner {
+    let default_config = ScanConfig::default();
     let mut config = ScanConfig {
+        packs: policy
+            .detectors
+            .iter()
+            .map(|detector| detector.boundary_pack())
+            .collect(),
+        tabular_min_rows: policy
+            .tabular_min_rows
+            .unwrap_or(default_config.tabular_min_rows),
         max_input_bytes: MAX_GATE_REQUEST_BYTES,
         max_decoded_bytes: MAX_DECODED_BYTES,
         max_decode_depth: 2,
         shingle_min_hits: min_hits.max(1),
-        ..ScanConfig::default()
+        ..default_config
     };
-    if bloom.is_some() {
+    if bloom.is_some() && !config.packs.contains(&Pack::ProtectedCorpus) {
         config.packs.push(Pack::ProtectedCorpus);
     }
     match bloom {
@@ -149,22 +167,34 @@ pub fn scan_policy_proxy_request_with_media(
         .filter_map(|entry| Regex::new(&entry.pattern).ok())
         .collect();
     let mut findings = Vec::new();
+    let mut blocking = false;
     let context = ScanContext {
         policy,
         patterns: &patterns,
         scanner,
         base64_media_pointers,
     };
-    scan_value(&context, &request, "", false, &mut findings);
+    scan_value(
+        &context,
+        &request,
+        "",
+        false,
+        None,
+        &mut findings,
+        &mut blocking,
+    );
     findings.sort_by(|left, right| {
         left.artifact_class
             .cmp(&right.artifact_class)
             .then_with(|| left.rule_id.cmp(&right.rule_id))
+            .then_with(|| left.key_path.cmp(&right.key_path))
+            .then_with(|| left.span_hash.cmp(&right.span_hash))
     });
     findings.dedup();
     Ok(EgressScan {
         request_hash: blake3_hash(body),
         findings,
+        blocking,
     })
 }
 
@@ -182,7 +212,9 @@ fn scan_value(
     value: &Value,
     pointer: &str,
     in_multimodal: bool,
+    field_name: Option<&str>,
     findings: &mut Vec<EgressFinding>,
+    blocking: &mut bool,
 ) {
     let ScanContext {
         policy,
@@ -192,9 +224,12 @@ fn scan_value(
     } = *context;
     let multimodal = in_multimodal || is_multimodal_node(value);
     if multimodal && policy.allow_multimodal != Some(true) {
+        *blocking = true;
         findings.push(EgressFinding {
             artifact_class: "MULTIMODAL_ATTACHMENT".to_owned(),
             rule_id: "MULTIMODAL_ATTACHMENT_BLOCKED".to_owned(),
+            key_path: nonempty_pointer(pointer),
+            span_hash: None,
         });
         return;
     }
@@ -207,9 +242,12 @@ fn scan_value(
                     .iter()
                     .any(|forbidden| forbidden == key)
                 {
+                    *blocking = true;
                     findings.push(EgressFinding {
                         artifact_class: "POLICY_FORBIDDEN_KEY".to_owned(),
                         rule_id: "POLICY_FORBIDDEN_KEY".to_owned(),
+                        key_path: Some(pointer_child(pointer, key)),
+                        span_hash: None,
                     });
                 }
                 scan_value(
@@ -217,7 +255,9 @@ fn scan_value(
                     child,
                     &pointer_child(pointer, key),
                     multimodal,
+                    Some(key),
                     findings,
+                    blocking,
                 );
             }
         }
@@ -228,15 +268,33 @@ fn scan_value(
                     child,
                     &format!("{pointer}/{index}"),
                     multimodal,
+                    field_name,
                     findings,
+                    blocking,
                 );
             }
         }
         Value::String(text) => {
+            let contextual_text = field_name
+                .map(|name| format!("{name}={text}"))
+                .unwrap_or_else(|| text.clone());
+            if contextual_text.len() > scanner.config().max_input_bytes {
+                *blocking = true;
+                findings.push(EgressFinding {
+                    artifact_class: "DETECTOR_SCAN_REFUSED".to_owned(),
+                    rule_id: "DETECTOR_INPUT_LIMIT".to_owned(),
+                    key_path: nonempty_pointer(pointer),
+                    span_hash: Some(blake3_hash(contextual_text.as_bytes())),
+                });
+                return;
+            }
             if patterns.iter().any(|pattern| pattern.is_match(text)) {
+                *blocking = true;
                 findings.push(EgressFinding {
                     artifact_class: "POLICY_FORBIDDEN_PATTERN".to_owned(),
                     rule_id: "POLICY_FORBIDDEN_PATTERN".to_owned(),
+                    key_path: nonempty_pointer(pointer),
+                    span_hash: None,
                 });
             }
             let inspect_media =
@@ -252,9 +310,12 @@ fn scan_value(
                     .iter()
                     .any(|pattern| pattern.is_match(&decoded_text))
             }) {
+                *blocking = true;
                 findings.push(EgressFinding {
                     artifact_class: "POLICY_FORBIDDEN_PATTERN".to_owned(),
                     rule_id: "POLICY_FORBIDDEN_PATTERN".to_owned(),
+                    key_path: nonempty_pointer(pointer),
+                    span_hash: None,
                 });
             }
             let detector_findings = if inspect_media {
@@ -263,9 +324,22 @@ fn scan_value(
                     .flat_map(|candidate| scanner.scan_bytes(&candidate.decoded))
                     .collect::<Vec<_>>()
             } else {
-                scanner.scan_str(text)
+                scanner.scan_str(&contextual_text)
             };
             for finding in detector_findings {
+                let detector_pack = match finding.pack {
+                    Pack::Secrets => Some(DetectorPack::Secrets),
+                    Pack::Pii => Some(DetectorPack::Pii),
+                    Pack::Tabular => Some(DetectorPack::Tabular),
+                    Pack::Blobs => Some(DetectorPack::Blobs),
+                    Pack::Paths => Some(DetectorPack::Paths),
+                    Pack::ProtectedCorpus => None,
+                };
+                let warning_only =
+                    detector_pack.is_some_and(|pack| policy.detectors_warn_only.contains(&pack));
+                if !warning_only {
+                    *blocking = true;
+                }
                 findings.push(EgressFinding {
                     artifact_class: match finding.pack {
                         Pack::ProtectedCorpus => "PROTECTED_CORPUS_MATCH",
@@ -273,11 +347,17 @@ fn scan_value(
                     }
                     .to_owned(),
                     rule_id: finding.rule_id,
+                    key_path: nonempty_pointer(pointer),
+                    span_hash: Some(finding.match_hash),
                 });
             }
         }
         _ => {}
     }
+}
+
+fn nonempty_pointer(pointer: &str) -> Option<String> {
+    (!pointer.is_empty()).then(|| pointer.to_owned())
 }
 
 fn pointer_child(base: &str, segment: &str) -> String {
@@ -343,9 +423,11 @@ mod tests {
 
     #[test]
     fn blocks_policy_key_pattern_and_multimodal_content_without_echoing_values() {
-        let scanner = egress_scanner(None, DEFAULT_PROTECTED_BLOOM_MIN_HITS);
+        let policy = policy();
+        let scanner = egress_scanner(&policy, None, DEFAULT_PROTECTED_BLOOM_MIN_HITS);
         let body = br#"{"messages":[{"content":"client-123"},{"content":{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}}],"secret":"private"}"#;
-        let scan = scan_policy_proxy_request(&policy(), body, &scanner).unwrap();
+        let scan = scan_policy_proxy_request(&policy, body, &scanner).unwrap();
+        assert!(scan.blocking);
         assert!(
             scan.findings
                 .iter()
@@ -371,10 +453,11 @@ mod tests {
         let protected = "north-star confidential transaction thesis includes unique protected text from an acquisition memo with distinct deal terms";
         let mut bloom = ShingleBloom::new(BloomConfig::default());
         bloom.insert_text(protected);
-        let scanner = egress_scanner(Some(bloom), 3);
+        let policy = AirlockPolicy::default();
+        let scanner = egress_scanner(&policy, Some(bloom), 3);
         let body = serde_json::json!({"messages":[{"content":protected}]}).to_string();
-        let scan = scan_policy_proxy_request(&AirlockPolicy::default(), body.as_bytes(), &scanner)
-            .unwrap();
+        let scan = scan_policy_proxy_request(&policy, body.as_bytes(), &scanner).unwrap();
+        assert!(scan.blocking);
         assert!(
             scan.findings
                 .iter()
@@ -389,9 +472,10 @@ mod tests {
 
     #[test]
     fn forbidden_patterns_are_checked_after_base64_decoding() {
-        let scanner = egress_scanner(None, DEFAULT_PROTECTED_BLOOM_MIN_HITS);
+        let policy = policy();
+        let scanner = egress_scanner(&policy, None, DEFAULT_PROTECTED_BLOOM_MIN_HITS);
         let body = br#"{"messages":[{"content":"cHJlZml4IGNsaWVudC0xMjMgcHJpdmF0ZSBzdWZmaXg="}]}"#;
-        let scan = scan_policy_proxy_request(&policy(), body, &scanner).unwrap();
+        let scan = scan_policy_proxy_request(&policy, body, &scanner).unwrap();
         assert!(
             scan.findings
                 .iter()
@@ -407,7 +491,10 @@ mod tests {
         bloom.insert_text(
             "a nonempty protected corpus for this loader integration test with enough words and bytes",
         );
-        std::fs::write(&path, bloom.to_bytes()).unwrap();
+        let encoded = bloom.to_bytes();
+        assert_eq!(&encoded[..4], b"BDBL");
+        assert_eq!(encoded[4], 1, "veil handoff format is BDBL v1");
+        std::fs::write(&path, encoded).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -441,15 +528,52 @@ mod tests {
 
     #[test]
     fn refuses_oversize_and_malformed_requests_without_scanning_a_prefix() {
-        let scanner = egress_scanner(None, DEFAULT_PROTECTED_BLOOM_MIN_HITS);
+        let policy = policy();
+        let scanner = egress_scanner(&policy, None, DEFAULT_PROTECTED_BLOOM_MIN_HITS);
         let large = vec![b'a'; MAX_GATE_REQUEST_BYTES + 1];
         assert_eq!(
-            scan_policy_proxy_request(&policy(), &large, &scanner),
+            scan_policy_proxy_request(&policy, &large, &scanner),
             Err(EgressScanError::RequestTooLarge)
         );
         assert_eq!(
-            scan_policy_proxy_request(&policy(), b"{", &scanner),
+            scan_policy_proxy_request(&policy, b"{", &scanner),
             Err(EgressScanError::InvalidJson)
+        );
+    }
+
+    #[test]
+    fn detector_packs_are_opt_in_and_warn_only_findings_do_not_block() {
+        let request = br#"{"messages":[{"content":"AWS key AKIAIOSFODNN7EXAMPLE"}]}"#;
+        let baseline = AirlockPolicy::default();
+        let baseline_scanner = egress_scanner(&baseline, None, DEFAULT_PROTECTED_BLOOM_MIN_HITS);
+        let baseline_scan =
+            scan_policy_proxy_request(&baseline, request, &baseline_scanner).unwrap();
+        assert!(!baseline_scan.blocking);
+        assert!(baseline_scan.findings.is_empty());
+
+        let mut enabled = AirlockPolicy::default();
+        enabled.detectors.push(DetectorPack::Secrets);
+        let enabled_scanner = egress_scanner(&enabled, None, DEFAULT_PROTECTED_BLOOM_MIN_HITS);
+        let enabled_scan = scan_policy_proxy_request(&enabled, request, &enabled_scanner).unwrap();
+        assert!(enabled_scan.blocking);
+        let finding = enabled_scan
+            .findings
+            .iter()
+            .find(|finding| finding.rule_id == "SECRET_AWS_ACCESS_KEY")
+            .expect("enabled secrets pack should report the AWS key");
+        assert_eq!(finding.artifact_class, "DETECTED_SENSITIVE");
+        assert_eq!(finding.key_path.as_deref(), Some("/messages/0/content"));
+        assert!(finding.span_hash.as_deref().unwrap().starts_with("blake3:"));
+
+        enabled.detectors_warn_only.push(DetectorPack::Secrets);
+        let warn_only_scanner = egress_scanner(&enabled, None, DEFAULT_PROTECTED_BLOOM_MIN_HITS);
+        let warn_only_scan =
+            scan_policy_proxy_request(&enabled, request, &warn_only_scanner).unwrap();
+        assert!(!warn_only_scan.blocking);
+        assert_eq!(warn_only_scan.findings.len(), 1);
+        assert_eq!(
+            warn_only_scan.findings[0].artifact_class,
+            "DETECTED_SENSITIVE"
         );
     }
 }

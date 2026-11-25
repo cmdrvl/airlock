@@ -107,6 +107,10 @@ pub struct Finding {
 
     /// The policy rule that matched.
     pub matched_rule: String,
+
+    /// Hash of a sensitive span, when a deterministic detector matched it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_hash: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +212,7 @@ mod tests {
             sample_value: Some("/filings/abc.html".to_string()),
             artifact_class: "forbidden_key".to_string(),
             matched_rule: "forbidden_keys[0]".to_string(),
+            span_hash: None,
         };
         let json = serde_json::to_string(&finding).unwrap();
         let back: Finding = serde_json::from_str(&json).unwrap();
@@ -221,6 +226,7 @@ mod tests {
             sample_value: None,
             artifact_class: "forbidden_key".to_string(),
             matched_rule: "forbidden_keys[2]".to_string(),
+            span_hash: None,
         };
         let json = serde_json::to_string(&finding).unwrap();
         assert!(!json.contains("sample_value"));

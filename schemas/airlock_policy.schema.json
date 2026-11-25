@@ -95,10 +95,34 @@
         ]
       }
     },
+    "detectors": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["secrets", "pii", "tabular", "blobs", "paths"]
+      },
+      "description": "Opt-in deterministic detector packs. Omitted or empty means no generic detectors are enabled."
+    },
+    "detectors_warn_only": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["secrets", "pii", "tabular", "blobs", "paths"]
+      },
+      "description": "Enabled detector packs that record DETECTED_SENSITIVE findings without lowering the claim. Each entry must also appear in detectors."
+    },
     "protected_bloom_min_hits": {
       "type": "integer",
       "minimum": 1,
       "description": "Minimum matching rolling shingles required to block a protected-corpus match; defaults to 8 when --protected-bloom is enabled."
+    },
+    "tabular_min_rows": {
+      "type": "integer",
+      "minimum": 2,
+      "default": 5,
+      "description": "Minimum repeated delimited rows required by the tabular detector pack."
     },
     "allow_multimodal": {
       "type": "boolean",

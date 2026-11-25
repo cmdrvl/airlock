@@ -158,6 +158,11 @@
         "matched_rule": {
           "type": "string",
           "minLength": 1
+        },
+        "span_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$",
+          "description": "Hash of the matched detector span; sensitive content is never included."
         }
       },
       "required": [

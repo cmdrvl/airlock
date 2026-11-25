@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use boundary_detectors::shingle_bloom::{BloomConfig, ShingleBloom};
 use serde_json::{Value, json};
@@ -215,13 +215,50 @@ fn read_receipts(directory: &Path) -> Vec<Value> {
         .collect()
 }
 
+fn wait_for_receipts(directory: &Path, expected: usize) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let receipts = std::fs::read_dir(directory)
+            .unwrap()
+            .filter_map(|entry| {
+                let bytes = std::fs::read(entry.ok()?.path()).ok()?;
+                serde_json::from_slice(&bytes).ok()
+            })
+            .collect::<Vec<Value>>();
+        if receipts.len() >= expected {
+            return receipts;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "gate did not finish writing receipts"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_nonempty_file(path: &Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && !contents.is_empty()
+        {
+            return contents;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "gate did not finish writing {path:?}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn live_policy_proxy_streams_clean_turns_and_blocks_sensitive_multimodal_and_bloom_leaks() {
     let temp = tempfile::tempdir().unwrap();
     let policy = temp.path().join("policy.yaml");
     std::fs::write(
         &policy,
-        "policy_id: egress-test\nversion: airlock.v0\nallowed_keys:\n  - key_path: messages\nforbidden_keys: [blocked_field]\nforbidden_patterns:\n  - pattern: 'client-[0-9]+'\nderived_text_paths: []\nclaim_levels: [BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT, STRICT_TELEMETRY_ONLY]\nprotected_bloom_min_hits: 3\n",
+        "policy_id: egress-test\nversion: airlock.v0\nallowed_keys:\n  - key_path: messages\nforbidden_keys: [blocked_field]\nforbidden_patterns:\n  - pattern: 'client-[0-9]+'\nderived_text_paths: []\nclaim_levels: [BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT, STRICT_TELEMETRY_ONLY]\ndetectors: [secrets, pii, tabular, blobs, paths]\nprotected_bloom_min_hits: 3\n",
     )
     .unwrap();
     let protected = "private northstar transaction rationale includes exact protected phrasing for confidential acquisition targeting on the western industrial portfolio and its upcoming refinancing plan";
@@ -319,6 +356,24 @@ fn live_policy_proxy_streams_clean_turns_and_blocks_sensitive_multimodal_and_blo
             .any(|rule| rule.starts_with("TABULAR_"))
     );
     assert!(
+        refusals.iter().any(
+            |refusal| refusal["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| {
+                    finding["artifact_class"] == "DETECTED_SENSITIVE"
+                        && finding["key_path"]
+                            .as_str()
+                            .is_some_and(|path| path.starts_with("/"))
+                        && finding["span_hash"]
+                            .as_str()
+                            .is_some_and(|hash| hash.starts_with("blake3:"))
+                })
+        ),
+        "detector findings should include a JSON path and matched-span hash"
+    );
+    assert!(
         refusal_codes
             .iter()
             .any(|rule| rule == "POLICY_FORBIDDEN_PATTERN")
@@ -336,10 +391,10 @@ fn live_policy_proxy_streams_clean_turns_and_blocks_sensitive_multimodal_and_blo
         assert_eq!(auth.as_deref(), Some("Bearer test-token-never-record"));
     }
 
+    let receipts = wait_for_receipts(&out_dir, 13);
+    assert_eq!(receipts.len(), 13);
     drop(gate);
     drop(origin);
-    let receipts = read_receipts(&out_dir);
-    assert_eq!(receipts.len(), 13);
     assert_eq!(
         receipts
             .iter()
@@ -391,6 +446,67 @@ fn live_policy_proxy_streams_clean_turns_and_blocks_sensitive_multimodal_and_blo
     );
     let witness_text = serde_json::to_string(&witness_records).unwrap();
     assert!(!witness_text.contains("test-token-never-record"));
+}
+
+#[test]
+fn policy_proxy_warn_only_detector_is_recorded_and_forwarded() {
+    let temp = tempfile::tempdir().unwrap();
+    let policy = temp.path().join("policy.yaml");
+    std::fs::write(
+        &policy,
+        "policy_id: warn-only-test\nversion: airlock.v0\nallowed_keys:\n  - key_path: messages\nforbidden_keys: []\nforbidden_patterns: []\nderived_text_paths: []\nclaim_levels: [BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT, STRICT_TELEMETRY_ONLY]\ndetectors: [pii]\ndetectors_warn_only: [pii]\n",
+    )
+    .unwrap();
+
+    let origin = start_origin();
+    let out_dir = temp.path().join("receipts");
+    let witness_path = temp.path().join("witness.jsonl");
+    let gate = start_gate(
+        "policy-proxy",
+        origin.address,
+        &out_dir,
+        &witness_path,
+        &["--policy", policy.to_str().unwrap()],
+    );
+    let agent = client();
+    let request = json!({"messages":[{"role":"user","content":"Contact alice@example.com"}]});
+    let (status, body) = post_json(&agent, gate.address, &request);
+    assert_eq!(status, 200);
+    assert_eq!(body, b"event: message\n\ndata: {\"ok\":true}\n\n");
+    let (forwarded, _) = origin
+        .received
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&forwarded).unwrap(),
+        request
+    );
+    assert_eq!(origin.count.load(Ordering::Acquire), 1);
+
+    let receipts = wait_for_receipts(&out_dir, 1);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["blocked"], false);
+    assert_eq!(receipts[0]["achieved_claim"], "POLICY_SCREENED");
+    let finding = receipts[0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "PII_EMAIL")
+        .expect("warn-only email finding should be recorded");
+    assert_eq!(finding["artifact_class"], "DETECTED_SENSITIVE");
+    assert_eq!(finding["key_path"], "/messages/0/content");
+    assert!(
+        finding["span_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("blake3:")
+    );
+    let receipt_text = serde_json::to_string(&receipts).unwrap();
+    assert!(!receipt_text.contains("alice@example.com"));
+    let witness_text = wait_for_nonempty_file(&witness_path);
+    assert!(!witness_text.contains("alice@example.com"));
+    drop(gate);
+    drop(origin);
 }
 
 #[test]

@@ -1189,10 +1189,19 @@ structs (following the fingerprint `FingerprintDefinition` pattern). A policy
 may declare `extends: [path-or-id, ...]`; references resolve relative to the
 declaring file (or its `rules/` directory for an id), in sorted depth-first
 order. Scalar fields are overridden by the child. Lists are stable unions;
-`forbidden_keys` and `forbidden_patterns` are monotonic and cannot be removed.
-The policy hash covers the resolved policy. When inheritance is used, the
-manifest upstream inventory includes each source file and its BLAKE3 hash.
-Cycles and missing sources are `E_BAD_POLICY` refusals.
+`forbidden_keys`, `forbidden_patterns`, and enabled detector packs are
+monotonic and cannot be removed. Detector packs are opt-in through `detectors:`
+(`secrets`, `pii`, `tabular`, `blobs`, `paths`); omitted or empty means no
+generic detectors. `detectors_warn_only:` must name enabled packs and records
+their findings without lowering the claim. Enforced hits produce
+`DETECTED_SENSITIVE` findings with rule id, JSON path, and matched-span hash;
+the value is never copied to the manifest. The `explain --json` surface includes
+those findings. `tabular_min_rows:` sets the repeated-row threshold for the
+tabular pack (minimum 2, default 5). The policy hash covers detector selection,
+warn-only packs, and this threshold.
+When inheritance is used, the manifest upstream inventory includes each source
+file and its BLAKE3 hash. Cycles and missing sources are `E_BAD_POLICY`
+refusals.
 
 ```rust
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1205,6 +1214,9 @@ pub struct AirlockPolicy {
     pub forbidden_patterns: Vec<ForbiddenPattern>,
     pub derived_text_paths: Vec<String>,
     pub claim_levels: Vec<String>,
+    pub detectors: Vec<DetectorPack>,
+    pub detectors_warn_only: Vec<DetectorPack>,
+    pub tabular_min_rows: Option<usize>,
 }
 ```
 
@@ -1219,6 +1231,7 @@ blake3 = "=1.8.2"
 sha2 = "=0.10"
 chrono = "=0.4.41"
 regex = "=1.11"
+boundary-detectors = { git = "https://github.com/cmdrvl/boundary-detectors", rev = "679d490964a58f2b0f0c2fbc8a51d05503143e04" }
 ```
 
 ### Build profile
@@ -1521,6 +1534,12 @@ A manifest is a **commitment** to one boundary crossing:
    The gate never logs `Authorization` or provider key headers. Strict-manifest
    callers run assemble + verify first and place the manifest where the gate
    can find it; policy-proxy serves interactive SDK turns directly.
+   Policy-proxy uses only packs listed in `detectors:`. Packs listed under
+   `detectors_warn_only:` are still recorded as redacted findings with a JSON
+   pointer and matched-span hash in the gate receipt, but do not block a request
+   by themselves. Protected-corpus handoff remains opaque BDBL v1; the loader
+   enforces the 0600 file / 0700 directory contract and treats invalid data as a
+   startup refusal.
 
    **Landed for `al-cuh` (2026-11-25):** the gate now exposes explicit
    `strict-manifest` and `policy-proxy` modes. The strict mode loads regular

@@ -1,6 +1,6 @@
 pub mod types;
 
-pub use types::{AirlockPolicy, AllowRule, ForbiddenPattern, PolicySource};
+pub use types::{AirlockPolicy, AllowRule, DetectorPack, ForbiddenPattern, PolicySource};
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -47,7 +47,10 @@ struct PartialPolicy {
     forbidden_patterns: Option<Vec<ForbiddenPattern>>,
     derived_text_paths: Option<Vec<String>>,
     claim_levels: Option<Vec<crate::types::ClaimLevel>>,
+    detectors: Option<Vec<DetectorPack>>,
+    detectors_warn_only: Option<Vec<DetectorPack>>,
     protected_bloom_min_hits: Option<usize>,
+    tabular_min_rows: Option<usize>,
     allow_multimodal: Option<bool>,
     extends: Option<Vec<String>>,
 }
@@ -61,8 +64,14 @@ struct PolicyContent<'a> {
     forbidden_patterns: &'a [ForbiddenPattern],
     derived_text_paths: &'a [String],
     claim_levels: &'a [crate::types::ClaimLevel],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    detectors: Vec<DetectorPack>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    detectors_warn_only: Vec<DetectorPack>,
     #[serde(skip_serializing_if = "Option::is_none")]
     protected_bloom_min_hits: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tabular_min_rows: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     allow_multimodal: Option<bool>,
 }
@@ -226,7 +235,10 @@ fn ensure_non_null_fields(
         "forbidden_patterns",
         "derived_text_paths",
         "claim_levels",
+        "detectors",
+        "detectors_warn_only",
         "protected_bloom_min_hits",
+        "tabular_min_rows",
         "allow_multimodal",
         "extends",
     ] {
@@ -249,8 +261,25 @@ fn merge_partial_policy(resolved: &mut AirlockPolicy, partial: PartialPolicy) {
     if let Some(version) = partial.version {
         resolved.version = version;
     }
+    if let Some(detectors) = partial.detectors {
+        for detector in detectors {
+            if !resolved.detectors.contains(&detector) {
+                resolved.detectors.push(detector);
+            }
+        }
+    }
+    if let Some(detectors_warn_only) = partial.detectors_warn_only {
+        for detector in detectors_warn_only {
+            if !resolved.detectors_warn_only.contains(&detector) {
+                resolved.detectors_warn_only.push(detector);
+            }
+        }
+    }
     if let Some(min_hits) = partial.protected_bloom_min_hits {
         resolved.protected_bloom_min_hits = Some(min_hits);
+    }
+    if let Some(min_rows) = partial.tabular_min_rows {
+        resolved.tabular_min_rows = Some(min_rows);
     }
     if let Some(allow_multimodal) = partial.allow_multimodal {
         resolved.allow_multimodal = Some(allow_multimodal);
@@ -305,6 +334,10 @@ fn merge_partial_policy(resolved: &mut AirlockPolicy, partial: PartialPolicy) {
 }
 
 pub fn resolved_policy_hash(policy: &AirlockPolicy) -> String {
+    let mut detectors = policy.detectors.clone();
+    detectors.sort_unstable();
+    let mut detectors_warn_only = policy.detectors_warn_only.clone();
+    detectors_warn_only.sort_unstable();
     let content = PolicyContent {
         policy_id: &policy.policy_id,
         version: &policy.version,
@@ -313,7 +346,10 @@ pub fn resolved_policy_hash(policy: &AirlockPolicy) -> String {
         forbidden_patterns: &policy.forbidden_patterns,
         derived_text_paths: &policy.derived_text_paths,
         claim_levels: &policy.claim_levels,
+        detectors,
+        detectors_warn_only,
         protected_bloom_min_hits: policy.protected_bloom_min_hits,
+        tabular_min_rows: policy.tabular_min_rows,
         allow_multimodal: policy.allow_multimodal,
     };
     let value = serde_json::to_value(content).expect("resolved policy should serialize");
@@ -394,6 +430,26 @@ pub fn validate_policy(policy: &AirlockPolicy, path: &Path) -> Result<(), Refusa
             path,
             "protected_bloom_min_hits must be greater than zero",
             json!({ "field": "protected_bloom_min_hits" }),
+        ));
+    }
+
+    if policy.tabular_min_rows.is_some_and(|min_rows| min_rows < 2) {
+        return Err(policy_validation_error(
+            path,
+            "tabular_min_rows must be at least two",
+            json!({ "field": "tabular_min_rows" }),
+        ));
+    }
+
+    if let Some(detector) = policy
+        .detectors_warn_only
+        .iter()
+        .find(|detector| !policy.detectors.contains(detector))
+    {
+        return Err(policy_validation_error(
+            path,
+            "detectors_warn_only entries must also be enabled in detectors",
+            json!({ "detector": detector }),
         ));
     }
 
@@ -530,7 +586,10 @@ mod tests {
                 ClaimLevel::RawDocumentAbsent,
                 ClaimLevel::StrictTelemetryOnly,
             ],
+            detectors: Vec::new(),
+            detectors_warn_only: Vec::new(),
             protected_bloom_min_hits: None,
+            tabular_min_rows: None,
             allow_multimodal: None,
             extends: Vec::new(),
             source_chain: Vec::new(),
@@ -634,6 +693,34 @@ claim_levels:
         base.protected_bloom_min_hits = Some(0);
         let refusal = validate_policy(&base, Path::new("policy.yaml")).unwrap_err();
         assert!(refusal.refusal.message.contains("protected_bloom_min_hits"));
+    }
+
+    #[test]
+    fn detector_packs_are_hashed_and_warn_only_requires_an_enabled_pack() {
+        let mut policy = sample_policy();
+        let original_hash = resolved_policy_hash(&policy);
+        policy.detectors.push(DetectorPack::Pii);
+        assert_ne!(resolved_policy_hash(&policy), original_hash);
+
+        policy.detectors_warn_only.push(DetectorPack::Pii);
+        assert!(validate_policy(&policy, Path::new("policy.yaml")).is_ok());
+
+        policy.detectors.clear();
+        let refusal = validate_policy(&policy, Path::new("policy.yaml")).unwrap_err();
+        assert!(refusal.refusal.message.contains("detectors_warn_only"));
+    }
+
+    #[test]
+    fn tabular_row_threshold_is_hashed_and_must_be_at_least_two() {
+        let mut policy = sample_policy();
+        let original_hash = resolved_policy_hash(&policy);
+        policy.tabular_min_rows = Some(6);
+        assert_ne!(resolved_policy_hash(&policy), original_hash);
+        assert!(validate_policy(&policy, Path::new("policy.yaml")).is_ok());
+
+        policy.tabular_min_rows = Some(1);
+        let refusal = validate_policy(&policy, Path::new("policy.yaml")).unwrap_err();
+        assert!(refusal.refusal.message.contains("tabular_min_rows"));
     }
 
     #[test]

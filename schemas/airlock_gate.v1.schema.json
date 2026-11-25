@@ -13,7 +13,9 @@
       "required": ["artifact_class", "rule_id"],
       "properties": {
         "artifact_class": { "type": "string", "minLength": 1 },
-        "rule_id": { "type": "string", "minLength": 1 }
+        "rule_id": { "type": "string", "minLength": 1 },
+        "key_path": { "type": "string" },
+        "span_hash": { "$ref": "#/$defs/blake3" }
       }
     },
     "receipt": {

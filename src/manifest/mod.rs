@@ -560,6 +560,7 @@ mod tests {
                 sample_value: Some("Dense footnote section".to_string()),
                 artifact_class: "derived_text".to_string(),
                 matched_rule: "derived.challenge_observation".to_string(),
+                span_hash: None,
             }])
             .blocked_reasons(vec![BlockedReason {
                 claim_attempted: ClaimLevel::StrictTelemetryOnly,

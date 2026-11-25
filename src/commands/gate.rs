@@ -112,7 +112,7 @@ pub fn run(args: GateArgs) -> u8 {
             let min_hits = policy
                 .protected_bloom_min_hits
                 .unwrap_or(DEFAULT_PROTECTED_BLOOM_MIN_HITS);
-            let scanner = Arc::new(egress_scanner(bloom, min_hits));
+            let scanner = Arc::new(egress_scanner(&policy, bloom, min_hits));
             (
                 Some(policy),
                 transport,
@@ -430,6 +430,7 @@ fn handle_request(mut request: Request, state: &GateState) {
                     return;
                 }
             };
+            let mut should_block = scan.blocking;
             let combined_text = screenable_parts
                 .iter()
                 .filter(|part| matches!(&part.kind, PartKind::Text))
@@ -452,35 +453,49 @@ fn handle_request(mut request: Request, state: &GateState) {
                         return;
                     }
                 };
-                scan.findings.extend(combined_scan.findings);
+                should_block |= combined_scan.blocking;
+                for finding in combined_scan.findings {
+                    let already_located = scan.findings.iter().any(|existing| {
+                        existing.artifact_class == finding.artifact_class
+                            && existing.rule_id == finding.rule_id
+                            && existing.span_hash == finding.span_hash
+                    });
+                    if !already_located {
+                        scan.findings.push(finding);
+                    }
+                }
             }
-            if policy.allow_multimodal != Some(true)
-                && screenable_parts.iter().any(|part| {
-                    matches!(
+            if let Some(part) = screenable_parts.iter().find(|part| {
+                policy.allow_multimodal != Some(true)
+                    && matches!(
                         &part.kind,
                         PartKind::Base64Media { .. } | PartKind::RemoteReference
                     )
-                })
-            {
+            }) {
+                should_block = true;
                 scan.findings.push(EgressFinding {
                     artifact_class: "MULTIMODAL_ATTACHMENT".to_owned(),
                     rule_id: "MULTIMODAL_ATTACHMENT_BLOCKED".to_owned(),
+                    key_path: Some(part.pointer.clone()),
+                    span_hash: None,
                 });
             }
             scan.findings.sort_by(|left, right| {
                 left.artifact_class
                     .cmp(&right.artifact_class)
                     .then_with(|| left.rule_id.cmp(&right.rule_id))
+                    .then_with(|| left.key_path.cmp(&right.key_path))
+                    .then_with(|| left.span_hash.cmp(&right.span_hash))
             });
             scan.findings.dedup();
-            if !scan.findings.is_empty() {
+            if should_block {
                 block_request_with_findings(request, state, &scan.findings, &scan.request_hash);
                 return;
             }
             (
                 scan.request_hash,
                 "POLICY_SCREENED".to_owned(),
-                Vec::new(),
+                scan.findings,
                 None,
             )
         }
@@ -489,6 +504,8 @@ fn handle_request(mut request: Request, state: &GateState) {
                 let finding = EgressFinding {
                     artifact_class: "STRICT_MANIFEST_REQUIRED".to_owned(),
                     rule_id: "REQUEST_MANIFEST_NOT_FOUND".to_owned(),
+                    key_path: None,
+                    span_hash: None,
                 };
                 block_request_with_findings(request, state, &[finding], &canonical_request_hash);
                 return;
@@ -523,6 +540,8 @@ fn block_request(
     let finding = EgressFinding {
         artifact_class: "REQUEST_SCAN_REFUSED".to_owned(),
         rule_id: rule_id.to_owned(),
+        key_path: None,
+        span_hash: None,
     };
     let request_hash = request_hash.unwrap_or_else(|| blake3_hash(b"unavailable"));
     block_request_with_findings(request, state, &[finding], &request_hash);
@@ -673,6 +692,8 @@ fn gateway_error(
         vec![EgressFinding {
             artifact_class: "UPSTREAM_ERROR".to_owned(),
             rule_id: rule_id.to_owned(),
+            key_path: None,
+            span_hash: None,
         }],
     )
     .with_policy(
@@ -687,6 +708,8 @@ fn gateway_error(
         vec![EgressFinding {
             artifact_class: "UPSTREAM_ERROR".to_owned(),
             rule_id: rule_id.to_owned(),
+            key_path: None,
+            span_hash: None,
         }],
     );
     return_json(
@@ -744,6 +767,8 @@ fn reject_overloaded(request: Request, state: &GateState) {
     let finding = EgressFinding {
         artifact_class: "GATE_BUSY".to_owned(),
         rule_id: "GATE_BUSY".to_owned(),
+        key_path: None,
+        span_hash: None,
     };
     let mut receipt = GateReceipt::new(
         mode_name(state.mode),

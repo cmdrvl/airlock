@@ -227,7 +227,7 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 [[package]]
 name = "boundary-detectors"
 version = "0.1.0"
-source = "git+https://github.com/cmdrvl/boundary-detectors?rev=0d4dd36fc07836dc67becf0647322c5ddd7dc6e8#0d4dd36fc07836dc67becf0647322c5ddd7dc6e8"
+source = "git+https://github.com/cmdrvl/boundary-detectors?rev=679d490964a58f2b0f0c2fbc8a51d05503143e04#679d490964a58f2b0f0c2fbc8a51d05503143e04"
 dependencies = [
  "base64 0.22.1",
  "blake3",

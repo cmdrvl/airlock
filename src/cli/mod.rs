@@ -108,6 +108,12 @@ pub struct GateArgs {
     pub manifest_dir: Option<PathBuf>,
 
     #[arg(
+        long,
+        help = "Strict-manifest mode: Ed25519 public key to check each signed manifest against. Without it the gate uses ~/.cmdrvl/secrets/airlock/ed25519.pub when that file exists, and otherwise does not check signatures. An unsigned manifest is always accepted"
+    )]
+    pub pubkey: Option<PathBuf>,
+
+    #[arg(
         long = "protected-bloom",
         help = "Opaque BDBL v1 Bloom filter exported by veil"
     )]

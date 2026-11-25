@@ -121,13 +121,14 @@ impl Drop for GateProcess {
     }
 }
 
-fn start_strict_gate(
+/// The command that starts a strict gate. HOME and USERPROFILE are removed so that no default
+/// signing key is ever picked up from whoever runs the tests; a test that wants one sets HOME.
+fn strict_gate_command(
     upstream: SocketAddr,
     manifest_dir: &Path,
     out_dir: &Path,
-    witness_path: &Path,
     extra: &[&str],
-) -> GateProcess {
+) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_airlock"));
     command
         .args(["gate", "--mode", "strict-manifest", "--upstream"])
@@ -136,8 +137,23 @@ fn start_strict_gate(
         .arg(manifest_dir)
         .arg("--out-dir")
         .arg(out_dir)
-        .args(extra);
-    launch_gate(command, witness_path)
+        .args(extra)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE");
+    command
+}
+
+fn start_strict_gate(
+    upstream: SocketAddr,
+    manifest_dir: &Path,
+    out_dir: &Path,
+    witness_path: &Path,
+    extra: &[&str],
+) -> GateProcess {
+    launch_gate(
+        strict_gate_command(upstream, manifest_dir, out_dir, extra),
+        witness_path,
+    )
 }
 
 fn start_policy_proxy_gate(
@@ -865,7 +881,8 @@ fn health_endpoint_reports_the_gate_without_forwarding_or_recording() {
             "status": "ok",
             "gate_version": "airlock.gate.v1",
             "mode": "strict-manifest",
-            "manifest_count": 1
+            "manifest_count": 1,
+            "signature_key": null
         })
     );
     // A query string does not take a request off the reserved path.
@@ -1288,9 +1305,9 @@ fn gate_still_forwards_against_a_v0_2_manifest_during_the_transition() {
     assert_eq!(origin.count.load(Ordering::Acquire), 1);
 }
 
-/// A signed v0.3 manifest still authorizes its request. This only shows the gate reads the
-/// `signature` member without choking on it; the gate does not verify signatures. That check is
-/// `airlock verify-manifest`, which a deployment runs before it fills the manifest directory.
+/// With no signing key configured (HOME is removed, so there is no default key either), a
+/// signed v0.3 manifest still authorizes its request: the gate reads the `signature` member and
+/// does not check it. The tests below cover what happens once a key is configured.
 #[test]
 fn gate_forwards_against_a_signed_v0_3_manifest() {
     let temp = tempfile::tempdir().unwrap();
@@ -1320,6 +1337,377 @@ fn gate_forwards_against_a_signed_v0_3_manifest() {
 
     assert_eq!(status, 200);
     assert_eq!(origin.count.load(Ordering::Acquire), 1);
+}
+
+/// The public half of the RFC 8032 section 7.1 test-1 key that signed
+/// `expected_manifest_v0_3_signed.json` (see tests/signing.rs), and its fingerprint.
+const GOLDEN_PUBLIC_HEX: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+const GOLDEN_FINGERPRINT: &str =
+    "blake3:6c31041268f471609c79f5f2dbcc38e4a4ab2f4d416109a4e09fcf50fd0f0062";
+
+fn write_public_key(path: &Path, hex: &str) {
+    std::fs::write(path, format!("{hex}\n")).unwrap();
+}
+
+/// A manifest directory holding the signed golden, altered after signing when `tamper` is set.
+/// Returns the directory and the request the manifest matches.
+fn signed_manifest_dir(parent: &Path, tamper: bool) -> (PathBuf, Value) {
+    let manifest_dir = parent.join("manifests");
+    std::fs::create_dir(&manifest_dir).unwrap();
+    let signed = fixture_root().join("expected_manifest_v0_3_signed.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(signed).unwrap()).unwrap();
+    if tamper {
+        manifest["timestamp"] = json!("2030-01-01T00:00:00Z");
+    }
+    std::fs::write(
+        manifest_dir.join("signed.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let request =
+        serde_json::from_slice(&std::fs::read(fixture_root().join("request.json")).unwrap())
+            .unwrap();
+    (manifest_dir, request)
+}
+
+/// A public key file for a freshly generated key, made by the real `airlock keygen` in a
+/// throwaway HOME. Returns the path of its `ed25519.pub`.
+fn fresh_public_key(parent: &Path) -> PathBuf {
+    let home = parent.join("other-home");
+    std::fs::create_dir(&home).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_airlock"))
+        .arg("keygen")
+        .env("HOME", &home)
+        .env_remove("USERPROFILE")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    home.join(".cmdrvl/secrets/airlock/ed25519.pub")
+}
+
+/// A HOME whose default signing public key is `hex`.
+fn home_with_default_key(parent: &Path, hex: &str) -> PathBuf {
+    let home = parent.join("gate-home");
+    let directory = home.join(".cmdrvl/secrets/airlock");
+    std::fs::create_dir_all(&directory).unwrap();
+    write_public_key(&directory.join("ed25519.pub"), hex);
+    home
+}
+
+/// Run a gate that must refuse to start. Returns its stderr. A gate that starts instead is
+/// killed after ten seconds and fails the test.
+fn gate_refuses_to_start(mut command: Command) -> String {
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut exited = false;
+    while Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            exited = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if !exited {
+        let _ = child.kill();
+    }
+    // Reaped on every path; once the child has exited this returns its status at once.
+    let status = child.wait().unwrap();
+    assert!(exited, "the gate started instead of refusing to start");
+    assert_eq!(status.code(), Some(2));
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    stderr
+}
+
+/// Wait for the gate's stderr to contain `needle`; the gate's own lines arrive on a drain thread.
+fn wait_for_stderr(gate: &GateProcess, needle: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if gate.stderr_text().contains(needle) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[test]
+fn a_manifest_signed_by_the_configured_key_authorizes_its_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = signed_manifest_dir(temp.path(), false);
+    let key = temp.path().join("key.pub");
+    write_public_key(&key, GOLDEN_PUBLIC_HEX);
+    let origin = start_origin();
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &["--pubkey", key.to_str().unwrap()],
+    );
+    let agent = client();
+
+    let (status, _) = post(&agent, gate.address, &serde_json::to_vec(&request).unwrap());
+    let (_, health) = get_health(&agent, gate.address, "/airlock/health");
+
+    assert_eq!(status, 200);
+    assert_eq!(origin.count.load(Ordering::Acquire), 1);
+    assert_eq!(health["signature_key"], GOLDEN_FINGERPRINT);
+    assert!(
+        wait_for_stderr(
+            &gate,
+            &format!("signed manifests were checked against {GOLDEN_FINGERPRINT}")
+        ),
+        "{}",
+        gate.stderr_text()
+    );
+}
+
+#[test]
+fn gate_refuses_to_start_on_a_manifest_altered_after_signing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, _) = signed_manifest_dir(temp.path(), true);
+    let key = temp.path().join("key.pub");
+    write_public_key(&key, GOLDEN_PUBLIC_HEX);
+    let origin = start_origin();
+
+    let stderr = gate_refuses_to_start(strict_gate_command(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &["--pubkey", key.to_str().unwrap()],
+    ));
+
+    assert!(stderr.contains("signed.json"), "{stderr}");
+    assert!(stderr.contains("does not verify"), "{stderr}");
+    assert!(stderr.contains("refusing to start"), "{stderr}");
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn gate_refuses_to_start_on_a_manifest_signed_by_a_different_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, _) = signed_manifest_dir(temp.path(), false);
+    let other_key = fresh_public_key(temp.path());
+    let origin = start_origin();
+
+    let stderr = gate_refuses_to_start(strict_gate_command(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &["--pubkey", other_key.to_str().unwrap()],
+    ));
+
+    assert!(stderr.contains("signed.json"), "{stderr}");
+    assert!(stderr.contains("does not verify"), "{stderr}");
+}
+
+#[test]
+fn a_configured_key_never_makes_a_signature_required() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(manifest_dir.join("clean_telemetry_only.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        manifest.get("signature").is_none(),
+        "the manifest is unsigned"
+    );
+    let key = temp.path().join("key.pub");
+    write_public_key(&key, GOLDEN_PUBLIC_HEX);
+    let origin = start_origin();
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &["--pubkey", key.to_str().unwrap()],
+    );
+    let agent = client();
+
+    let (status, _) = post(&agent, gate.address, &serde_json::to_vec(&request).unwrap());
+    let (_, health) = get_health(&agent, gate.address, "/airlock/health");
+
+    assert_eq!(status, 200);
+    assert_eq!(origin.count.load(Ordering::Acquire), 1);
+    assert_eq!(health["signature_key"], GOLDEN_FINGERPRINT);
+}
+
+#[test]
+fn without_a_key_signatures_are_not_checked_and_the_gate_says_so() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = signed_manifest_dir(temp.path(), true);
+    let origin = start_origin();
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+    let agent = client();
+
+    let (status, _) = post(&agent, gate.address, &serde_json::to_vec(&request).unwrap());
+    let (_, health) = get_health(&agent, gate.address, "/airlock/health");
+
+    assert_eq!(status, 200, "no key is configured, so nothing is checked");
+    assert_eq!(health["signature_key"], Value::Null);
+    assert!(
+        wait_for_stderr(
+            &gate,
+            "no signing key configured; manifest signatures are not checked"
+        ),
+        "{}",
+        gate.stderr_text()
+    );
+}
+
+#[test]
+fn the_default_public_key_is_used_when_no_pubkey_is_given() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = signed_manifest_dir(temp.path(), false);
+    let home = home_with_default_key(temp.path(), GOLDEN_PUBLIC_HEX);
+    let origin = start_origin();
+    let mut command = strict_gate_command(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &[],
+    );
+    command.env("HOME", &home);
+    let gate = launch_gate(command, &temp.path().join("witness.jsonl"));
+    let agent = client();
+
+    let (status, _) = post(&agent, gate.address, &serde_json::to_vec(&request).unwrap());
+    let (_, health) = get_health(&agent, gate.address, "/airlock/health");
+
+    assert_eq!(status, 200);
+    assert_eq!(health["signature_key"], GOLDEN_FINGERPRINT);
+}
+
+#[test]
+fn the_default_public_key_refuses_a_manifest_altered_after_signing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, _) = signed_manifest_dir(temp.path(), true);
+    let home = home_with_default_key(temp.path(), GOLDEN_PUBLIC_HEX);
+    let origin = start_origin();
+    let mut command = strict_gate_command(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &[],
+    );
+    command.env("HOME", &home);
+
+    let stderr = gate_refuses_to_start(command);
+
+    assert!(stderr.contains("does not verify"), "{stderr}");
+}
+
+#[test]
+fn an_explicit_pubkey_wins_over_the_default_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = signed_manifest_dir(temp.path(), false);
+    let other_key = fresh_public_key(temp.path());
+    let other_hex = std::fs::read_to_string(other_key).unwrap();
+    let home = home_with_default_key(temp.path(), other_hex.trim());
+    let key = temp.path().join("key.pub");
+    write_public_key(&key, GOLDEN_PUBLIC_HEX);
+    let origin = start_origin();
+    let mut command = strict_gate_command(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &["--pubkey", key.to_str().unwrap()],
+    );
+    command.env("HOME", &home);
+    let gate = launch_gate(command, &temp.path().join("witness.jsonl"));
+    let agent = client();
+
+    let (status, _) = post(&agent, gate.address, &serde_json::to_vec(&request).unwrap());
+    let (_, health) = get_health(&agent, gate.address, "/airlock/health");
+
+    assert_eq!(
+        status, 200,
+        "the default key would have refused this manifest"
+    );
+    assert_eq!(health["signature_key"], GOLDEN_FINGERPRINT);
+}
+
+#[test]
+fn a_configured_key_that_cannot_be_loaded_stops_the_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, _) = bound_manifest_dir(temp.path());
+    let origin = start_origin();
+    let receipts = temp.path().join("receipts");
+
+    // --pubkey names a file that is not there.
+    let missing = temp.path().join("no-such-key.pub");
+    let stderr = gate_refuses_to_start(strict_gate_command(
+        origin.address,
+        &manifest_dir,
+        &receipts,
+        &["--pubkey", missing.to_str().unwrap()],
+    ));
+    assert!(stderr.contains("refusing to start"), "{stderr}");
+
+    // --pubkey names a file that is not a key.
+    let malformed = temp.path().join("malformed.pub");
+    std::fs::write(&malformed, "not a key\n").unwrap();
+    let stderr = gate_refuses_to_start(strict_gate_command(
+        origin.address,
+        &manifest_dir,
+        &receipts,
+        &["--pubkey", malformed.to_str().unwrap()],
+    ));
+    assert!(stderr.contains("refusing to start"), "{stderr}");
+
+    // No --pubkey, and the default key in HOME is not a key either.
+    let home = home_with_default_key(temp.path(), "not a key");
+    let mut command = strict_gate_command(origin.address, &manifest_dir, &receipts, &[]);
+    command.env("HOME", &home);
+    let stderr = gate_refuses_to_start(command);
+    assert!(stderr.contains("refusing to start"), "{stderr}");
+}
+
+#[test]
+fn policy_proxy_refuses_pubkey_at_startup() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/clean_telemetry_only");
+    let temp = tempfile::tempdir().unwrap();
+    let key = temp.path().join("key.pub");
+    write_public_key(&key, GOLDEN_PUBLIC_HEX);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_airlock"));
+    command
+        .args([
+            "gate",
+            "--mode",
+            "policy-proxy",
+            "--upstream",
+            "https://api.openai.com",
+            "--policy",
+        ])
+        .arg(root.join("policy.yaml"))
+        .arg("--pubkey")
+        .arg(&key)
+        .arg("--out-dir")
+        .arg(temp.path().join("receipts"));
+
+    let stderr = gate_refuses_to_start(command);
+
+    assert!(
+        stderr.contains("--pubkey only applies to strict-manifest mode"),
+        "{stderr}"
+    );
 }
 
 /// A v0.3 manifest that lists what did not cross still authorizes its request: the gate reads

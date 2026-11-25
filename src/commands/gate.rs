@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -22,6 +23,7 @@ use crate::scanner::egress::{
     DEFAULT_PROTECTED_BLOOM_MIN_HITS, EgressFinding, MAX_GATE_REQUEST_BYTES, egress_scanner,
     load_protected_bloom, scan_policy_proxy_request, scan_policy_proxy_request_with_media,
 };
+use crate::signing;
 use crate::types::ClaimLevel;
 use crate::witness::{self, WitnessInput, WitnessRecord};
 
@@ -61,6 +63,8 @@ struct GateState {
     policy_hash: Option<String>,
     scanner: Option<Arc<boundary_detectors::Scanner>>,
     strict_manifests: Arc<BTreeMap<String, StrictManifestEntry>>,
+    /// Fingerprint of the key signed manifests were checked against at startup, if any.
+    signature_key_fingerprint: Option<String>,
     out_dir: PathBuf,
     no_witness: bool,
     max_request_bytes: u64,
@@ -92,12 +96,20 @@ pub fn run(args: GateArgs) -> u8 {
         }
     };
 
+    let mut signature_key_fingerprint = None;
     let (policy, transport, policy_hash, scanner, strict_manifests) = match args.mode {
         GateMode::PolicyProxy => {
             if args.manifest_dir.is_some() {
                 let _ = writeln!(
                     stderr,
                     "airlock gate: --manifest-dir only applies to strict-manifest mode"
+                );
+                return REFUSAL;
+            }
+            if args.pubkey.is_some() {
+                let _ = writeln!(
+                    stderr,
+                    "airlock gate: --pubkey only applies to strict-manifest mode"
                 );
                 return REFUSAL;
             }
@@ -170,13 +182,21 @@ pub fn run(args: GateArgs) -> u8 {
                 );
                 return REFUSAL;
             };
-            let manifests = match load_strict_manifests(directory) {
+            let signature_key = match configured_signature_key(args.pubkey.as_deref()) {
+                Ok(key) => key,
+                Err(message) => {
+                    let _ = writeln!(stderr, "airlock gate: {message}");
+                    return REFUSAL;
+                }
+            };
+            let manifests = match load_strict_manifests(directory, signature_key.as_ref()) {
                 Ok(manifests) => manifests,
                 Err(message) => {
                     let _ = writeln!(stderr, "airlock gate: {message}");
                     return REFUSAL;
                 }
             };
+            signature_key_fingerprint = signature_key.as_ref().map(signing::fingerprint);
             (None, None, None, None, Arc::new(manifests))
         }
     };
@@ -209,6 +229,7 @@ pub fn run(args: GateArgs) -> u8 {
         policy_hash,
         scanner,
         strict_manifests,
+        signature_key_fingerprint,
         out_dir: args.out_dir,
         no_witness: args.no_witness,
         max_request_bytes,
@@ -228,6 +249,22 @@ pub fn run(args: GateArgs) -> u8 {
     let active = Arc::new(AtomicUsize::new(0));
     let bound_address = server.server_addr().to_ip().unwrap_or(listen);
     let _ = writeln!(stderr, "airlock gate listening on {bound_address}");
+    if state.mode == GateMode::StrictManifest {
+        match &state.signature_key_fingerprint {
+            Some(fingerprint) => {
+                let _ = writeln!(
+                    stderr,
+                    "airlock gate: signed manifests were checked against {fingerprint}"
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    stderr,
+                    "airlock gate: no signing key configured; manifest signatures are not checked"
+                );
+            }
+        }
+    }
 
     loop {
         let request = match server.recv() {
@@ -296,8 +333,38 @@ fn validate_upstream(value: &str) -> Result<String, &'static str> {
     Ok(value.trim_end_matches('/').to_owned())
 }
 
+/// The public key signed manifests are checked against, or `None` when no key is configured
+/// and signatures are not checked. A key is configured by `--pubkey`, or else by the default
+/// `ed25519.pub` that `airlock keygen` writes, when that file exists. A configured key that
+/// cannot be loaded stops the gate; it is never skipped.
+fn configured_signature_key(explicit: Option<&Path>) -> Result<Option<VerifyingKey>, String> {
+    let path = match explicit {
+        Some(path) => path.to_path_buf(),
+        None => {
+            let Ok(directory) = signing::secrets_dir() else {
+                return Ok(None);
+            };
+            let path = directory.join(signing::PUBLIC_KEY_FILE);
+            match fs::metadata(&path) {
+                Ok(_) => path,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(format!(
+                        "the default signing public key {} is unreadable ({error}); refusing to start",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    };
+    signing::load_verifying_key(&path)
+        .map(Some)
+        .map_err(|error| format!("{error}; refusing to start"))
+}
+
 fn load_strict_manifests(
     directory: &Path,
+    signature_key: Option<&VerifyingKey>,
 ) -> Result<BTreeMap<String, StrictManifestEntry>, String> {
     let entries = fs::read_dir(directory).map_err(|_| "strict-manifest directory is unreadable")?;
     let mut manifests = BTreeMap::new();
@@ -328,6 +395,20 @@ fn load_strict_manifests(
                 "strict-manifest directory contains a v0.3 manifest without bytes_crossed and attestation"
                     .to_owned(),
             );
+        }
+        // A manifest that carries a signature is checked when a key is configured. An unsigned
+        // one is accepted either way: a signature is never required.
+        if let Some(key) = signature_key
+            && manifest.signature.is_some()
+        {
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
+            signing::verify_value(&value, key).map_err(|failure| {
+                format!(
+                    "strict-manifest entry {} has a signature that does not verify: {failure}; refusing to start",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                )
+            })?;
         }
         if !matches!(
             manifest.achieved_claim,
@@ -380,7 +461,11 @@ fn respond_health(request: Request, state: &GateState) {
         "mode": mode_name(state.mode),
     });
     match state.mode {
-        GateMode::StrictManifest => body["manifest_count"] = json!(state.strict_manifests.len()),
+        GateMode::StrictManifest => {
+            body["manifest_count"] = json!(state.strict_manifests.len());
+            // The key signed manifests were checked against, or null when none is configured.
+            body["signature_key"] = json!(state.signature_key_fingerprint);
+        }
         GateMode::PolicyProxy => {
             body["policy_id"] = json!(state.policy.as_ref().map(|policy| &policy.policy_id));
         }
@@ -1122,6 +1207,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(load_strict_manifests(directory.path()).unwrap().is_empty());
+        assert!(
+            load_strict_manifests(directory.path(), None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

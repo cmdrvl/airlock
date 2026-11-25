@@ -100,6 +100,7 @@
         { "name": "policy", "flag": "--policy", "type": "file_path", "description": "Boundary policy required by policy-proxy mode" },
         { "name": "transport", "flag": "--transport", "type": "file_path", "description": "Optional provider selection or generic_json pointer declaration for policy-proxy mode" },
         { "name": "manifest_dir", "flag": "--manifest-dir", "type": "directory_path", "description": "Pre-verified manifest directory required by strict-manifest mode" },
+        { "name": "pubkey", "flag": "--pubkey", "type": "file_path", "description": "Strict-manifest mode: Ed25519 public key to check each signed manifest against; defaults to ~/.cmdrvl/secrets/airlock/ed25519.pub when that file exists, otherwise signatures are not checked; an unsigned manifest is always accepted" },
         { "name": "protected_bloom", "flag": "--protected-bloom", "type": "file_path", "description": "Opaque BDBL v1 Bloom file exported by veil" },
         { "name": "listen", "flag": "--listen", "type": "socket_address", "description": "Loopback listener address; default 127.0.0.1:8787" },
         { "name": "timeout_seconds", "flag": "--timeout-seconds", "type": "integer", "description": "Upstream timeout from 1 to 600 seconds" },

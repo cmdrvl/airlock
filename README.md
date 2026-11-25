@@ -132,6 +132,20 @@ supported achieved claim. The gate parses each request as JSON and hashes its ca
 After screening or a manifest match, it forwards those canonical JSON bytes so
 the upstream receives the content Airlock checked.
 
+Strict-manifest mode also checks the signature of each manifest that carries one,
+when it has a key to check against: `--pubkey PATH`, or else the default
+`~/.cmdrvl/secrets/airlock/ed25519.pub` (the public half `airlock keygen` writes)
+if that file exists. A manifest whose signature does not verify under that key,
+because it was altered after signing or signed by another key, stops the gate at
+startup with the file named on stderr; it is not skipped. A key that is named but
+cannot be read, or whose file is not a key, stops the gate too. An unsigned
+manifest is always accepted: the gate never requires a signature, and with no key
+configured it checks none and says so on stderr. `GET /airlock/health` reports
+`signature_key`, the fingerprint of the key in use, or `null`. The check runs once,
+when the manifests are loaded at startup, and `--pubkey` is refused in
+policy-proxy mode. The key is the one the operator configures: a signature that
+verifies shows the manifest is unaltered since that key signed it, not who signed.
+
 A strict-manifest request the gate will not forward (no matching manifest, a
 manifest below `--require-claim`, an unreadable, malformed or oversized body, an
 invalid target) is refused with HTTP 403 and code `E_GATE_DENIED`; policy-proxy
@@ -464,11 +478,12 @@ Verification uses the strict Ed25519 check, so a small-order public key cannot
 forge a signature. An `airlock.v0.2` manifest has no signature and is refused as
 `unsupported_manifest_version`.
 
-Two limits to know. `verify-manifest` checks the parsed JSON, so a manifest with a
+One limit to know: `verify-manifest` checks the parsed JSON, so a manifest with a
 repeated object key is read as `serde_json` reads it (the last value wins) and is
-not rejected. And `airlock gate` accepts `airlock.v0.2` and `airlock.v0.3`
-manifests but does not check their signatures. `verify-manifest` records nothing
-in the witness ledger.
+not rejected. `verify-manifest` records nothing in the witness ledger.
+`airlock gate` accepts `airlock.v0.2` and `airlock.v0.3` manifests and, in
+strict-manifest mode, checks a signed manifest's signature when a key is
+configured (see Egress gate above); it never requires one.
 
 ### `airlock doctor`
 
@@ -685,7 +700,9 @@ includes detector findings from the manifest.
   self-issued, so a signature shows the manifest is unaltered since signing, not
   who signed it
 - that a v0.3 manifest was witnessed by anything but `airlock verify`
-  (`attestation: self_attested`); `airlock gate` does not check signatures
+  (`attestation: self_attested`)
+- that a strict-manifest gate checked any signature: it does so only when a key
+  is configured, and `GET /airlock/health` shows whether one was (`signature_key`)
 - that the source document is true
 - that the parser extracted the right facts
 - that the model response is correct

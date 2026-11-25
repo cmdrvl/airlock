@@ -2,12 +2,13 @@
 name = "airlock"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Prove what crossed the model boundary"
 license = "MIT"
 
 [dependencies]
 blake3 = "=1.8.2"
+boundary-detectors = { git = "https://github.com/cmdrvl/boundary-detectors", rev = "0d4dd36fc07836dc67becf0647322c5ddd7dc6e8" }
 chrono = "=0.4.41"
 clap = { version = "=4.5.60", features = ["derive"] }
 regex = "=1.11"
@@ -15,6 +16,8 @@ serde = { version = "=1.0.225", features = ["derive"] }
 serde_json = { version = "=1.0.143", features = ["float_roundtrip"] }
 serde_yaml = "=0.9.34"
 sha2 = "=0.10"
+tiny_http = "=0.12.0"
+ureq = { version = "=3.5.2", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 assert_cmd = "2"

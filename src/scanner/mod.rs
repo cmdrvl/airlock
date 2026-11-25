@@ -1,3 +1,5 @@
+pub mod egress;
+
 use std::collections::HashSet;
 
 use regex::Regex;
@@ -605,6 +607,8 @@ mod tests {
                 ClaimLevel::RawDocumentAbsent,
                 ClaimLevel::StrictTelemetryOnly,
             ],
+            protected_bloom_min_hits: None,
+            allow_multimodal: None,
             extends: Vec::new(),
             source_chain: Vec::new(),
         }

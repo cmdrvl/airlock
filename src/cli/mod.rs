@@ -2,7 +2,7 @@ pub mod exit;
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::types::{BoundaryMode, ClaimLevel};
 
@@ -58,6 +58,73 @@ pub enum Commands {
     RobotDocs(RobotDocsArgs),
     #[command(subcommand, about = "Query the local witness ledger")]
     Witness(WitnessCommands),
+    #[command(about = "Run a loopback HTTP/SSE egress gate")]
+    Gate(GateArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum GateMode {
+    #[value(name = "strict-manifest")]
+    StrictManifest,
+    #[value(name = "policy-proxy")]
+    PolicyProxy,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+#[command(
+    after_help = "Examples:\n  airlock gate --mode policy-proxy --policy policy.yaml --upstream https://api.openai.com --protected-bloom protected-corpus.bdbl\n  airlock gate --mode strict-manifest --manifest-dir manifests --upstream https://api.openai.com"
+)]
+pub struct GateArgs {
+    #[arg(
+        long,
+        value_enum,
+        help = "Gate contract: strict-manifest or policy-proxy"
+    )]
+    pub mode: GateMode,
+
+    #[arg(long, help = "Provider base URL to which requests are forwarded")]
+    pub upstream: String,
+
+    #[arg(long, help = "Boundary policy required by policy-proxy mode")]
+    pub policy: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Optional transport declaration for provider selection or generic_json screening"
+    )]
+    pub transport: Option<PathBuf>,
+
+    #[arg(
+        long = "manifest-dir",
+        help = "Pre-verified Airlock manifests required by strict-manifest mode"
+    )]
+    pub manifest_dir: Option<PathBuf>,
+
+    #[arg(
+        long = "protected-bloom",
+        help = "Opaque BDBL v1 Bloom filter exported by veil"
+    )]
+    pub protected_bloom: Option<PathBuf>,
+
+    #[arg(
+        long,
+        default_value = "127.0.0.1:8787",
+        help = "Loopback address for the local proxy"
+    )]
+    pub listen: String,
+
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=600), help = "Strict upstream timeout in seconds")]
+    pub timeout_seconds: u64,
+
+    #[arg(
+        long = "out-dir",
+        default_value = "airlock-gate",
+        help = "Directory for gate receipts"
+    )]
+    pub out_dir: PathBuf,
+
+    #[arg(long = "no-witness", help = "Skip ambient witness ledger recording")]
+    pub no_witness: bool,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -351,6 +418,61 @@ mod tests {
         };
         assert_eq!(args.require_claim, Some(ClaimLevel::RawDocumentAbsent));
         assert!(args.no_witness);
+    }
+
+    #[test]
+    fn parses_explicit_gate_modes_and_protected_bloom() {
+        let cli = Cli::try_parse_from([
+            "airlock",
+            "gate",
+            "--mode",
+            "policy-proxy",
+            "--policy",
+            "policy.yaml",
+            "--upstream",
+            "https://api.openai.com",
+            "--transport",
+            "transport.json",
+            "--protected-bloom",
+            "protected-corpus.bdbl",
+            "--no-witness",
+        ])
+        .unwrap();
+        let args = match cli.command {
+            Some(Commands::Gate(args)) => args,
+            _ => {
+                assert!(false, "expected gate command");
+                return;
+            }
+        };
+        assert_eq!(args.mode, GateMode::PolicyProxy);
+        assert_eq!(args.policy, Some(PathBuf::from("policy.yaml")));
+        assert_eq!(args.transport, Some(PathBuf::from("transport.json")));
+        assert_eq!(
+            args.protected_bloom,
+            Some(PathBuf::from("protected-corpus.bdbl"))
+        );
+        assert!(args.no_witness);
+
+        let strict = Cli::try_parse_from([
+            "airlock",
+            "gate",
+            "--mode",
+            "strict-manifest",
+            "--manifest-dir",
+            "manifests",
+            "--upstream",
+            "https://api.openai.com",
+        ])
+        .unwrap();
+        let args = match strict.command {
+            Some(Commands::Gate(args)) => args,
+            _ => {
+                assert!(false, "expected strict gate command");
+                return;
+            }
+        };
+        assert_eq!(args.mode, GateMode::StrictManifest);
     }
 
     #[test]

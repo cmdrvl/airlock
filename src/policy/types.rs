@@ -12,6 +12,10 @@ pub struct AirlockPolicy {
     pub forbidden_patterns: Vec<ForbiddenPattern>,
     pub derived_text_paths: Vec<String>,
     pub claim_levels: Vec<ClaimLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_bloom_min_hits: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_multimodal: Option<bool>,
     #[serde(skip)]
     pub extends: Vec<String>,
     #[serde(skip)]

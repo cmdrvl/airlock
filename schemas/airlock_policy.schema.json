@@ -94,6 +94,16 @@
           "STRICT_TELEMETRY_ONLY"
         ]
       }
+    },
+    "protected_bloom_min_hits": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Minimum matching rolling shingles required to block a protected-corpus match; defaults to 8 when --protected-bloom is enabled."
+    },
+    "allow_multimodal": {
+      "type": "boolean",
+      "default": false,
+      "description": "Allow image and document attachments through policy-proxy mode. Omitted values deny attachments."
     }
   },
   "if": {

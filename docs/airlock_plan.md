@@ -688,22 +688,28 @@ This is where proof becomes durable infrastructure rather than a local file.
 
 ### 8. Adapters
 
-Thin transport adapters targeting API formats, not environments:
+Thin transport adapters target API formats, not environments. They map
+assembled prompt payloads into provider requests and expose every screenable
+text, inline-media payload, and remote reference to the egress scanner.
 
-- OpenAI Chat Completions API (covers ChatGPT, Codex CLI, Azure OpenAI)
-- Anthropic Messages API (covers Claude Code, direct API)
-- Additional vendor APIs as needed
+| Adapter | System content | Message/content encoding | Required configuration |
+|---|---|---|---|
+| `openai_chat_completions` | `messages` entries with role `system` | `messages[].content`; structured content is deterministic compact JSON text | Request `model`; detected by default |
+| `openai_responses` | Top-level `instructions` | `input` with message roles and text/image content parts | Request `model`; detected by default |
+| `anthropic_messages` | Top-level `system` | `messages[].content` text and typed image/document/tool blocks | Request `model`; detected by default |
+| `gemini_generate_content` | `systemInstruction.parts[].text` | `contents[].parts[]` text, inline data, or file references | Model resource in request; detected by default |
+| `generic_json` | Declared JSON pointer | Declared message-array pointer and content pointers | `--transport` declaration with adapter name and pointers |
 
-Adapters should not define the policy model. They should only map assembled
-prompt payloads into vendor-specific request shapes. An adapter is a function
-from `(prompt_payload, transport_config) → request_payload`, nothing more.
-
-The OpenAI Chat Completions adapter emits structured user-message content as
-one text content part containing deterministic compact JSON. Its `unwrap()`
-operation restores the assembled prompt messages from that wire representation
-before request-to-prompt binding is evaluated. The conformance fixture is
-validated against the OpenAI-published Chat Completions request schema; other
-provider request schemas belong with their corresponding adapters.
+An explicit `adapter` in the transport declaration takes precedence. Otherwise
+selection uses top-level shape: `contents` selects Gemini, `input` selects
+OpenAI Responses, and Anthropic-only fields such as `system` or
+`stop_sequences` select Anthropic for `messages` requests. A `messages` request
+with only fields shared by Chat Completions and Anthropic defaults to Chat
+Completions; declare `anthropic_messages` when that shared shape is Anthropic.
+Conflicting provider-specific shapes refuse. Generic JSON is selected
+explicitly and requires its JSON pointers. OpenAI Chat Completions structured
+user content is one deterministic compact JSON text part; its `unwrap()`
+restores the assembled messages before request binding is evaluated.
 
 ---
 
@@ -1507,16 +1513,36 @@ A manifest is a **commitment** to one boundary crossing:
    sent. Manifest gains `transmission {endpoint_host, request_bytes,
    response_status, response_hash, sent_at}`; witness outcome `SENT`. Refuses
    below `--require-claim`; API key from env only.
-2. `airlock gate`: localhost proxy. Canonicalize body → hash → look up a
-   manifest at or above the required claim → forward with header passthrough
-   → record `GATED` with response hash (SSE streams hashed as they pass).
-   Unmatched requests get 403 and a manifest of the denial. The gate never
-   logs `Authorization` or `x-api-key`. Because the gate has no prompt to
-   bind against, callers must run assemble + verify first and drop the
-   manifest where the gate can find it; `send` remains the preferred path
-   and the gate exists for SDK-driven loops. For those loops the gate
-   reconstructs the conversation chain from the responses it forwarded, so
-   turn *n* is bound to turn *n−1* without caller cooperation.
+2. `airlock gate`: localhost proxy. In `strict-manifest` mode, canonicalize
+   JSON and match the exact request hash to a bound manifest with a supported claim;
+   in `policy-proxy` mode, screen each turn directly. Forward only checked
+   canonical JSON with header passthrough, stream SSE while hashing response
+   bytes, and record `GATED`. Boundary failures return 403 with a receipt.
+   The gate never logs `Authorization` or provider key headers. Strict-manifest
+   callers run assemble + verify first and place the manifest where the gate
+   can find it; policy-proxy serves interactive SDK turns directly.
+
+   **Landed for `al-cuh` (2026-11-25):** the gate now exposes explicit
+   `strict-manifest` and `policy-proxy` modes. The strict mode loads regular
+   Airlock manifest files at startup and forwards only an exact canonical
+   request hash with `binding_status: BOUND` and a
+   `RAW_DOCUMENT_ABSENT` or `STRICT_TELEMETRY_ONLY` claim.
+   Policy-proxy mode screens JSON bodies with the pinned shared detector packs
+   and policy denylists (including bounded direct base64/hex decode candidates),
+   optionally loads veil's opaque BDBL v1 file
+   (`protected-corpus.bdbl`), and fails closed for scanner size limits and
+   base64 media or remote image/document references unless policy sets
+   `allow_multimodal: true`.
+   Successful responses, including SSE, are streamed through a bounded
+   concurrent loopback listener while a tee hashes response bytes. Gate
+   receipts and witness params state the mode and earned claim without storing
+   matched text or provider credentials. The proxy uses bounded request sizes,
+   upstream timeouts, and disabled redirects; `--listen` accepts loopback
+   socket addresses only. `--transport` pins an adapter or declares the JSON
+   pointers for `generic_json`; otherwise the provider adapter is selected from
+   each request shape and conflicting provider shapes fail closed. Both modes
+   forward canonical JSON bytes after the content passes screening or matches
+   a manifest, so downstream providers receive the content Airlock checked.
 2a. **Attestation provenance in the manifest.** Every manifest states how it
    was produced: `attestation: self_attested` (from `verify` on a caller-
    supplied request), `transmitted` (from `send`), or `gated` (from `gate`).
@@ -1570,7 +1596,7 @@ Lattice)**, projecting its exact `attestation_mode`, `achieved_claim`, and
    OpenAI APIs). Canonicalize user content cleanly during `wrap()` with lossless
    round-trip `unwrap()` so `al-1ay` (`REQUEST_UNBOUND`) verifies live wire
    payloads end-to-end.
-2. **Two explicit `airlock gate` modes (`al-cuh`, P1):**
+2. **Two explicit `airlock gate` modes (`al-cuh`, P1; runtime landed):**
    Interactive coding agents (`claude`, `codex`, `gemini`, Cursor) do not call
    `airlock assemble` before every turn. Split `airlock gate` into:
    - `--mode strict-manifest`: every POST must match a pre-verified manifest

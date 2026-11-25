@@ -47,6 +47,8 @@ struct PartialPolicy {
     forbidden_patterns: Option<Vec<ForbiddenPattern>>,
     derived_text_paths: Option<Vec<String>>,
     claim_levels: Option<Vec<crate::types::ClaimLevel>>,
+    protected_bloom_min_hits: Option<usize>,
+    allow_multimodal: Option<bool>,
     extends: Option<Vec<String>>,
 }
 
@@ -59,6 +61,10 @@ struct PolicyContent<'a> {
     forbidden_patterns: &'a [ForbiddenPattern],
     derived_text_paths: &'a [String],
     claim_levels: &'a [crate::types::ClaimLevel],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protected_bloom_min_hits: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_multimodal: Option<bool>,
 }
 
 fn resolve_policy_file(
@@ -220,6 +226,8 @@ fn ensure_non_null_fields(
         "forbidden_patterns",
         "derived_text_paths",
         "claim_levels",
+        "protected_bloom_min_hits",
+        "allow_multimodal",
         "extends",
     ] {
         let key = serde_yaml::Value::String(field.to_string());
@@ -240,6 +248,12 @@ fn merge_partial_policy(resolved: &mut AirlockPolicy, partial: PartialPolicy) {
     }
     if let Some(version) = partial.version {
         resolved.version = version;
+    }
+    if let Some(min_hits) = partial.protected_bloom_min_hits {
+        resolved.protected_bloom_min_hits = Some(min_hits);
+    }
+    if let Some(allow_multimodal) = partial.allow_multimodal {
+        resolved.allow_multimodal = Some(allow_multimodal);
     }
     if let Some(allowed_keys) = partial.allowed_keys {
         for rule in allowed_keys {
@@ -299,6 +313,8 @@ pub fn resolved_policy_hash(policy: &AirlockPolicy) -> String {
         forbidden_patterns: &policy.forbidden_patterns,
         derived_text_paths: &policy.derived_text_paths,
         claim_levels: &policy.claim_levels,
+        protected_bloom_min_hits: policy.protected_bloom_min_hits,
+        allow_multimodal: policy.allow_multimodal,
     };
     let value = serde_json::to_value(content).expect("resolved policy should serialize");
     blake3_hash(&crate::output::canonical_json_bytes(
@@ -370,6 +386,14 @@ pub fn validate_policy(policy: &AirlockPolicy, path: &Path) -> Result<(), Refusa
             path,
             "claim_levels must contain at least one value",
             json!({ "field": "claim_levels" }),
+        ));
+    }
+
+    if policy.protected_bloom_min_hits == Some(0) {
+        return Err(policy_validation_error(
+            path,
+            "protected_bloom_min_hits must be greater than zero",
+            json!({ "field": "protected_bloom_min_hits" }),
         ));
     }
 
@@ -506,6 +530,8 @@ mod tests {
                 ClaimLevel::RawDocumentAbsent,
                 ClaimLevel::StrictTelemetryOnly,
             ],
+            protected_bloom_min_hits: None,
+            allow_multimodal: None,
             extends: Vec::new(),
             source_chain: Vec::new(),
         }
@@ -595,6 +621,19 @@ claim_levels:
 
         assert_eq!(refusal.refusal.code.as_str(), "E_BAD_POLICY");
         assert!(refusal.refusal.message.contains("regex compilation"));
+    }
+
+    #[test]
+    fn policy_proxy_options_are_hashed_and_zero_bloom_threshold_is_rejected() {
+        let mut base = sample_policy();
+        let original_hash = resolved_policy_hash(&base);
+        base.protected_bloom_min_hits = Some(8);
+        base.allow_multimodal = Some(true);
+        assert_ne!(resolved_policy_hash(&base), original_hash);
+
+        base.protected_bloom_min_hits = Some(0);
+        let refusal = validate_policy(&base, Path::new("policy.yaml")).unwrap_err();
+        assert!(refusal.refusal.message.contains("protected_bloom_min_hits"));
     }
 
     #[test]

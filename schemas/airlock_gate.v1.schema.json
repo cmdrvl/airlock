@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmdrvl.com/schemas/airlock_gate.v1.schema.json",
+  "title": "airlock gate v1 receipt and refusal schema",
+  "oneOf": [
+    { "$ref": "#/$defs/receipt" },
+    { "$ref": "#/$defs/refusal" }
+  ],
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_class", "rule_id"],
+      "properties": {
+        "artifact_class": { "type": "string", "minLength": 1 },
+        "rule_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gate_version", "mode", "achieved_claim", "request_hash", "blocked",
+        "findings", "timestamp"
+      ],
+      "properties": {
+        "gate_version": { "const": "airlock.gate.v1" },
+        "mode": { "enum": ["strict-manifest", "policy-proxy"] },
+        "achieved_claim": {
+          "enum": ["BOUNDARY_FAILED", "RAW_DOCUMENT_ABSENT", "STRICT_TELEMETRY_ONLY", "POLICY_SCREENED"]
+        },
+        "request_hash": { "$ref": "#/$defs/blake3" },
+        "response_hash": { "$ref": "#/$defs/blake3" },
+        "upstream_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "blocked": { "type": "boolean" },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "policy_id": { "type": "string" },
+        "policy_hash": { "$ref": "#/$defs/blake3" },
+        "matched_manifest_hash": { "$ref": "#/$defs/blake3" }
+      }
+    },
+    "refusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "code", "message", "findings"],
+      "properties": {
+        "schema_version": { "const": "airlock.gate_refusal.v1" },
+        "code": { "enum": ["BOUNDARY_FAILED", "UPSTREAM_UNAVAILABLE", "GATE_BUSY"] },
+        "message": { "type": "string" },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } }
+      }
+    },
+    "blake3": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    }
+  }
+}

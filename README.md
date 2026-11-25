@@ -81,6 +81,52 @@ airlock verify \
 airlock explain --manifest airlock_manifest.json
 ```
 
+### Egress gate
+
+`airlock gate` exposes a loopback HTTP proxy for SDK driven conversations. Select
+one of its two explicit evidence contracts:
+
+```bash
+# Screen each JSON turn against policy and detector packs.
+airlock gate --mode policy-proxy \
+  --policy rules/tournament_baseline.yaml \
+  --transport provider.json \
+  --upstream https://api.openai.com \
+  --protected-bloom protected-corpus.bdbl
+
+# Forward only request bodies whose canonical JSON hash appears in a bound verified manifest.
+airlock gate --mode strict-manifest \
+  --manifest-dir ./verified-manifests \
+  --upstream https://api.openai.com
+```
+
+The listener binds to loopback only. Policy-proxy mode uses the pinned shared
+`boundary-detectors` packs, policy denylists, and an optional opaque BDBL v1
+shingle filter from veil. Invalid, oversized, or unreadable Bloom files prevent
+startup; forbidden-policy, detector, and protected Bloom matches block the
+turn with HTTP 403 and a redacted gate receipt. Base64 media and remote image or
+document references are denied unless the policy explicitly sets
+`allow_multimodal: true`. The optional
+`protected_bloom_min_hits` policy field defaults to 8.
+Policy regexes also run against bounded base64 and hex decode candidates;
+detector packs recursively decode and rescan within their configured limits.
+
+Strict-manifest mode only accepts manifests with `binding_status: BOUND` and a
+supported achieved claim. The gate parses each request as JSON and hashes its canonical representation.
+After screening or a manifest match, it forwards those canonical JSON bytes so
+the upstream receives the content Airlock checked.
+
+The optional `--transport` declaration pins a provider adapter, or supplies
+the JSON pointers required by `generic_json`. Without it, the gate selects a
+provider adapter from each request's shape and refuses conflicting
+provider-specific shapes.
+
+Allowed responses stream through the proxy while Airlock hashes the bytes. Gate
+receipts are written under `airlock-gate/` by default, and witness records
+include the gate mode, claim, and request/response hashes. Authorization and
+provider key headers are forwarded but never included in receipts or witness
+records. Set `--no-witness` to opt out of the local ledger.
+
 ### Doctor
 
 ```bash
@@ -362,6 +408,29 @@ Refusals emit structured JSON to stdout with a `refusal.code` field
 | `EPISTEMIC_WITNESS` | Override the witness ledger path (default `~/.cmdrvl/state/witness/witness.jsonl`) |
 | `SOURCE_DATE_EPOCH` | Unix seconds. Pins the `verify` manifest `timestamp`, so identical inputs produce a byte-identical manifest. A set but malformed value is an `E_BAD_INPUT` refusal (exit 2, `detail.env`/`value`/`expected`), never a silent fallback to the clock. Witness records keep the real wall clock. |
 | `NO_COLOR`, `TERM=dumb` | Airlock does not colorize output. No surface emits an ANSI escape when piped, with or without these set, and `NO_COLOR` wins over `CLICOLOR_FORCE` (regression-tested). |
+
+## Transport adapters
+
+`verify --transport <PATH>` accepts an optional JSON declaration with an
+explicit adapter name and adapter-specific configuration. Without a declaration,
+Airlock detects the provider request shape. `generic_json` requires declared
+JSON pointers for system content and messages.
+
+| Adapter | System content | Message/content encoding | Required configuration |
+|---|---|---|---|
+| `openai_chat_completions` | `messages` entries with role `system` | `messages[].content`; structured content is deterministic compact JSON text | Request `model`; no declaration for detected requests |
+| `openai_responses` | Top-level `instructions` | `input` with message roles and text/image content parts | Request `model`; no declaration for detected requests |
+| `anthropic_messages` | Top-level `system` | `messages[].content` text and typed image/document/tool blocks | Request `model`; no declaration for detected requests |
+| `gemini_generate_content` | `systemInstruction.parts[].text` | `contents[].parts[]` text, inline data, or file references | Model resource in the request; no declaration for detected requests |
+| `generic_json` | Declared JSON pointer | Declared message-array pointer and content pointers | `--transport` declaration with `adapter: generic_json` and pointers |
+
+An explicit `adapter` in the transport declaration takes precedence over
+shape detection. Otherwise Airlock detects Gemini from top-level `contents`,
+OpenAI Responses from `input`, and Anthropic from `messages` when Anthropic-only
+fields such as `system` or `stop_sequences` are present. A `messages` request
+with only fields shared by Chat Completions and Anthropic defaults to Chat
+Completions; declare `anthropic_messages` when that shared shape is Anthropic.
+Conflicting provider-specific shapes refuse instead of choosing one.
 
 ## Proof-Carrying Prompt
 

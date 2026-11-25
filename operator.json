@@ -12,6 +12,8 @@
     "usage": [
       "airlock assemble --policy <POLICY> --input <FILE>... --out <PROMPT> --provenance-out <PROVENANCE>",
       "airlock verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out <MANIFEST> [--require-claim <LEVEL>]",
+      "airlock gate --mode policy-proxy --policy <POLICY> --upstream <ORIGIN> [--protected-bloom <FILE>]",
+      "airlock gate --mode strict-manifest --manifest-dir <DIR> --upstream <ORIGIN>",
       "airlock explain --manifest <MANIFEST> [--json]",
       "airlock witness <query|last|count> [filters] [--json]",
       "airlock doctor [--json]",
@@ -53,14 +55,33 @@
     },
     {
       "name": "verify",
-      "description": "Verify a request boundary against the policy and emit an airlock manifest, including for BOUNDARY_FAILED.",
+      "description": "Verify a request boundary against the policy and emit an airlock manifest, including for BOUNDARY_FAILED. Adapters: openai_chat_completions, openai_responses, anthropic_messages, gemini_generate_content, generic_json.",
       "options": [
         { "name": "policy", "flag": "--policy", "type": "file_path", "required": true, "description": "Boundary policy YAML used during assembly" },
         { "name": "prompt", "flag": "--prompt", "type": "file_path", "required": true, "description": "prompt_payload.json produced by airlock assemble" },
         { "name": "provenance", "flag": "--provenance", "type": "file_path", "required": true, "description": "prompt_provenance.json produced by airlock assemble" },
         { "name": "request", "flag": "--request", "type": "file_path", "required": true, "description": "Transport-wrapped model request JSON" },
+        { "name": "transport", "flag": "--transport", "type": "file_path", "description": "Optional adapter declaration; generic_json requires JSON pointers" },
         { "name": "out", "flag": "--out", "aliases": ["--output"], "type": "file_path", "required": true, "description": "Path to write airlock_manifest.json" },
         { "name": "require_claim", "flag": "--require-claim", "type": "string", "description": "Minimum acceptable claim: BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT or STRICT_TELEMETRY_ONLY" },
+        { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
+      ],
+      "read_only": false,
+      "records_witness": true
+    },
+    {
+      "name": "gate",
+      "description": "Run a loopback egress proxy in strict-manifest or policy-proxy mode; writes gate receipts and records witness hashes unless opted out.",
+      "options": [
+        { "name": "mode", "flag": "--mode", "type": "string", "required": true, "description": "strict-manifest or policy-proxy" },
+        { "name": "upstream", "flag": "--upstream", "type": "url", "required": true, "description": "Provider origin URL" },
+        { "name": "policy", "flag": "--policy", "type": "file_path", "description": "Boundary policy required by policy-proxy mode" },
+        { "name": "transport", "flag": "--transport", "type": "file_path", "description": "Optional provider selection or generic_json pointer declaration for policy-proxy mode" },
+        { "name": "manifest_dir", "flag": "--manifest-dir", "type": "directory_path", "description": "Pre-verified manifest directory required by strict-manifest mode" },
+        { "name": "protected_bloom", "flag": "--protected-bloom", "type": "file_path", "description": "Opaque BDBL v1 Bloom file exported by veil" },
+        { "name": "listen", "flag": "--listen", "type": "socket_address", "description": "Loopback listener address; default 127.0.0.1:8787" },
+        { "name": "timeout_seconds", "flag": "--timeout-seconds", "type": "integer", "description": "Upstream timeout from 1 to 600 seconds" },
+        { "name": "out_dir", "flag": "--out-dir", "type": "directory_path", "description": "Gate receipt directory; default airlock-gate" },
         { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
       ],
       "read_only": false,
@@ -142,9 +163,9 @@
   "side_effects": {
     "reads_files": true,
     "writes_files": true,
-    "network": false,
+    "network": true,
     "writes_witness": true,
-    "notes": "assemble and verify write the paths given by --out/--provenance-out and append one witness record unless --no-witness is set; explain, witness, doctor, capabilities and robot-docs are read-only and never open or create the witness ledger for writing."
+    "notes": "assemble and verify write the paths given by --out/--provenance-out; gate writes receipts under --out-dir and forwards through its loopback listener. These commands append witness records unless --no-witness is set; explain, witness, doctor, capabilities and robot-docs are read-only."
   },
   "pipeline": {
     "upstream": ["vacuum", "hash", "fingerprint", "benchmark", "assess"],
@@ -152,8 +173,8 @@
   },
   "witness": {
     "tool_name": "airlock",
-    "recording_commands": ["assemble", "verify"],
+    "recording_commands": ["assemble", "verify", "gate"],
     "non_recording_commands": ["explain", "doctor", "capabilities", "robot-docs", "witness"],
-    "outcomes": ["ASSEMBLED", "VERIFIED", "VERIFY_PARTIAL", "REFUSAL"]
+    "outcomes": ["ASSEMBLED", "VERIFIED", "VERIFY_PARTIAL", "GATED", "BOUNDARY_FAILED", "GATE_UPSTREAM_ERROR", "GATE_STREAM_INTERRUPTED", "REFUSAL"]
   }
 }

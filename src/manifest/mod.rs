@@ -1,3 +1,5 @@
+pub mod gate;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::OpenOptions;

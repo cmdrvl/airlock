@@ -44,10 +44,26 @@ pub struct AirlockPolicy {
     pub tabular_min_rows: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_multimodal: Option<bool>,
+    /// Local artifacts whose bytes the operator vouches for as tool results (al-210 ruling D3).
+    /// A tool result in a chained prompt is TOOL_RESULT, and keeps the strict claim reachable,
+    /// only if the blake3 hash of its content is listed here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_tool_results: Vec<DeclaredToolResult>,
     #[serde(skip)]
     pub extends: Vec<String>,
     #[serde(skip)]
     pub source_chain: Vec<PolicySource>,
+}
+
+impl AirlockPolicy {
+    /// True when `artifact_hash` (as `blake3_hash` writes it) is listed in
+    /// `declared_tool_results`. The assembler's label and `verify`'s claim both ask this one
+    /// question, so they cannot disagree about what "declared" means.
+    pub fn declares_tool_result(&self, artifact_hash: &str) -> bool {
+        self.declared_tool_results
+            .iter()
+            .any(|declared| declared.artifact_hash == artifact_hash)
+    }
 }
 
 /// One file in a resolved policy's depth-first inheritance chain.
@@ -65,6 +81,15 @@ pub struct AllowRule {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub boundary_class: Option<BoundaryClass>,
+}
+
+/// One declared tool-result artifact: the hash of its exact bytes, as `blake3_hash` writes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredToolResult {
+    pub artifact_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

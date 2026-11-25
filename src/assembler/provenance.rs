@@ -38,6 +38,10 @@ pub enum BoundaryClass {
     /// Text a model wrote in an earlier turn, admitted through `assemble --response` after the
     /// response's hash was checked against a gate receipt. Never assigned by a policy rule.
     ModelOutput,
+    /// The exact text of a local tool-result artifact whose blake3 hash the policy declares in
+    /// `declared_tool_results`. Assigned only by the chain path; a policy rule cannot name it.
+    /// A tool result whose hash is not declared is recorded as DERIVED_TEXT instead.
+    ToolResult,
     Forbidden,
 }
 
@@ -177,6 +181,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<BoundaryClass>("\"MODEL_OUTPUT\"").unwrap(),
             BoundaryClass::ModelOutput
+        );
+        assert_eq!(
+            serde_json::to_string(&BoundaryClass::ToolResult).unwrap(),
+            "\"TOOL_RESULT\""
+        );
+        assert_eq!(
+            serde_json::from_str::<BoundaryClass>("\"TOOL_RESULT\"").unwrap(),
+            BoundaryClass::ToolResult
         );
         assert_eq!(
             serde_json::to_string(&BoundaryClass::Forbidden).unwrap(),

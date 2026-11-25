@@ -6,7 +6,7 @@ pub use not_crossed::{
 };
 pub use provenance::{BoundaryClass, PromptProvenance, ProvenanceRecord, TransformationKind};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
@@ -41,16 +41,39 @@ pub struct AssemblyResult {
 /// content object has this key as carrying model output.
 pub const PRIOR_TURN_KEY: &str = "prior_turn";
 
+/// The key under [`PRIOR_TURN_KEY`] that carries tool results, beside `model_output`.
+pub const TOOL_RESULTS_KEY: &str = "tool_results";
+
 /// `policy_rule_id` on every provenance record copied from an earlier response.
 pub const MODEL_OUTPUT_RULE_ID: &str = "chain.model_output";
 
-/// An earlier turn's model output, ready to enter the prompt. The caller has already checked
-/// `response_hash` against a gate receipt; the assembler does not look at receipts.
+/// `policy_rule_id` on the content record of a tool result whose hash the policy declares.
+pub const TOOL_RESULT_RULE_ID: &str = "chain.tool_result";
+
+/// `policy_rule_id` on the content record of a tool result whose hash the policy does not
+/// declare. Such a result is recorded as DERIVED_TEXT and caps the claim in `verify`.
+pub const TOOL_RESULT_UNDECLARED_RULE_ID: &str = "chain.tool_result.undeclared";
+
+/// A tool result an earlier tool call produced, as the exact text of a local artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultArtifact {
+    /// The `tool_use` id in the response that this result answers.
+    pub tool_use_id: String,
+    /// The artifact's bytes, which must be UTF-8 text, embedded verbatim. So
+    /// `blake3_hash(content.as_bytes())` is the artifact's hash and `verify` can recompute it
+    /// from the prompt alone.
+    pub content: String,
+}
+
+/// An earlier turn's model output, ready to enter the prompt, with any tool results that
+/// answered its tool calls. The caller has already checked `response_hash` against a gate
+/// receipt; the assembler does not look at receipts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PriorTurn<'a> {
     /// `blake3:` hash of the response bytes the parts were read from.
     pub response_hash: &'a str,
     pub parts: &'a [ResponsePart],
+    pub tool_results: &'a [ToolResultArtifact],
 }
 
 pub fn assemble(
@@ -140,7 +163,7 @@ pub fn assemble_with_prior_turn(
     }
 
     if let Some(turn) = prior_turn {
-        admit_prior_turn(&mut user_content, &mut records, turn)?;
+        admit_prior_turn(&mut user_content, &mut records, turn, policy)?;
     }
 
     let user_content = sort_value(user_content);
@@ -219,11 +242,19 @@ fn classify_rule(
     }
 
     // MODEL_OUTPUT is assigned only by the chain path, after a response hash was checked against
-    // a gate receipt. A policy rule that could name it would let any input field carry the label.
-    if matches!(override_class, Some(BoundaryClass::ModelOutput)) {
+    // a gate receipt, and TOOL_RESULT only for an artifact the policy declares by hash. A policy
+    // rule that could name either would let any input field carry the label.
+    if let Some(chain_class @ (BoundaryClass::ModelOutput | BoundaryClass::ToolResult)) =
+        override_class
+    {
+        let name = if chain_class == BoundaryClass::ModelOutput {
+            "MODEL_OUTPUT"
+        } else {
+            "TOOL_RESULT"
+        };
         return Err(RefusalEnvelope::bad_policy(
-            "allow rule cannot assign the MODEL_OUTPUT boundary class",
-            json!({ "key_path": key_path, "boundary_class": "MODEL_OUTPUT" }),
+            format!("allow rule cannot assign the {name} boundary class"),
+            json!({ "key_path": key_path, "boundary_class": name }),
         ));
     }
 
@@ -356,7 +387,7 @@ fn record_value_fragments(
                     vec![BoundaryMode::Annotated, BoundaryMode::TelemetryOnly]
                 }
                 BoundaryClass::DerivedText => vec![BoundaryMode::Annotated],
-                BoundaryClass::ModelOutput => {
+                BoundaryClass::ModelOutput | BoundaryClass::ToolResult => {
                     vec![BoundaryMode::Annotated, BoundaryMode::TelemetryOnly]
                 }
                 BoundaryClass::Forbidden => Vec::new(),
@@ -367,11 +398,14 @@ fn record_value_fragments(
 
 /// Put an earlier turn's model output into the user message under [`PRIOR_TURN_KEY`] and record
 /// every leaf copied from the response as MODEL_OUTPUT. The `kind` tags are airlock's own
-/// template text, so they are recorded as template records like the roles.
+/// template text, so they are recorded as template records like the roles. Tool results go in
+/// beside it under [`TOOL_RESULTS_KEY`], only when there are any, so a turn without them is
+/// byte-identical to what it was before tool results existed.
 fn admit_prior_turn(
     user_content: &mut Value,
     records: &mut Vec<ProvenanceRecord>,
     turn: &PriorTurn<'_>,
+    policy: &AirlockPolicy,
 ) -> Result<(), RefusalEnvelope> {
     let base_path = format!("messages[1].content.{PRIOR_TURN_KEY}.model_output");
     let mut blocks = Vec::with_capacity(turn.parts.len());
@@ -436,17 +470,141 @@ fn admit_prior_turn(
         }
     }
 
+    let tool_results = admit_tool_results(records, turn, policy)?;
+
     let object = user_content.as_object_mut().ok_or_else(|| {
         RefusalEnvelope::internal(
             "user content must be an object to carry a prior turn",
             json!({ "key": PRIOR_TURN_KEY }),
         )
     })?;
-    object.insert(
-        PRIOR_TURN_KEY.to_string(),
-        json!({ "model_output": blocks }),
-    );
+    let mut prior_turn = Map::new();
+    prior_turn.insert("model_output".to_string(), Value::Array(blocks));
+    if !tool_results.is_empty() {
+        prior_turn.insert(TOOL_RESULTS_KEY.to_string(), Value::Array(tool_results));
+    }
+    object.insert(PRIOR_TURN_KEY.to_string(), Value::Object(prior_turn));
     Ok(())
+}
+
+/// Admit the tool results that answer the response's tool calls, in the response's order (never
+/// the order they were supplied in, so the prompt's bytes do not depend on flag order).
+///
+/// Every supplied result must answer a `tool_use` id the response contains, once. For each, the
+/// `tool_use_id` is a copy from the response (MODEL_OUTPUT) and the `content` is the artifact's
+/// exact text: TOOL_RESULT when the policy declares its blake3 hash, DERIVED_TEXT when it does not.
+/// That label is a record of what happened here. `verify` decides the claim from the prompt and
+/// the policy, never from these labels.
+fn admit_tool_results(
+    records: &mut Vec<ProvenanceRecord>,
+    turn: &PriorTurn<'_>,
+    policy: &AirlockPolicy,
+) -> Result<Vec<Value>, RefusalEnvelope> {
+    if turn.tool_results.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // The tool_use ids the response holds, in response order, each with where its id was read.
+    let mut known: Vec<(&str, &str)> = Vec::new();
+    for part in turn.parts {
+        if let ResponsePart::ToolUse {
+            id: Some(id),
+            id_source_path,
+            ..
+        } = part
+            && !known.iter().any(|(seen, _)| seen == id)
+        {
+            known.push((id.as_str(), id_source_path.as_str()));
+        }
+    }
+
+    let mut supplied: BTreeMap<&str, &ToolResultArtifact> = BTreeMap::new();
+    for result in turn.tool_results {
+        let id = result.tool_use_id.as_str();
+        if !known.iter().any(|(known_id, _)| *known_id == id) {
+            return Err(RefusalEnvelope::bad_input(
+                "tool result names a tool_use id that the response does not contain",
+                json!({
+                    "field": "tool_result.tool_use_id",
+                    "tool_use_id": id,
+                    "known_tool_use_ids": known.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                }),
+            ));
+        }
+        if supplied.insert(id, result).is_some() {
+            return Err(RefusalEnvelope::bad_input(
+                "two tool results answer the same tool_use id",
+                json!({ "field": "tool_result.tool_use_id", "tool_use_id": id }),
+            ));
+        }
+    }
+
+    let base_path = format!("messages[1].content.{PRIOR_TURN_KEY}.{TOOL_RESULTS_KEY}");
+    let mut blocks = Vec::with_capacity(supplied.len());
+    for (id, id_source_path) in known {
+        let Some(result) = supplied.get(id) else {
+            continue;
+        };
+        let block_path = format!("{base_path}[{}]", blocks.len());
+        records.push(synthetic_record(
+            &format!("{block_path}.kind"),
+            "tool_result",
+            &format!("template.{PRIOR_TURN_KEY}.kind"),
+            "chain.kind",
+        ));
+        record_value_fragments(
+            records,
+            &format!("{block_path}.tool_use_id"),
+            id_source_path,
+            &Value::String(id.to_string()),
+            turn.response_hash,
+            MODEL_OUTPUT_RULE_ID,
+            BoundaryClass::ModelOutput,
+        );
+        records.push(tool_result_content_record(
+            format!("{block_path}.content"),
+            id,
+            &result.content,
+            policy,
+        ));
+        blocks.push(json!({
+            "kind": "tool_result",
+            "tool_use_id": id,
+            "content": result.content,
+        }));
+    }
+    Ok(blocks)
+}
+
+fn tool_result_content_record(
+    prompt_path: String,
+    tool_use_id: &str,
+    content: &str,
+    policy: &AirlockPolicy,
+) -> ProvenanceRecord {
+    let artifact_hash = blake3_hash(content.as_bytes());
+    let declared = policy.declares_tool_result(&artifact_hash);
+    ProvenanceRecord {
+        prompt_path,
+        emitted_value_hash: blake3_hash(&canonical_json_bytes(&Value::String(content.to_string()))),
+        source_artifact_hash: artifact_hash,
+        source_path: format!("tool_result.{tool_use_id}"),
+        transformation_kind: TransformationKind::Copy,
+        policy_rule_id: if declared {
+            TOOL_RESULT_RULE_ID
+        } else {
+            TOOL_RESULT_UNDECLARED_RULE_ID
+        }
+        .to_string(),
+        boundary_class: if declared {
+            BoundaryClass::ToolResult
+        } else {
+            BoundaryClass::DerivedText
+        },
+        // The chain path admits the content in both modes; what an undeclared result costs is the
+        // claim, which `verify` caps.
+        admitted_boundary_modes: vec![BoundaryMode::Annotated, BoundaryMode::TelemetryOnly],
+    }
 }
 
 fn ensure_provenance_coverage(
@@ -571,6 +729,7 @@ mod tests {
             protected_bloom_min_hits: None,
             tabular_min_rows: None,
             allow_multimodal: None,
+            declared_tool_results: Vec::new(),
             extends: Vec::new(),
             source_chain: Vec::new(),
         }

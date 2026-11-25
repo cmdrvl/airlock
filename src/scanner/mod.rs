@@ -7,7 +7,8 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::adapter::Adapter;
-use crate::assembler::{PRIOR_TURN_KEY, PromptProvenance};
+use crate::assembler::{PRIOR_TURN_KEY, PromptProvenance, TOOL_RESULTS_KEY};
+use crate::hash::blake3_hash;
 use crate::output::canonical_json;
 use crate::policy::AirlockPolicy;
 use crate::refusal::RefusalEnvelope;
@@ -136,10 +137,13 @@ fn verify_with_adapter(
         BindingStatus::Unbound
     };
     let model_output = model_output_screen(policy, &model_output_paths, model_output_dirty);
-    let unscreened_model_output_paths = if model_output == ModelOutputScreen::Unscreened {
-        model_output_paths
-    } else {
-        Vec::new()
+    let chain_caps = ChainCaps {
+        unscreened_model_output_paths: if model_output == ModelOutputScreen::Unscreened {
+            model_output_paths
+        } else {
+            Vec::new()
+        },
+        undeclared_tool_result_paths: undeclared_tool_result_paths(policy, prompt_payload),
     };
     let achieved_claim = derive_claim(
         raw_document_present,
@@ -148,6 +152,7 @@ fn verify_with_adapter(
         boundary_mode,
         !detector_blocking_paths.is_empty(),
         model_output,
+        !chain_caps.undeclared_tool_result_paths.is_empty(),
     );
     let blocked_reasons = derive_blocked_reasons(
         achieved_claim,
@@ -156,7 +161,7 @@ fn verify_with_adapter(
         &detector_blocking_paths,
         &derived_text_paths,
         &binding_paths,
-        &unscreened_model_output_paths,
+        &chain_caps,
     );
 
     Ok(VerifyResult {
@@ -437,6 +442,90 @@ fn model_output_screen(
     }
 }
 
+/// The tool results in a prompt that the policy does not declare (al-210 ruling D3), as paths
+/// like `messages[1].content.prior_turn.tool_results[0]`.
+///
+/// Decided from the prompt and the policy alone, never from provenance labels. An entry is declared
+/// only if it is exactly `{kind: "tool_result", tool_use_id, content}` with string values and the
+/// blake3 hash of `content` is in the policy's `declared_tool_results`. A malformed entry, or a
+/// `tool_results` that is not an array, counts as undeclared: it cannot be matched to an artifact.
+fn undeclared_tool_result_paths(policy: &AirlockPolicy, prompt_payload: &Value) -> Vec<String> {
+    let mut undeclared = Vec::new();
+    let Some(messages) = prompt_payload.get("messages").and_then(Value::as_array) else {
+        return undeclared;
+    };
+    for (index, message) in messages.iter().enumerate() {
+        let Some(results) = message
+            .get("content")
+            .and_then(Value::as_object)
+            .and_then(|content| content.get(PRIOR_TURN_KEY))
+            .and_then(Value::as_object)
+            .and_then(|prior_turn| prior_turn.get(TOOL_RESULTS_KEY))
+        else {
+            continue;
+        };
+        let base = format!("messages[{index}].content.{PRIOR_TURN_KEY}.{TOOL_RESULTS_KEY}");
+        let Some(entries) = results.as_array() else {
+            undeclared.push(base);
+            continue;
+        };
+        for (entry_index, entry) in entries.iter().enumerate() {
+            if !tool_result_is_declared(policy, entry) {
+                undeclared.push(format!("{base}[{entry_index}]"));
+            }
+        }
+    }
+    undeclared
+}
+
+fn tool_result_is_declared(policy: &AirlockPolicy, entry: &Value) -> bool {
+    let Some(object) = entry.as_object() else {
+        return false;
+    };
+    object.len() == 3
+        && object.get("kind").and_then(Value::as_str) == Some("tool_result")
+        && object.get("tool_use_id").is_some_and(Value::is_string)
+        && object
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| policy.declares_tool_result(&blake3_hash(content.as_bytes())))
+}
+
+/// What an earlier turn in the prompt costs the claim, with where it sits. Each list is empty
+/// when that part of the chain is absent or earned its place.
+struct ChainCaps {
+    /// Model output that crossed without the D2(b) screen.
+    unscreened_model_output_paths: Vec<String>,
+    /// Tool results whose hash the policy does not declare (D3).
+    undeclared_tool_result_paths: Vec<String>,
+}
+
+impl ChainCaps {
+    fn is_empty(&self) -> bool {
+        self.unscreened_model_output_paths.is_empty()
+            && self.undeclared_tool_result_paths.is_empty()
+    }
+
+    /// One reason naming every cap in force, with every offending path.
+    fn explanation(&self) -> (String, Vec<String>) {
+        let mut reasons = Vec::new();
+        let mut paths = Vec::new();
+        if !self.unscreened_model_output_paths.is_empty() {
+            reasons.push(
+                "model output from an earlier turn crossed without a clean screen: the policy needs a blocking detector pack and no detector may report a hit in it",
+            );
+            paths.extend(self.unscreened_model_output_paths.iter().cloned());
+        }
+        if !self.undeclared_tool_result_paths.is_empty() {
+            reasons.push(
+                "a tool result from an earlier turn is not a declared artifact: its blake3 hash is not listed in the policy's declared_tool_results",
+            );
+            paths.extend(self.undeclared_tool_result_paths.iter().cloned());
+        }
+        (reasons.join("; "), paths)
+    }
+}
+
 fn derive_claim(
     raw_document_present: bool,
     filing_derived_text_present: bool,
@@ -444,12 +533,16 @@ fn derive_claim(
     boundary_mode: BoundaryMode,
     detector_blocked: bool,
     model_output: ModelOutputScreen,
+    tool_result_undeclared: bool,
 ) -> ClaimLevel {
     if raw_document_present || binding_status == BindingStatus::Unbound || detector_blocked {
         return ClaimLevel::BoundaryFailed;
     }
 
-    if filing_derived_text_present || model_output == ModelOutputScreen::Unscreened {
+    if filing_derived_text_present
+        || model_output == ModelOutputScreen::Unscreened
+        || tool_result_undeclared
+    {
         return ClaimLevel::RawDocumentAbsent;
     }
 
@@ -466,7 +559,7 @@ fn derive_blocked_reasons(
     detector_paths: &[String],
     derived_text_paths: &[String],
     binding_paths: &[String],
-    unscreened_model_output_paths: &[String],
+    chain_caps: &ChainCaps,
 ) -> Vec<BlockedReason> {
     let mut blocked_reasons = Vec::new();
     let mut sensitive_paths = forbidden_paths.to_vec();
@@ -507,7 +600,7 @@ fn derive_blocked_reasons(
                 boundary_mode,
                 forbidden_paths,
                 derived_text_paths,
-                unscreened_model_output_paths,
+                chain_caps,
             )
         };
         blocked_reasons.push(BlockedReason {
@@ -534,7 +627,7 @@ fn strict_telemetry_block(
     boundary_mode: BoundaryMode,
     forbidden_paths: &[String],
     derived_text_paths: &[String],
-    unscreened_model_output_paths: &[String],
+    chain_caps: &ChainCaps,
 ) -> (String, Vec<String>) {
     if !forbidden_paths.is_empty() {
         return (
@@ -550,11 +643,8 @@ fn strict_telemetry_block(
         );
     }
 
-    if !unscreened_model_output_paths.is_empty() {
-        return (
-            "model output from an earlier turn crossed without a clean screen: the policy needs a blocking detector pack and no detector may report a hit in it".to_string(),
-            unscreened_model_output_paths.to_vec(),
-        );
+    if !chain_caps.is_empty() {
+        return chain_caps.explanation();
     }
 
     match boundary_mode {
@@ -751,6 +841,7 @@ mod tests {
             protected_bloom_min_hits: None,
             tabular_min_rows: None,
             allow_multimodal: None,
+            declared_tool_results: Vec::new(),
             extends: Vec::new(),
             source_chain: Vec::new(),
         }

@@ -1,6 +1,8 @@
 pub mod types;
 
-pub use types::{AirlockPolicy, AllowRule, DetectorPack, ForbiddenPattern, PolicySource};
+pub use types::{
+    AirlockPolicy, AllowRule, DeclaredToolResult, DetectorPack, ForbiddenPattern, PolicySource,
+};
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -52,6 +54,7 @@ struct PartialPolicy {
     protected_bloom_min_hits: Option<usize>,
     tabular_min_rows: Option<usize>,
     allow_multimodal: Option<bool>,
+    declared_tool_results: Option<Vec<DeclaredToolResult>>,
     extends: Option<Vec<String>>,
 }
 
@@ -74,6 +77,8 @@ struct PolicyContent<'a> {
     tabular_min_rows: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     allow_multimodal: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    declared_tool_results: Vec<DeclaredToolResult>,
 }
 
 fn resolve_policy_file(
@@ -240,6 +245,7 @@ fn ensure_non_null_fields(
         "protected_bloom_min_hits",
         "tabular_min_rows",
         "allow_multimodal",
+        "declared_tool_results",
         "extends",
     ] {
         let key = serde_yaml::Value::String(field.to_string());
@@ -283,6 +289,19 @@ fn merge_partial_policy(resolved: &mut AirlockPolicy, partial: PartialPolicy) {
     }
     if let Some(allow_multimodal) = partial.allow_multimodal {
         resolved.allow_multimodal = Some(allow_multimodal);
+    }
+    if let Some(declared) = partial.declared_tool_results {
+        for entry in declared {
+            if let Some(existing) = resolved
+                .declared_tool_results
+                .iter_mut()
+                .find(|existing| existing.artifact_hash == entry.artifact_hash)
+            {
+                *existing = entry;
+            } else {
+                resolved.declared_tool_results.push(entry);
+            }
+        }
     }
     if let Some(allowed_keys) = partial.allowed_keys {
         for rule in allowed_keys {
@@ -338,6 +357,10 @@ pub fn resolved_policy_hash(policy: &AirlockPolicy) -> String {
     detectors.sort_unstable();
     let mut detectors_warn_only = policy.detectors_warn_only.clone();
     detectors_warn_only.sort_unstable();
+    // A set, not a sequence: the order the operator listed the artifacts in must not change the
+    // policy hash.
+    let mut declared_tool_results = policy.declared_tool_results.clone();
+    declared_tool_results.sort_by(|a, b| a.artifact_hash.cmp(&b.artifact_hash));
     let content = PolicyContent {
         policy_id: &policy.policy_id,
         version: &policy.version,
@@ -351,6 +374,7 @@ pub fn resolved_policy_hash(policy: &AirlockPolicy) -> String {
         protected_bloom_min_hits: policy.protected_bloom_min_hits,
         tabular_min_rows: policy.tabular_min_rows,
         allow_multimodal: policy.allow_multimodal,
+        declared_tool_results,
     };
     let value = serde_json::to_value(content).expect("resolved policy should serialize");
     blake3_hash(&crate::output::canonical_json_bytes(
@@ -438,6 +462,23 @@ pub fn validate_policy(policy: &AirlockPolicy, path: &Path) -> Result<(), Refusa
             path,
             "tabular_min_rows must be at least two",
             json!({ "field": "tabular_min_rows" }),
+        ));
+    }
+
+    if let Some((index, entry)) = policy
+        .declared_tool_results
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| !crate::hash::is_canonical_blake3_hash(&entry.artifact_hash))
+    {
+        return Err(policy_validation_error(
+            path,
+            "declared_tool_results artifact_hash must be blake3: followed by 64 lowercase hex digits",
+            json!({
+                "field": "declared_tool_results",
+                "index": index,
+                "artifact_hash": entry.artifact_hash,
+            }),
         ));
     }
 
@@ -591,6 +632,7 @@ mod tests {
             protected_bloom_min_hits: None,
             tabular_min_rows: None,
             allow_multimodal: None,
+            declared_tool_results: Vec::new(),
             extends: Vec::new(),
             source_chain: Vec::new(),
         }
@@ -721,6 +763,169 @@ claim_levels:
         policy.tabular_min_rows = Some(1);
         let refusal = validate_policy(&policy, Path::new("policy.yaml")).unwrap_err();
         assert!(refusal.refusal.message.contains("tabular_min_rows"));
+    }
+
+    fn declared(label: &str) -> DeclaredToolResult {
+        DeclaredToolResult {
+            artifact_hash: blake3_hash(label.as_bytes()),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn declared_tool_results_are_hashed_as_a_set_and_must_be_canonical_hashes() {
+        let mut policy = sample_policy();
+        let original_hash = resolved_policy_hash(&policy);
+
+        policy.declared_tool_results = vec![declared("artifact a")];
+        let one = resolved_policy_hash(&policy);
+        assert_ne!(
+            one, original_hash,
+            "declaring an artifact changes the policy hash"
+        );
+
+        policy.declared_tool_results = vec![declared("artifact a"), declared("artifact b")];
+        let ab = resolved_policy_hash(&policy);
+        assert_ne!(ab, one);
+        policy.declared_tool_results = vec![declared("artifact b"), declared("artifact a")];
+        assert_eq!(
+            resolved_policy_hash(&policy),
+            ab,
+            "the order the operator listed the artifacts in must not change the hash"
+        );
+
+        policy.declared_tool_results.clear();
+        assert_eq!(
+            resolved_policy_hash(&policy),
+            original_hash,
+            "an empty list hashes exactly like a policy that never had the key"
+        );
+
+        for bad in [
+            "",
+            "blake3:abc",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            &blake3_hash(b"x").to_uppercase(),
+        ] {
+            policy.declared_tool_results = vec![
+                declared("fine"),
+                DeclaredToolResult {
+                    artifact_hash: bad.to_string(),
+                    description: None,
+                },
+            ];
+            let refusal = validate_policy(&policy, Path::new("policy.yaml")).unwrap_err();
+            assert_eq!(refusal.refusal.code.as_str(), "E_BAD_POLICY", "{bad:?}");
+            assert!(
+                refusal.refusal.message.contains("declared_tool_results"),
+                "{bad:?}"
+            );
+            assert_eq!(refusal.refusal.detail["index"], 1, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn declared_tool_results_load_from_yaml_and_merge_across_extends() {
+        let dir = tempdir().unwrap();
+        let (a, b, c) = (
+            blake3_hash(b"artifact a"),
+            blake3_hash(b"artifact b"),
+            blake3_hash(b"artifact c"),
+        );
+        std::fs::write(
+            dir.path().join("parent.yaml"),
+            format!(
+                r#"
+policy_id: parent
+version: airlock.v0
+allowed_keys:
+  - key_path: family_id
+forbidden_keys: []
+forbidden_patterns: []
+derived_text_paths: []
+claim_levels:
+  - BOUNDARY_FAILED
+declared_tool_results:
+  - artifact_hash: {a}
+    description: from the parent
+  - artifact_hash: {b}
+    description: parent wording
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("child.yaml"),
+            format!(
+                r#"
+extends:
+  - parent.yaml
+declared_tool_results:
+  - artifact_hash: {b}
+    description: child wording
+  - artifact_hash: {c}
+"#
+            ),
+        )
+        .unwrap();
+
+        let resolved = load_policy(&dir.path().join("child.yaml")).unwrap();
+        let listed: Vec<(&str, Option<&str>)> = resolved
+            .declared_tool_results
+            .iter()
+            .map(|entry| (entry.artifact_hash.as_str(), entry.description.as_deref()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (a.as_str(), Some("from the parent")),
+                (b.as_str(), Some("child wording")),
+                (c.as_str(), None),
+            ],
+            "union by artifact_hash, the child wins on a repeated hash"
+        );
+    }
+
+    #[test]
+    fn declared_tool_results_reject_null_unknown_entry_keys_and_malformed_hashes_at_load() {
+        let dir = tempdir().unwrap();
+        let header = r#"
+policy_id: p
+version: airlock.v0
+allowed_keys:
+  - key_path: family_id
+forbidden_keys: []
+forbidden_patterns: []
+derived_text_paths: []
+claim_levels:
+  - BOUNDARY_FAILED
+"#;
+        let cases = [
+            ("declared_tool_results:\n", "must not be null"),
+            (
+                "declared_tool_results:\n  - artifact_hash: blake3:00\n",
+                "declared_tool_results artifact_hash",
+            ),
+            (
+                "declared_tool_results:\n  - artifact_hash: x\n    tool: lineage_lookup\n",
+                "schema validation",
+            ),
+            (
+                "declared_tool_results:\n  - description: no hash\n",
+                "schema validation",
+            ),
+        ];
+        for (index, (tail, expected)) in cases.into_iter().enumerate() {
+            let path = dir.path().join(format!("case{index}.yaml"));
+            std::fs::write(&path, format!("{header}{tail}")).unwrap();
+            let refusal = load_policy(&path).unwrap_err();
+            assert_eq!(refusal.refusal.code.as_str(), "E_BAD_POLICY", "{tail}");
+            assert!(
+                refusal.refusal.message.contains(expected),
+                "{tail}: {}",
+                refusal.refusal.message
+            );
+        }
     }
 
     #[test]

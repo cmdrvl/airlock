@@ -8,7 +8,7 @@
 
 use serde_json::{Value, json};
 
-use crate::hash::blake3_hash;
+use crate::hash::{blake3_hash, is_canonical_blake3_hash};
 use crate::refusal::RefusalEnvelope;
 
 /// The only receipt version this module reads.
@@ -28,13 +28,6 @@ fn bad_receipt(message: &str, field: &str) -> RefusalEnvelope {
         message.to_string(),
         json!({ "field": format!("prior_receipt.{field}") }),
     )
-}
-
-/// True for `blake3:` followed by 64 lowercase hex digits.
-fn is_blake3_hash(text: &str) -> bool {
-    text.strip_prefix("blake3:").is_some_and(|hex| {
-        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    })
 }
 
 /// Check that `receipt` records exactly the response `response_bytes`, for a request the gate
@@ -91,7 +84,7 @@ pub fn check_receipt(
     let matched_manifest_hash = object
         .get("matched_manifest_hash")
         .and_then(Value::as_str)
-        .filter(|hash| is_blake3_hash(hash))
+        .filter(|hash| is_canonical_blake3_hash(hash))
         .ok_or_else(|| {
             bad_receipt(
                 "prior receipt names no matched manifest; only a strict-manifest receipt can anchor a chain",

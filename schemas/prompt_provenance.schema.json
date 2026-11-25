@@ -65,6 +65,7 @@
               "TELEMETRY",
               "DERIVED_TEXT",
               "MODEL_OUTPUT",
+              "TOOL_RESULT",
               "FORBIDDEN"
             ]
           },

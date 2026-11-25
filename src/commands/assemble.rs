@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::adapter::{ResponsePart, unwrap_response};
-use crate::assembler::{self, InputArtifact, NotCrossedInventory, PriorTurn, PromptProvenance};
+use crate::assembler::{
+    self, InputArtifact, NotCrossedInventory, PriorTurn, PromptProvenance, ToolResultArtifact,
+};
 use crate::chain::check_receipt;
 use crate::cli::{AssembleArgs, VERIFY_PASS};
 use crate::hash::{blake3_hash, jcs};
@@ -201,6 +203,7 @@ fn load_input_artifacts(
 struct LoadedPriorTurn {
     response_hash: String,
     parts: Vec<ResponsePart>,
+    tool_results: Vec<ToolResultArtifact>,
 }
 
 impl LoadedPriorTurn {
@@ -208,8 +211,62 @@ impl LoadedPriorTurn {
         PriorTurn {
             response_hash: &self.response_hash,
             parts: &self.parts,
+            tool_results: &self.tool_results,
         }
     }
+}
+
+/// Split `TOOL_USE_ID=PATH` at the first `=` (ids never contain one; paths may).
+fn parse_tool_result_spec(spec: &str) -> Result<(&str, &Path), RefusalEnvelope> {
+    match spec.split_once('=') {
+        Some((id, path)) if !id.is_empty() && !path.is_empty() => Ok((id, Path::new(path))),
+        _ => Err(RefusalEnvelope::bad_input(
+            "--tool-result must be TOOL_USE_ID=PATH",
+            json!({ "field": "tool_result", "value": spec }),
+        )),
+    }
+}
+
+/// Read each `--tool-result` artifact. It must be UTF-8 text because it is embedded verbatim, so
+/// that its hash can be recomputed from the prompt alone.
+fn load_tool_results(
+    specs: &[String],
+    witness_inputs: &mut Vec<WitnessInput>,
+) -> Result<Vec<ToolResultArtifact>, RefusalEnvelope> {
+    let mut results = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let (tool_use_id, path) = parse_tool_result_spec(spec)?;
+        let raw = std::fs::read(path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                RefusalEnvelope::missing_file(path.display().to_string())
+            }
+            _ => RefusalEnvelope::bad_input(
+                "failed to read tool result file",
+                json!({ "path": path.display().to_string(), "error": error.to_string() }),
+            ),
+        })?;
+        let content_hash = blake3_hash(&raw);
+        let content = String::from_utf8(raw).map_err(|error| {
+            RefusalEnvelope::bad_input(
+                "tool result file must be valid UTF-8 text",
+                json!({
+                    "field": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "path": path.display().to_string(),
+                    "error": error.to_string(),
+                }),
+            )
+        })?;
+        witness_inputs.push(WitnessRecord::input(
+            path.display().to_string(),
+            content_hash,
+        ));
+        results.push(ToolResultArtifact {
+            tool_use_id: tool_use_id.to_string(),
+            content,
+        });
+    }
+    Ok(results)
 }
 
 /// Read `--prior-receipt` and `--response`, check the receipt against the response bytes, and
@@ -256,6 +313,7 @@ fn load_prior_turn(
         )
     })?;
     let parts = unwrap_response(adapter_name, &response)?;
+    let tool_results = load_tool_results(&args.tool_result, witness_inputs)?;
 
     witness_inputs.push(WitnessRecord::input(
         receipt_path.display().to_string(),
@@ -269,6 +327,7 @@ fn load_prior_turn(
     Ok(Some(LoadedPriorTurn {
         response_hash: checked.response_hash,
         parts,
+        tool_results,
     }))
 }
 
@@ -373,6 +432,7 @@ claim_levels:
             out: tempdir.join("prompt_payload.json"),
             provenance_out: tempdir.join("prompt_provenance.json"),
             not_crossed_out: None,
+            tool_result: Vec::new(),
             prior_receipt: None,
             response: None,
             response_adapter: None,

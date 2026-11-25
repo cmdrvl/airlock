@@ -128,6 +128,26 @@
       "type": "boolean",
       "default": false,
       "description": "Allow image and document attachments through policy-proxy mode. Omitted values deny attachments."
+    },
+    "declared_tool_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "artifact_hash": {
+            "type": "string",
+            "pattern": "^blake3:[0-9a-f]{64}$"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_hash"
+        ]
+      },
+      "description": "Local artifacts the operator vouches for as tool results. A tool result in a chained prompt keeps the strict claim reachable only if the blake3 hash of its exact content is listed here; otherwise it caps the claim at RAW_DOCUMENT_ABSENT. Older airlock versions refuse a policy that uses this key."
     }
   },
   "if": {

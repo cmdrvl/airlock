@@ -23,8 +23,9 @@ use std::time::{Duration, Instant};
 use airlock::adapter::{
     Adapter, AnthropicMessagesAdapter, OpenAiResponsesAdapter, TransportConfig,
 };
-use airlock::hash::blake3_hash;
+use airlock::hash::{blake3_hash, jcs_blake3_hash};
 use assert_cmd::Command;
+use jsonschema::validator_for;
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use tiny_http::{Response, Server};
@@ -108,6 +109,8 @@ struct Chain {
     adapter: String,
     response: PathBuf,
     receipt: PathBuf,
+    /// Raw `--tool-result` values, `TOOL_USE_ID=PATH`.
+    tool_results: Vec<String>,
 }
 
 struct Assembled {
@@ -167,6 +170,7 @@ impl Work {
                 &format!("{stem}.receipt.json"),
                 &serde_json::to_vec(&receipt_for(response)).expect("serialize receipt"),
             ),
+            tool_results: Vec::new(),
         }
     }
 
@@ -193,6 +197,9 @@ impl Work {
                 .arg("--response")
                 .arg(&chain.response)
                 .args(["--response-adapter", &chain.adapter]);
+            for spec in &chain.tool_results {
+                command.args(["--tool-result", spec]);
+            }
         }
         Assembled {
             output: command.output().expect("run assemble"),
@@ -1182,6 +1189,7 @@ fn a_receipt_the_real_gate_wrote_anchors_the_chain() {
         adapter: ANTHROPIC.to_owned(),
         response: response_path,
         receipt: receipt_path,
+        tool_results: Vec::new(),
     };
     let turn1 = work.assemble(&policy, "TELEMETRY_ONLY", "turn1", Some(&chain));
     assert_eq!(
@@ -1200,4 +1208,855 @@ fn a_receipt_the_real_gate_wrote_anchors_the_chain() {
     );
     let observed = work.verify(&policy, &turn1, "turn1");
     assert_eq!(observed.claim, "STRICT_TELEMETRY_ONLY", "{observed:?}");
+}
+
+// --- tool results (al-210 D-b) --------------------------------------------------------------
+
+/// A tool-result artifact with a non-ASCII character and a trailing newline, so a passing test
+/// shows the bytes crossed verbatim: no trimming, no normalization.
+const TOOL_ARTIFACT: &str = "{\"family_id\":\"F-17\",\"lineage\":[\"F-3\",\"F-9\"],\"depth\":2,\"note\":\"café lineage\"}\n";
+const PRIOR_TURN_PATH: &str = "messages[1].content.prior_turn";
+const TOOL_RESULTS_PATH: &str = "messages[1].content.prior_turn.tool_results";
+const TOOL_RESULT_POINTER: &str = "/messages/1/content/prior_turn/tool_results/0";
+
+/// The `tool_use` id in the response fixture for `adapter`.
+fn call_id(adapter: &str) -> &'static str {
+    match adapter {
+        OPENAI => "call_fx_0001",
+        _ => "toolu_fx_0001",
+    }
+}
+
+/// Where that id sits in the response fixture.
+fn call_id_source(adapter: &str) -> &'static str {
+    match adapter {
+        OPENAI => "output[2].call_id",
+        _ => "content[2].id",
+    }
+}
+
+/// `declared_tool_results` YAML for these artifacts' exact texts.
+fn declaring(artifacts: &[&str]) -> String {
+    let mut yaml = String::from("declared_tool_results:\n");
+    for artifact in artifacts {
+        yaml.push_str(&format!(
+            "  - artifact_hash: {}\n    description: test artifact\n",
+            blake3_hash(artifact.as_bytes())
+        ));
+    }
+    yaml
+}
+
+impl Work {
+    /// A chain whose response's tool call is answered by `artifact`.
+    fn chain_with_tool_result(&self, adapter: &str, stem: &str, artifact: &str) -> Chain {
+        let mut chain = self.chain(adapter, &response_bytes(adapter, |_| {}), stem);
+        let path = self.write(&format!("{stem}.tool.txt"), artifact.as_bytes());
+        chain
+            .tool_results
+            .push(format!("{}={}", call_id(adapter), path.display()));
+        chain
+    }
+
+    /// Assemble `chain` in TELEMETRY_ONLY under `policy`, requiring success.
+    fn assemble_chain(&self, policy: &Path, stem: &str, chain: &Chain) -> Assembled {
+        let assembled = self.assemble(policy, "TELEMETRY_ONLY", stem, Some(chain));
+        assert_eq!(
+            assembled.output.status.code(),
+            Some(0),
+            "assemble refused: {}",
+            String::from_utf8_lossy(&assembled.output.stdout)
+        );
+        assembled
+    }
+}
+
+fn record_at(records: &[Value], prompt_path: &str) -> Value {
+    records
+        .iter()
+        .find(|record| record["prompt_path"] == prompt_path)
+        .cloned()
+        .unwrap_or_else(|| panic!("no provenance record for {prompt_path}"))
+}
+
+fn provenance_schema() -> jsonschema::Validator {
+    validator_for(&read_json(&repo("schemas/prompt_provenance.schema.json")))
+        .expect("compile the provenance schema")
+}
+
+#[test]
+fn a_declared_tool_result_earns_strict_and_every_leaf_has_a_record() {
+    for adapter in ADAPTERS {
+        let work = Work::new();
+        let policy = work.policy(
+            "p.yaml",
+            &format!("{ALL_PACKS}{}", declaring(&[TOOL_ARTIFACT])),
+        );
+        let chain = work.chain_with_tool_result(adapter, "t", TOOL_ARTIFACT);
+        let assembled = work.assemble_chain(&policy, "t", &chain);
+
+        assert_eq!(
+            read_json(&assembled.prompt)["messages"][1]["content"]["prior_turn"]["tool_results"],
+            json!([{
+                "kind": "tool_result",
+                "tool_use_id": call_id(adapter),
+                "content": TOOL_ARTIFACT,
+            }]),
+            "{adapter}"
+        );
+
+        let records = model_output_records(&assembled.provenance);
+        let under_result = records
+            .iter()
+            .filter(|record| {
+                record["prompt_path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with(&format!("{TOOL_RESULTS_PATH}[0]")))
+            })
+            .count();
+        assert_eq!(under_result, 3, "{adapter}: kind, tool_use_id and content");
+
+        let kind = record_at(&records, &format!("{TOOL_RESULTS_PATH}[0].kind"));
+        assert_eq!(kind["boundary_class"], "TELEMETRY", "{adapter}");
+        assert_eq!(kind["source_path"], "template.prior_turn.kind", "{adapter}");
+        assert_eq!(kind["policy_rule_id"], "chain.kind", "{adapter}");
+
+        let id = record_at(&records, &format!("{TOOL_RESULTS_PATH}[0].tool_use_id"));
+        assert_eq!(id["boundary_class"], "MODEL_OUTPUT", "{adapter}");
+        assert_eq!(id["source_path"], call_id_source(adapter), "{adapter}");
+        assert_eq!(
+            id["source_artifact_hash"],
+            blake3_hash(&response_bytes(adapter, |_| {})).as_str(),
+            "{adapter}"
+        );
+
+        let content = record_at(&records, &format!("{TOOL_RESULTS_PATH}[0].content"));
+        assert_eq!(content["boundary_class"], "TOOL_RESULT", "{adapter}");
+        assert_eq!(content["policy_rule_id"], "chain.tool_result", "{adapter}");
+        assert_eq!(content["transformation_kind"], "COPY", "{adapter}");
+        assert_eq!(
+            content["source_artifact_hash"],
+            blake3_hash(TOOL_ARTIFACT.as_bytes()).as_str(),
+            "{adapter}: the hash of the artifact's exact bytes"
+        );
+        assert_eq!(
+            content["source_path"],
+            format!("tool_result.{}", call_id(adapter)).as_str(),
+            "{adapter}"
+        );
+        assert_eq!(
+            content["admitted_boundary_modes"],
+            json!(["ANNOTATED", "TELEMETRY_ONLY"]),
+            "{adapter}"
+        );
+
+        provenance_schema()
+            .validate(&read_json(&assembled.provenance))
+            .unwrap_or_else(|error| panic!("{adapter}: provenance fails its schema: {error}"));
+
+        let observed = work.verify(&policy, &assembled, "t");
+        assert_eq!(observed.exit, 0, "{adapter}: {observed:?}");
+        assert_eq!(
+            observed.claim, "STRICT_TELEMETRY_ONLY",
+            "{adapter}: {observed:?}"
+        );
+        assert!(
+            observed.findings.is_empty(),
+            "{adapter}: {:?}",
+            observed.findings
+        );
+    }
+}
+
+#[test]
+fn an_undeclared_tool_result_crosses_but_caps_the_claim_and_is_recorded_as_derived_text() {
+    for adapter in ADAPTERS {
+        // Two ways to be undeclared: the policy declares nothing, or declares some other artifact.
+        for (label, declared) in [
+            ("nothing declared", String::new()),
+            (
+                "another artifact declared",
+                declaring(&["some other artifact\n"]),
+            ),
+        ] {
+            let work = Work::new();
+            let policy = work.policy("p.yaml", &format!("{ALL_PACKS}{declared}"));
+            let chain = work.chain_with_tool_result(adapter, "t", TOOL_ARTIFACT);
+            let assembled = work.assemble_chain(&policy, "t", &chain);
+
+            assert_eq!(
+                read_json(&assembled.prompt)["messages"][1]["content"]["prior_turn"]["tool_results"]
+                    [0]["content"],
+                TOOL_ARTIFACT,
+                "{adapter} {label}: the content still crosses"
+            );
+            let records = model_output_records(&assembled.provenance);
+            let content = record_at(&records, &format!("{TOOL_RESULTS_PATH}[0].content"));
+            assert_eq!(
+                content["boundary_class"], "DERIVED_TEXT",
+                "{adapter} {label}"
+            );
+            assert_eq!(
+                content["policy_rule_id"], "chain.tool_result.undeclared",
+                "{adapter} {label}"
+            );
+            provenance_schema()
+                .validate(&read_json(&assembled.provenance))
+                .unwrap_or_else(|error| {
+                    panic!("{adapter} {label}: provenance fails its schema: {error}")
+                });
+
+            let observed = work.verify(&policy, &assembled, "t");
+            assert_eq!(observed.exit, 0, "{adapter} {label}: {observed:?}");
+            assert_eq!(
+                observed.claim, "RAW_DOCUMENT_ABSENT",
+                "{adapter} {label}: {observed:?}"
+            );
+            let reason = observed.strict_reason.clone().unwrap_or_default();
+            assert!(
+                reason.contains("not a declared artifact"),
+                "{adapter} {label}: {reason:?}"
+            );
+            assert!(
+                !reason.contains("model output from an earlier turn"),
+                "{adapter} {label}: the model output was screened clean, so only the tool result is blamed: {reason:?}"
+            );
+            assert_eq!(
+                observed.strict_paths,
+                vec![format!("{TOOL_RESULTS_PATH}[0]")],
+                "{adapter} {label}"
+            );
+        }
+    }
+}
+
+#[test]
+fn one_byte_of_difference_from_the_declared_artifact_makes_it_undeclared() {
+    for adapter in ADAPTERS {
+        let work = Work::new();
+        let policy = work.policy(
+            "p.yaml",
+            &format!("{ALL_PACKS}{}", declaring(&[TOOL_ARTIFACT])),
+        );
+
+        let declared_chain = work.chain_with_tool_result(adapter, "same", TOOL_ARTIFACT);
+        let declared = work.assemble_chain(&policy, "same", &declared_chain);
+        let control = work.verify(&policy, &declared, "same");
+        assert_eq!(
+            control.claim, "STRICT_TELEMETRY_ONLY",
+            "{adapter}: the declared bytes: {control:?}"
+        );
+
+        let altered_text = format!("{TOOL_ARTIFACT} ");
+        let altered_chain = work.chain_with_tool_result(adapter, "altered", &altered_text);
+        let altered = work.assemble_chain(&policy, "altered", &altered_chain);
+        let observed = work.verify(&policy, &altered, "altered");
+        assert_eq!(
+            observed.claim, "RAW_DOCUMENT_ABSENT",
+            "{adapter}: one trailing space: {observed:?}"
+        );
+        assert!(
+            observed
+                .strict_reason
+                .unwrap_or_default()
+                .contains("not a declared artifact"),
+            "{adapter}"
+        );
+    }
+}
+
+#[test]
+fn provenance_labels_do_not_decide_the_tool_result_claim() {
+    for adapter in ADAPTERS {
+        let content_path = format!("{TOOL_RESULTS_PATH}[0].content");
+
+        // An undeclared artifact whose content record is relabelled TOOL_RESULT is still capped.
+        let work = Work::new();
+        let policy = work.policy("p.yaml", ALL_PACKS);
+        let chain = work.chain_with_tool_result(adapter, "t", TOOL_ARTIFACT);
+        let assembled = work.assemble_chain(&policy, "t", &chain);
+        let mut provenance = read_json(&assembled.provenance);
+        let record = provenance["records"]
+            .as_array_mut()
+            .expect("records array")
+            .iter_mut()
+            .find(|record| record["prompt_path"] == content_path.as_str())
+            .expect("the content record");
+        record["boundary_class"] = json!("TOOL_RESULT");
+        record["policy_rule_id"] = json!("chain.tool_result");
+        let relabelled = work.write(
+            "relabelled.provenance.json",
+            &serde_json::to_vec(&provenance).expect("serialize"),
+        );
+        let request = json!({
+            "model": "gpt-5",
+            "messages": read_json(&assembled.prompt)["messages"].clone(),
+        });
+        let observed = work.verify_request(
+            &policy,
+            &assembled.prompt,
+            &relabelled,
+            &request,
+            "relabelled",
+        );
+        assert_eq!(
+            observed.claim, "RAW_DOCUMENT_ABSENT",
+            "{adapter}: a label cannot declare an artifact: {observed:?}"
+        );
+
+        // A declared artifact whose records are deleted keeps its claim: the gap is advisory.
+        let work = Work::new();
+        let policy = work.policy(
+            "p.yaml",
+            &format!("{ALL_PACKS}{}", declaring(&[TOOL_ARTIFACT])),
+        );
+        let chain = work.chain_with_tool_result(adapter, "t", TOOL_ARTIFACT);
+        let assembled = work.assemble_chain(&policy, "t", &chain);
+        let mut provenance = read_json(&assembled.provenance);
+        let records = provenance["records"].as_array_mut().expect("records array");
+        let before = records.len();
+        records.retain(|record| {
+            !record["prompt_path"]
+                .as_str()
+                .is_some_and(|path| path.starts_with(TOOL_RESULTS_PATH))
+        });
+        assert_eq!(
+            before - records.len(),
+            3,
+            "{adapter}: deletes the three records"
+        );
+        let stripped = work.write(
+            "stripped.provenance.json",
+            &serde_json::to_vec(&provenance).expect("serialize"),
+        );
+        let observed = work.verify_request(
+            &policy,
+            &assembled.prompt,
+            &stripped,
+            &json!({
+                "model": "gpt-5",
+                "messages": read_json(&assembled.prompt)["messages"].clone(),
+            }),
+            "stripped",
+        );
+        assert!(
+            observed.findings.contains("provenance_gap"),
+            "{adapter}: {:?}",
+            observed.findings
+        );
+        assert_eq!(
+            observed.claim, "STRICT_TELEMETRY_ONLY",
+            "{adapter}: labels are advisory in both directions: {observed:?}"
+        );
+    }
+}
+
+#[test]
+fn a_declared_tool_result_does_not_stand_in_for_the_detector_screen() {
+    for adapter in ADAPTERS {
+        // Declared, but the policy has no detector packs: the model output is unscreened, and that,
+        // not the tool result, is what the reason names.
+        let work = Work::new();
+        let policy = work.policy("p.yaml", &declaring(&[TOOL_ARTIFACT]));
+        let chain = work.chain_with_tool_result(adapter, "t", TOOL_ARTIFACT);
+        let assembled = work.assemble_chain(&policy, "t", &chain);
+        let observed = work.verify(&policy, &assembled, "t");
+        assert_eq!(
+            observed.claim, "RAW_DOCUMENT_ABSENT",
+            "{adapter}: {observed:?}"
+        );
+        let reason = observed.strict_reason.clone().unwrap_or_default();
+        assert!(
+            reason.contains("model output from an earlier turn"),
+            "{adapter}: {reason:?}"
+        );
+        assert!(
+            !reason.contains("tool result from an earlier turn"),
+            "{adapter}: {reason:?}"
+        );
+        assert_eq!(
+            observed.strict_paths,
+            vec![PRIOR_TURN_PATH.to_owned()],
+            "{adapter}"
+        );
+    }
+}
+
+#[test]
+fn one_reason_names_both_caps_when_both_apply() {
+    for adapter in ADAPTERS {
+        let work = Work::new();
+        let policy = work.policy("p.yaml", "");
+        let chain = work.chain_with_tool_result(adapter, "t", TOOL_ARTIFACT);
+        let assembled = work.assemble_chain(&policy, "t", &chain);
+        let observed = work.verify(&policy, &assembled, "t");
+        assert_eq!(
+            observed.claim, "RAW_DOCUMENT_ABSENT",
+            "{adapter}: {observed:?}"
+        );
+        let reason = observed.strict_reason.clone().unwrap_or_default();
+        assert!(
+            reason.contains("model output from an earlier turn")
+                && reason.contains("not a declared artifact"),
+            "{adapter}: {reason:?}"
+        );
+        assert_eq!(
+            observed.strict_paths,
+            vec![
+                PRIOR_TURN_PATH.to_owned(),
+                format!("{TOOL_RESULTS_PATH}[0]")
+            ],
+            "{adapter}"
+        );
+    }
+}
+
+#[test]
+fn declaring_an_artifact_does_not_exempt_it_from_the_detectors() {
+    for adapter in ADAPTERS {
+        let leaky = format!("{{\"token\":\"{FAKE_AWS_KEY}\"}}\n");
+        let work = Work::new();
+        let policy = work.policy(
+            "p.yaml",
+            &format!("{ALL_PACKS}{}", declaring(&[leaky.as_str()])),
+        );
+        let chain = work.chain_with_tool_result(adapter, "t", &leaky);
+        let assembled = work.assemble_chain(&policy, "t", &chain);
+        let observed = work.verify(&policy, &assembled, "t");
+        assert_eq!(observed.exit, 1, "{adapter}: {observed:?}");
+        assert_eq!(observed.claim, "BOUNDARY_FAILED", "{adapter}");
+        assert!(
+            observed
+                .findings
+                .contains("DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY"),
+            "{adapter}: {:?}",
+            observed.findings
+        );
+    }
+}
+
+#[test]
+fn the_tool_result_claim_follows_the_prompt_not_how_it_was_made() {
+    type Edit = fn(&mut Value);
+    let cases: [(&str, Edit, String); 5] = [
+        (
+            "tool_results is not a list",
+            |p| {
+                set(
+                    p,
+                    "/messages/1/content/prior_turn/tool_results",
+                    json!("not a list"),
+                )
+            },
+            TOOL_RESULTS_PATH.to_owned(),
+        ),
+        (
+            "a smuggled key beside a declared content",
+            |p| p.pointer_mut(TOOL_RESULT_POINTER).expect("entry")["note"] = json!("smuggled"),
+            format!("{TOOL_RESULTS_PATH}[0]"),
+        ),
+        (
+            "the wrong kind",
+            |p| p.pointer_mut(TOOL_RESULT_POINTER).expect("entry")["kind"] = json!("text"),
+            format!("{TOOL_RESULTS_PATH}[0]"),
+        ),
+        (
+            "content edited after assembly",
+            |p| {
+                set(
+                    p,
+                    "/messages/1/content/prior_turn/tool_results/0/content",
+                    json!(format!("{TOOL_ARTIFACT}tampered")),
+                )
+            },
+            format!("{TOOL_RESULTS_PATH}[0]"),
+        ),
+        (
+            "an entry that is a bare string",
+            |p| set(p, TOOL_RESULT_POINTER, json!("a bare string")),
+            format!("{TOOL_RESULTS_PATH}[0]"),
+        ),
+    ];
+    for adapter in ADAPTERS {
+        let work = Work::new();
+        let policy = work.policy(
+            "p.yaml",
+            &format!("{ALL_PACKS}{}", declaring(&[TOOL_ARTIFACT])),
+        );
+        let chain = work.chain_with_tool_result(adapter, "t", TOOL_ARTIFACT);
+        let assembled = work.assemble_chain(&policy, "t", &chain);
+        let control = work.verify(&policy, &assembled, "control");
+        assert_eq!(
+            control.claim, "STRICT_TELEMETRY_ONLY",
+            "{adapter}: the unedited prompt: {control:?}"
+        );
+
+        for (index, (label, edit, expected_path)) in cases.iter().enumerate() {
+            let mut prompt = read_json(&assembled.prompt);
+            edit(&mut prompt);
+            // `verify` refuses a provenance whose prompt_payload_hash is not the prompt's, and
+            // that hash is no secret. So each case is the self-consistent pair anyone editing
+            // both files would produce: the edited prompt, and provenance carrying its hash.
+            let mut provenance = read_json(&assembled.provenance);
+            provenance["prompt_payload_hash"] =
+                json!(jcs_blake3_hash(&prompt).expect("hash the edited prompt"));
+            let prompt_path = work.write(
+                &format!("case{index}.prompt.json"),
+                &serde_json::to_vec(&prompt).expect("serialize"),
+            );
+            let provenance_path = work.write(
+                &format!("case{index}.provenance.json"),
+                &serde_json::to_vec(&provenance).expect("serialize"),
+            );
+            let request = json!({"model": "gpt-5", "messages": prompt["messages"].clone()});
+            let observed = work.verify_request(
+                &policy,
+                &prompt_path,
+                &provenance_path,
+                &request,
+                &format!("case{index}"),
+            );
+            assert_eq!(
+                observed.claim, "RAW_DOCUMENT_ABSENT",
+                "{adapter} {label}: {observed:?}"
+            );
+            assert!(
+                observed.strict_paths.contains(expected_path),
+                "{adapter} {label}: {:?}",
+                observed.strict_paths
+            );
+            let reason = observed.strict_reason.clone().unwrap_or_default();
+            assert!(
+                reason.contains("not a declared artifact"),
+                "{adapter} {label}: {reason:?}"
+            );
+        }
+    }
+}
+
+struct Refused<'a> {
+    label: &'a str,
+    specs: Vec<String>,
+    code: &'a str,
+    field: Option<&'a str>,
+}
+
+#[test]
+fn tool_results_that_cannot_be_admitted_are_refused_and_nothing_is_written() {
+    for adapter in ADAPTERS {
+        let id = call_id(adapter);
+        let work = Work::new();
+        let policy = work.policy("p.yaml", "");
+        let response = response_bytes(adapter, |_| {});
+        let good = work.write("good.tool.txt", TOOL_ARTIFACT.as_bytes());
+        let binary = work.write("binary.tool.bin", &[0xff, 0xfe, 0x00, 0x80]);
+        let missing = work.path("missing.tool.txt");
+        let good = good.display();
+        let cases = [
+            Refused {
+                label: "an id the response does not contain",
+                specs: vec![format!("toolu_nope={good}")],
+                code: "E_BAD_INPUT",
+                field: Some("tool_result.tool_use_id"),
+            },
+            Refused {
+                label: "the same id twice",
+                specs: vec![format!("{id}={good}"), format!("{id}={good}")],
+                code: "E_BAD_INPUT",
+                field: Some("tool_result.tool_use_id"),
+            },
+            Refused {
+                label: "a file that is not UTF-8",
+                specs: vec![format!("{id}={}", binary.display())],
+                code: "E_BAD_INPUT",
+                field: Some("tool_result"),
+            },
+            Refused {
+                label: "no equals sign",
+                specs: vec![id.to_owned()],
+                code: "E_BAD_INPUT",
+                field: Some("tool_result"),
+            },
+            Refused {
+                label: "an empty id",
+                specs: vec![format!("={good}")],
+                code: "E_BAD_INPUT",
+                field: Some("tool_result"),
+            },
+            Refused {
+                label: "an empty path",
+                specs: vec![format!("{id}=")],
+                code: "E_BAD_INPUT",
+                field: Some("tool_result"),
+            },
+            Refused {
+                label: "a file that does not exist",
+                specs: vec![format!("{id}={}", missing.display())],
+                code: "E_MISSING_FILE",
+                field: None,
+            },
+        ];
+        for case in cases {
+            let mut chain = work.chain(adapter, &response, "t");
+            chain.tool_results = case.specs;
+            let assembled = work.assemble(&policy, "TELEMETRY_ONLY", "t", Some(&chain));
+            assert_eq!(
+                assembled.output.status.code(),
+                Some(2),
+                "{adapter} {}",
+                case.label
+            );
+            let refusal = assembled.refusal();
+            assert_eq!(
+                refusal["refusal"]["code"], case.code,
+                "{adapter} {}",
+                case.label
+            );
+            if let Some(field) = case.field {
+                assert_eq!(
+                    refusal["refusal"]["detail"]["field"], field,
+                    "{adapter} {}",
+                    case.label
+                );
+            }
+            assert!(
+                !assembled.prompt.exists() && !assembled.provenance.exists(),
+                "{adapter} {}: nothing is written on refusal",
+                case.label
+            );
+        }
+
+        // The unknown-id refusal tells the operator which ids are valid.
+        let mut chain = work.chain(adapter, &response, "t");
+        chain.tool_results = vec![format!("toolu_nope={good}")];
+        let refusal = work
+            .assemble(&policy, "TELEMETRY_ONLY", "t", Some(&chain))
+            .refusal();
+        assert_eq!(
+            refusal["refusal"]["detail"]["known_tool_use_ids"],
+            json!([id]),
+            "{adapter}"
+        );
+    }
+}
+
+#[test]
+fn tool_result_comes_only_with_the_chain_flags() {
+    let work = Work::new();
+    let response = response_bytes(OPENAI, |_| {});
+    let chain = work.chain(OPENAI, &response, "t");
+    let artifact = work.write("a.tool.txt", TOOL_ARTIFACT.as_bytes());
+    let policy = work.policy("p.yaml", "");
+    let spec = format!("{}={}", call_id(OPENAI), artifact.display());
+    let receipt = chain.receipt.display().to_string();
+    let response_path = chain.response.display().to_string();
+    for (label, flags) in [
+        ("alone", vec!["--tool-result", spec.as_str()]),
+        (
+            "without the adapter",
+            vec![
+                "--tool-result",
+                spec.as_str(),
+                "--prior-receipt",
+                receipt.as_str(),
+                "--response",
+                response_path.as_str(),
+            ],
+        ),
+    ] {
+        let prompt = work.path("lone.prompt.json");
+        let output = Command::cargo_bin("airlock")
+            .expect("airlock binary")
+            .args(["assemble", "--policy"])
+            .arg(&policy)
+            .arg("--input")
+            .arg(repo("fixtures/annotated_mode/strategy_space.json"))
+            .arg("--out")
+            .arg(&prompt)
+            .arg("--provenance-out")
+            .arg(work.path("lone.provenance.json"))
+            .arg("--no-witness")
+            .args(&flags)
+            .output()
+            .expect("run assemble");
+        assert_ne!(
+            output.status.code(),
+            Some(0),
+            "{label} must not be accepted"
+        );
+        assert!(!prompt.exists(), "{label}: nothing written");
+    }
+}
+
+/// Add a second tool call to a response fixture.
+fn with_second_tool_call(adapter: &str, response: &mut Value) {
+    if adapter == OPENAI {
+        response["output"]
+            .as_array_mut()
+            .expect("output array")
+            .push(json!({
+                "type": "function_call",
+                "id": "fc_fx_0002",
+                "call_id": "call_fx_0002",
+                "name": "lineage_lookup",
+                "arguments": "{\"family_id\":\"F-3\",\"depth\":1}",
+                "status": "completed",
+            }));
+    } else {
+        response["content"]
+            .as_array_mut()
+            .expect("content array")
+            .push(json!({
+                "type": "tool_use",
+                "id": "toolu_fx_0002",
+                "name": "lineage_lookup",
+                "input": {"family_id": "F-3", "depth": 1},
+            }));
+    }
+}
+
+#[test]
+fn tool_results_follow_the_responses_order_not_the_flag_order() {
+    const SECOND_ARTIFACT: &str = "{\"family_id\":\"F-3\",\"lineage\":[],\"depth\":1}\n";
+    for adapter in ADAPTERS {
+        let work = Work::new();
+        let policy = work.policy(
+            "p.yaml",
+            &format!(
+                "{ALL_PACKS}{}",
+                declaring(&[TOOL_ARTIFACT, SECOND_ARTIFACT])
+            ),
+        );
+        let response = response_bytes(adapter, |r| with_second_tool_call(adapter, r));
+        let first_id = call_id(adapter);
+        let second_id = if adapter == OPENAI {
+            "call_fx_0002"
+        } else {
+            "toolu_fx_0002"
+        };
+        let first = work.write("first.tool.txt", TOOL_ARTIFACT.as_bytes());
+        let second = work.write("second.tool.txt", SECOND_ARTIFACT.as_bytes());
+        let first_spec = format!("{first_id}={}", first.display());
+        let second_spec = format!("{second_id}={}", second.display());
+
+        let mut forward = work.chain(adapter, &response, "fwd");
+        forward.tool_results = vec![first_spec.clone(), second_spec.clone()];
+        let mut reverse = work.chain(adapter, &response, "rev");
+        reverse.tool_results = vec![second_spec, first_spec];
+
+        let a = work.assemble_chain(&policy, "fwd", &forward);
+        let b = work.assemble_chain(&policy, "rev", &reverse);
+        let c = work.assemble_chain(&policy, "again", &forward);
+        for (label, other) in [("reversed flags", &b), ("same flags again", &c)] {
+            assert_eq!(
+                fs::read(&a.prompt).expect("read"),
+                fs::read(&other.prompt).expect("read"),
+                "{adapter} {label}: prompt bytes"
+            );
+            assert_eq!(
+                fs::read(&a.provenance).expect("read"),
+                fs::read(&other.provenance).expect("read"),
+                "{adapter} {label}: provenance bytes"
+            );
+        }
+
+        let results =
+            read_json(&a.prompt)["messages"][1]["content"]["prior_turn"]["tool_results"].clone();
+        assert_eq!(results[0]["tool_use_id"], first_id, "{adapter}");
+        assert_eq!(results[1]["tool_use_id"], second_id, "{adapter}");
+        assert_eq!(results[1]["content"], SECOND_ARTIFACT, "{adapter}");
+
+        let observed = work.verify(&policy, &a, "fwd");
+        assert_eq!(
+            observed.claim, "STRICT_TELEMETRY_ONLY",
+            "{adapter}: {observed:?}"
+        );
+    }
+}
+
+#[test]
+fn a_policy_cannot_assign_tool_result() {
+    let work = Work::new();
+    let policy = work.policy_with_rule(
+        "relabel.yaml",
+        "  - key_path: extra_note\n    boundary_class: TOOL_RESULT\n",
+    );
+    let assembled = work.assemble(&policy, "TELEMETRY_ONLY", "t", None);
+    assert_eq!(assembled.output.status.code(), Some(2));
+    let refusal = assembled.refusal();
+    assert_eq!(refusal["refusal"]["code"], "E_BAD_POLICY");
+    assert!(
+        refusal["refusal"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("TOOL_RESULT")),
+        "{refusal}"
+    );
+    assert!(!assembled.prompt.exists());
+}
+
+#[test]
+fn the_policy_schema_accepts_what_the_loader_accepts_for_declared_tool_results() {
+    let schema = validator_for(&read_json(&repo("schemas/airlock_policy.schema.json")))
+        .expect("compile the policy schema");
+    let work = Work::new();
+    let policy_path = work.policy(
+        "p.yaml",
+        &format!("{ALL_PACKS}{}", declaring(&[TOOL_ARTIFACT, "second\n"])),
+    );
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(&policy_path).expect("read policy")).expect("parse yaml");
+    let policy: Value = serde_json::to_value(yaml).expect("yaml as json");
+    schema
+        .validate(&policy)
+        .unwrap_or_else(|error| panic!("the schema rejects a policy the loader accepts: {error}"));
+
+    let with_entries = |entries: Value| {
+        let mut edited = policy.clone();
+        edited["declared_tool_results"] = entries;
+        edited
+    };
+    let good = blake3_hash(b"x");
+    let uppercase = good.to_uppercase();
+    for bad in [
+        json!([{"artifact_hash": "blake3:abc"}]),
+        json!([{"artifact_hash": uppercase}]),
+        json!([{"artifact_hash": good.replace("blake3:", "sha256:")}]),
+        json!([{"artifact_hash": good, "tool": "lineage_lookup"}]),
+        json!([{"description": "no hash"}]),
+    ] {
+        assert!(
+            !schema.is_valid(&with_entries(bad.clone())),
+            "the schema must reject {bad}"
+        );
+    }
+}
+
+#[test]
+fn the_adapters_restore_a_prompt_that_carries_tool_results_exactly() {
+    for adapter in ADAPTERS {
+        let work = Work::new();
+        let policy = work.policy(
+            "p.yaml",
+            &format!("{ALL_PACKS}{}", declaring(&[TOOL_ARTIFACT])),
+        );
+        let chain = work.chain_with_tool_result(adapter, "t", TOOL_ARTIFACT);
+        let assembled = work.assemble_chain(&policy, "t", &chain);
+        let prompt = read_json(&assembled.prompt);
+
+        let mut config = TransportConfig::new("model-under-test");
+        config.max_tokens = Some(64);
+        let restored = if adapter == OPENAI {
+            let wire = OpenAiResponsesAdapter.wrap(&prompt, &config).expect("wrap");
+            OpenAiResponsesAdapter.unwrap(&wire).expect("unwrap")
+        } else {
+            let wire = AnthropicMessagesAdapter
+                .wrap(&prompt, &config)
+                .expect("wrap");
+            AnthropicMessagesAdapter.unwrap(&wire).expect("unwrap")
+        };
+        assert_eq!(
+            restored["messages"], prompt["messages"],
+            "{adapter}: binding compares these, so they must be identical, newline and é included"
+        );
+    }
 }

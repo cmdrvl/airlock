@@ -220,6 +220,14 @@ pub struct AssembleArgs {
     )]
     pub response_adapter: Option<String>,
 
+    #[arg(
+        long = "tool-result",
+        value_name = "TOOL_USE_ID=PATH",
+        requires_all = ["prior_receipt", "response", "response_adapter"],
+        help = "A tool result that answers a tool call in --response (repeatable). PATH is a UTF-8 text artifact, embedded verbatim. The strict claim needs the policy's declared_tool_results to list the blake3 hash of its exact bytes; an undeclared tool result is admitted but caps the claim at RAW_DOCUMENT_ABSENT"
+    )]
+    pub tool_result: Vec<String>,
+
     #[arg(long = "no-witness", help = "Skip ambient witness ledger recording")]
     pub no_witness: bool,
 }

@@ -604,6 +604,7 @@ fn boundary_class_label(record: &crate::assembler::ProvenanceRecord) -> String {
         crate::assembler::BoundaryClass::Telemetry => "telemetry".to_string(),
         crate::assembler::BoundaryClass::DerivedText => "derived_text".to_string(),
         crate::assembler::BoundaryClass::ModelOutput => "model_output".to_string(),
+        crate::assembler::BoundaryClass::ToolResult => "tool_result".to_string(),
         crate::assembler::BoundaryClass::Forbidden => "forbidden".to_string(),
     }
 }
@@ -660,6 +661,7 @@ mod tests {
             protected_bloom_min_hits: None,
             tabular_min_rows: None,
             allow_multimodal: None,
+            declared_tool_results: Vec::new(),
             extends: Vec::new(),
             source_chain: Vec::new(),
         }

@@ -24,6 +24,16 @@ pub fn blake3_hash(data: &[u8]) -> String {
     format!("blake3:{}", hash.to_hex())
 }
 
+/// True for exactly what [`blake3_hash`] emits: `blake3:` followed by 64 lowercase hex digits.
+///
+/// Stricter than a bare hex check on purpose. Hashes are compared as strings, so an uppercase
+/// spelling of a real hash would never match and would be treated as a different hash.
+pub fn is_canonical_blake3_hash(text: &str) -> bool {
+    text.strip_prefix("blake3:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
 /// Compute a SHA-256 hash of the given bytes.
 ///
 /// Returns the format: `sha256:{hex}`.
@@ -66,6 +76,26 @@ mod tests {
         let a = blake3_hash(b"input one");
         let b = blake3_hash(b"input two");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn the_canonical_hash_check_accepts_what_blake3_hash_emits_and_nothing_looser() {
+        assert!(is_canonical_blake3_hash(&blake3_hash(b"anything")));
+        let good = blake3_hash(b"anything");
+        let hex = good.strip_prefix("blake3:").unwrap();
+        for bad in [
+            String::new(),
+            "blake3:".to_string(),
+            format!("blake3:{}", &hex[..63]),
+            format!("blake3:{hex}0"),
+            format!("blake3:{}", hex.to_uppercase()),
+            format!("BLAKE3:{hex}"),
+            format!("sha256:{hex}"),
+            format!("blake3:{}g", &hex[..63]),
+            format!(" blake3:{hex}"),
+        ] {
+            assert!(!is_canonical_blake3_hash(&bad), "{bad:?}");
+        }
     }
 
     #[test]

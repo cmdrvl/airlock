@@ -1,7 +1,7 @@
 //! Strict-manifest gate contract, exercised against the real `airlock gate` binary and a
 //! local mock origin: what is denied, with which refusal code, and what is recorded.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -872,4 +872,195 @@ fn policy_proxy_health_reports_the_enforced_policy() {
         })
     );
     assert_eq!(origin.count.load(Ordering::Acquire), 0);
+}
+
+fn receipt_paths(directory: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect()
+}
+
+/// Run `airlock explain` on a gate receipt; `--json` output is parsed, human output is returned
+/// as a string value.
+fn explain(receipt: &Path, json: bool) -> Value {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_airlock"));
+    command.args(["explain", "--manifest"]).arg(receipt);
+    if json {
+        command.arg("--json");
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "explain failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    if json {
+        serde_json::from_str(&stdout).unwrap()
+    } else {
+        Value::String(stdout)
+    }
+}
+
+#[test]
+fn explain_describes_real_gate_receipts() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin();
+    let receipts_dir = temp.path().join("receipts");
+    let witness_path = temp.path().join("witness.jsonl");
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &receipts_dir,
+        &witness_path,
+        &[],
+    );
+    let agent = client();
+    let pretty = serde_json::to_vec_pretty(&request).unwrap();
+    assert_eq!(post(&agent, gate.address, &pretty).0, 200);
+    assert_eq!(post(&agent, gate.address, br#"{"messages":[]}"#).0, 403);
+    assert_eq!(post(&agent, gate.address, b"{not json").0, 403);
+    wait_for_recorded(&receipts_dir, &witness_path, 3);
+    drop(gate);
+
+    let explanations: Vec<Value> = receipt_paths(&receipts_dir)
+        .iter()
+        .map(|path| explain(path, true))
+        .collect();
+    assert_eq!(explanations.len(), 3);
+    explanations
+        .iter()
+        .for_each(|explanation| assert_eq!(explanation["schema"], "airlock.explain_gate.v1"));
+    let with_decision = |decision: &str| -> Vec<&Value> {
+        explanations
+            .iter()
+            .filter(|explanation| explanation["decision"] == decision)
+            .collect()
+    };
+
+    let forwarded = with_decision("forwarded");
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0]["claim"]["achieved"], "STRICT_TELEMETRY_ONLY");
+    assert_eq!(forwarded[0]["request"]["bytes"], pretty.len());
+    assert_eq!(forwarded[0]["upstream"]["status"], 200);
+    assert_eq!(forwarded[0]["upstream"]["response_bytes"], 11);
+    assert!(forwarded[0]["matched_manifest_hash"].is_string());
+    assert_eq!(forwarded[0]["reasons"], json!([]));
+
+    let denied = with_decision("denied");
+    assert_eq!(denied.len(), 2);
+    let unmatched = denied
+        .iter()
+        .find(|explanation| explanation["request"]["hash"].is_string())
+        .expect("the unmatched request was hashed");
+    assert_eq!(
+        unmatched["reasons"][0]["rule_id"],
+        "REQUEST_MANIFEST_NOT_FOUND"
+    );
+    assert!(
+        unmatched["reasons"][0]["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("no verified manifest")
+    );
+    let malformed = denied
+        .iter()
+        .find(|explanation| explanation["request"]["hash"].is_null())
+        .expect("the malformed request never got a hash");
+    assert_eq!(malformed["request"]["bytes"], b"{not json".len());
+
+    // The human form of the forwarded receipt says so too.
+    let forwarded_path = receipt_paths(&receipts_dir)
+        .into_iter()
+        .find(|path| explain(path, true)["decision"] == "forwarded")
+        .unwrap();
+    let human = explain(&forwarded_path, false);
+    let human = human.as_str().unwrap();
+    assert!(human.contains("Decision: FORWARDED."), "{human}");
+    assert!(human.contains("Upstream response: HTTP 200"), "{human}");
+    assert!(human.contains("Response body: 11 bytes"), "{human}");
+}
+
+/// An origin that promises a 1000-byte body, sends ten bytes and hangs up.
+fn start_truncating_origin() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        let mut body = vec![0; content_length];
+        let _ = reader.read_exact(&mut body);
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n0123456789",
+        );
+        let _ = stream.flush();
+    });
+    address
+}
+
+#[test]
+fn response_cut_short_is_marked_interrupted_in_receipt_witness_and_explain() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let upstream = start_truncating_origin();
+    let receipts_dir = temp.path().join("receipts");
+    let witness_path = temp.path().join("witness.jsonl");
+    let gate = start_strict_gate(upstream, &manifest_dir, &receipts_dir, &witness_path, &[]);
+
+    // The client's view of the cut-off response does not matter here, only what was recorded.
+    // The gate does not end this client's response when the upstream cuts it short: the
+    // request stays open until the client gives up (al-3pz G14), so the client runs on its own
+    // thread and this test reads what the gate recorded instead of waiting on it.
+    let url = format!("http://{}/v1/chat/completions", gate.address);
+    let body = serde_json::to_vec(&request).unwrap();
+    let client_thread = thread::spawn(move || {
+        let _ = client()
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .send(body)
+            .map(|response| {
+                response
+                    .into_body()
+                    .into_reader()
+                    .read_to_end(&mut Vec::new())
+            });
+    });
+    let (receipts, witness) = wait_for_recorded(&receipts_dir, &witness_path, 1);
+    drop(gate);
+    client_thread.join().unwrap();
+
+    assert_eq!(receipts.len(), 1);
+    let receipt = &receipts[0];
+    assert_valid_gate_document(receipt);
+    assert_eq!(receipt["blocked"], false);
+    assert_eq!(receipt["upstream_status"], 200);
+    assert!(receipt["response_bytes"].as_u64().unwrap() < 1000);
+    assert_eq!(receipt["findings"][0]["rule_id"], "GATE_STREAM_INTERRUPTED");
+    assert!(
+        witness
+            .iter()
+            .any(|record| record["outcome"] == "GATE_STREAM_INTERRUPTED")
+    );
+
+    let explanation = explain(&receipt_paths(&receipts_dir)[0], true);
+    assert_eq!(explanation["decision"], "forwarded_interrupted");
+    assert_eq!(
+        explanation["reasons"][0]["explanation"],
+        "the response stream ended before it completed"
+    );
 }

@@ -6,7 +6,7 @@ use std::path::Path;
 use boundary_detectors::shingle_bloom::ShingleBloom;
 use boundary_detectors::{Pack, ScanConfig, Scanner};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::hash::blake3_hash;
@@ -17,7 +17,7 @@ pub const MAX_PROTECTED_BLOOM_BYTES: usize = 67_108_904;
 pub const DEFAULT_PROTECTED_BLOOM_MIN_HITS: usize = 8;
 const MAX_DECODED_BYTES: usize = MAX_GATE_REQUEST_BYTES * 4;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressFinding {
     pub artifact_class: String,
     pub rule_id: String,

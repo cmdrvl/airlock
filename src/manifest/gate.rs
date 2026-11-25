@@ -4,14 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{SecondsFormat, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::scanner::egress::EgressFinding;
 
 static GATE_RECEIPT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A configured limit that tripped, recorded on the receipt of the request it stopped.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateLimit {
     /// Which limit: `max_request_bytes` or `timeout_seconds`.
     pub kind: String,
@@ -40,7 +40,7 @@ impl GateLimit {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateReceipt {
     pub gate_version: String,
     pub mode: String,

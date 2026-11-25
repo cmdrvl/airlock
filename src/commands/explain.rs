@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use serde_json::{Value, json};
 
 use crate::cli::ExplainArgs;
+use crate::hash::blake3_hash;
 use crate::manifest::AirlockManifest;
+use crate::manifest::gate::GateReceipt;
 use crate::output::canonical_json;
 use crate::refusal::RefusalEnvelope;
 use crate::types::{BlockedReason, ClaimLevel, Finding};
@@ -34,6 +36,10 @@ fn run_with_writer(args: ExplainArgs, stdout: &mut impl Write) -> u8 {
         }
     };
 
+    if is_gate_receipt(&manifest_bytes) {
+        return explain_gate_receipt(&args, &manifest_bytes, stdout);
+    }
+
     let manifest: AirlockManifest = match serde_json::from_slice(&manifest_bytes) {
         Ok(manifest) => manifest,
         Err(err) => {
@@ -60,6 +66,229 @@ fn run_with_writer(args: ExplainArgs, stdout: &mut impl Write) -> u8 {
     let _ = stdout.write_all(b"\n");
     let _ = stdout.flush();
     0
+}
+
+const GATE_RECEIPT_VERSION: &str = "airlock.gate.v1";
+
+/// Gate receipts carry `gate_version`, which no Airlock manifest does.
+fn is_gate_receipt(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(bytes).is_ok_and(|value| value.get("gate_version").is_some())
+}
+
+fn explain_gate_receipt(args: &ExplainArgs, bytes: &[u8], stdout: &mut impl Write) -> u8 {
+    let receipt_ref = args.manifest.display().to_string();
+    let receipt: GateReceipt = match serde_json::from_slice(bytes) {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            return RefusalEnvelope::bad_manifest(
+                "gate receipt file is not valid airlock.gate.v1 JSON",
+                json!({ "path": receipt_ref, "error": err.to_string() }),
+            )
+            .write_to(stdout);
+        }
+    };
+    if receipt.gate_version != GATE_RECEIPT_VERSION {
+        return RefusalEnvelope::bad_manifest(
+            "unsupported gate receipt version",
+            json!({ "path": receipt_ref, "gate_version": receipt.gate_version }),
+        )
+        .write_to(stdout);
+    }
+
+    let rendered = if args.json {
+        canonical_json(&json_gate_explanation(&receipt, &receipt_ref))
+    } else {
+        render_gate_receipt(&receipt)
+    };
+    let _ = stdout.write_all(rendered.as_bytes());
+    let _ = stdout.write_all(b"\n");
+    let _ = stdout.flush();
+    0
+}
+
+/// What the gate did with the request, read from the receipt alone.
+fn gate_decision(receipt: &GateReceipt) -> &'static str {
+    if receipt.blocked {
+        "denied"
+    } else if receipt
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "GATE_STREAM_INTERRUPTED")
+    {
+        "forwarded_interrupted"
+    } else if receipt.upstream_status.is_some() {
+        "forwarded"
+    } else {
+        "authorized_upstream_failed"
+    }
+}
+
+fn gate_decision_sentence(decision: &str) -> &'static str {
+    match decision {
+        "denied" => "DENIED. The gate did not forward this request.",
+        "forwarded" => "FORWARDED. The gate sent this request upstream and returned the response.",
+        "forwarded_interrupted" => {
+            "FORWARDED, RESPONSE INCOMPLETE. The request went upstream but the response stream ended early."
+        }
+        _ => {
+            "AUTHORIZED, NOT DELIVERED. The gate admitted this request but the upstream gave no response."
+        }
+    }
+}
+
+/// Why the gate recorded a finding, for the rules the gate itself raises. Detector rules from
+/// a policy-proxy scan carry their own ids and get no sentence here.
+fn gate_rule_explanation(rule_id: &str) -> Option<&'static str> {
+    Some(match rule_id {
+        "REQUEST_MANIFEST_NOT_FOUND" => {
+            "no verified manifest is bound to this request's canonical hash"
+        }
+        "REQUEST_CLAIM_BELOW_REQUIRED" => {
+            "the manifest bound to this request claims less than --require-claim asks for"
+        }
+        "REQUEST_SCAN_REFUSED" => {
+            "the request body could not be read, parsed or screened, or was over the size limit"
+        }
+        "INVALID_REQUEST_TARGET" => {
+            "the request target was not a plain path starting with a single /"
+        }
+        "MULTIMODAL_ATTACHMENT_BLOCKED" => {
+            "the request carries a media attachment or remote reference the policy does not allow"
+        }
+        "GATE_BUSY" => "the gate was at its concurrent request limit",
+        "UPSTREAM_TIMEOUT" => "the upstream did not answer within --timeout-seconds",
+        "UPSTREAM_UNAVAILABLE" => "the upstream could not be reached",
+        "GATE_STREAM_INTERRUPTED" => "the response stream ended before it completed",
+        _ => return None,
+    })
+}
+
+/// The request hash recorded when the gate refused before it had one.
+fn request_hash_if_computed(receipt: &GateReceipt) -> Option<&str> {
+    (receipt.request_hash != blake3_hash(b"unavailable")).then_some(receipt.request_hash.as_str())
+}
+
+fn json_gate_explanation(receipt: &GateReceipt, receipt_ref: &str) -> Value {
+    let reasons: Vec<Value> = receipt
+        .findings
+        .iter()
+        .map(|finding| {
+            json!({
+                "rule_id": finding.rule_id,
+                "artifact_class": finding.artifact_class,
+                "key_path": finding.key_path,
+                "explanation": gate_rule_explanation(&finding.rule_id),
+            })
+        })
+        .collect();
+    json!({
+        "schema": "airlock.explain_gate.v1",
+        "tool": "airlock",
+        "receipt_ref": receipt_ref,
+        "decision": gate_decision(receipt),
+        "mode": receipt.mode,
+        "claim": { "achieved": receipt.achieved_claim },
+        "request": {
+            "hash": request_hash_if_computed(receipt),
+            "bytes": receipt.request_bytes
+        },
+        "matched_manifest_hash": receipt.matched_manifest_hash,
+        "upstream": {
+            "status": receipt.upstream_status,
+            "response_hash": receipt.response_hash,
+            "response_bytes": receipt.response_bytes
+        },
+        "limit": receipt.limit,
+        "policy": { "id": receipt.policy_id, "hash": receipt.policy_hash },
+        "reasons": reasons,
+        "recorded_at": receipt.timestamp,
+        "next_commands": {
+            "human_explain": format!("airlock explain --manifest {receipt_ref}")
+        }
+    })
+}
+
+fn render_gate_receipt(receipt: &GateReceipt) -> String {
+    let mut output = String::new();
+
+    writeln!(&mut output, "AIRLOCK GATE").unwrap();
+    writeln!(&mut output).unwrap();
+    writeln!(
+        &mut output,
+        "Decision: {}",
+        gate_decision_sentence(gate_decision(receipt))
+    )
+    .unwrap();
+    writeln!(&mut output, "Mode: {}", receipt.mode).unwrap();
+    writeln!(&mut output, "Claim: {}", receipt.achieved_claim).unwrap();
+    writeln!(&mut output).unwrap();
+
+    match (request_hash_if_computed(receipt), receipt.request_bytes) {
+        (Some(hash), Some(bytes)) => {
+            writeln!(&mut output, "Request: {hash} ({bytes} bytes received)").unwrap()
+        }
+        (Some(hash), None) => writeln!(&mut output, "Request: {hash}").unwrap(),
+        (None, _) => writeln!(
+            &mut output,
+            "Request: no hash (the gate refused before it had one)"
+        )
+        .unwrap(),
+    }
+    if let Some(hash) = &receipt.matched_manifest_hash {
+        writeln!(&mut output, "Matched manifest: {hash}").unwrap();
+    }
+    if let Some(status) = receipt.upstream_status {
+        writeln!(&mut output, "Upstream response: HTTP {status}").unwrap();
+    }
+    if let (Some(bytes), Some(hash)) = (receipt.response_bytes, &receipt.response_hash) {
+        writeln!(&mut output, "Response body: {bytes} bytes, {hash}").unwrap();
+    }
+    if let Some(limit) = &receipt.limit {
+        match limit.observed {
+            Some(observed) => writeln!(
+                &mut output,
+                "Limit hit: {} {} (observed {observed})",
+                limit.kind, limit.limit
+            )
+            .unwrap(),
+            None => writeln!(&mut output, "Limit hit: {} {}", limit.kind, limit.limit).unwrap(),
+        }
+    }
+
+    if !receipt.findings.is_empty() {
+        writeln!(&mut output).unwrap();
+        writeln!(&mut output, "Findings:").unwrap();
+        for finding in &receipt.findings {
+            match &finding.key_path {
+                Some(path) => writeln!(
+                    &mut output,
+                    "  - {} [{}] at {path}",
+                    finding.rule_id, finding.artifact_class
+                )
+                .unwrap(),
+                None => writeln!(
+                    &mut output,
+                    "  - {} [{}]",
+                    finding.rule_id, finding.artifact_class
+                )
+                .unwrap(),
+            }
+            if let Some(explanation) = gate_rule_explanation(&finding.rule_id) {
+                writeln!(&mut output, "    {explanation}").unwrap();
+            }
+        }
+    }
+
+    writeln!(&mut output).unwrap();
+    if let Some(policy_id) = &receipt.policy_id {
+        match &receipt.policy_hash {
+            Some(hash) => writeln!(&mut output, "Policy: {policy_id} ({hash})").unwrap(),
+            None => writeln!(&mut output, "Policy: {policy_id}").unwrap(),
+        }
+    }
+    writeln!(&mut output, "Recorded: {}", receipt.timestamp).unwrap();
+
+    output
 }
 
 fn json_explanation(manifest: &AirlockManifest, manifest_ref: &str) -> Value {
@@ -468,6 +697,133 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("airlock explain --manifest ")
+        );
+    }
+
+    fn gate_finding(artifact_class: &str, rule_id: &str) -> crate::scanner::egress::EgressFinding {
+        crate::scanner::egress::EgressFinding {
+            artifact_class: artifact_class.to_owned(),
+            rule_id: rule_id.to_owned(),
+            key_path: None,
+            span_hash: None,
+        }
+    }
+
+    const SAMPLE_HASH: &str =
+        "blake3:7777777777777777777777777777777777777777777777777777777777777777";
+
+    fn explain_gate(receipt: &GateReceipt, json: bool) -> (u8, String) {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("gate-receipt.json");
+        std::fs::write(&path, serde_json::to_vec(receipt).unwrap()).unwrap();
+        let mut stdout = Vec::new();
+        let exit_code = run_with_writer(
+            ExplainArgs {
+                manifest: path,
+                json,
+            },
+            &mut stdout,
+        );
+        (exit_code, String::from_utf8(stdout).unwrap())
+    }
+
+    #[test]
+    fn gate_receipt_decision_follows_blocked_status_and_findings() {
+        let mut receipt = GateReceipt::new(
+            "strict-manifest",
+            "STRICT_TELEMETRY_ONLY",
+            SAMPLE_HASH,
+            false,
+            vec![],
+        );
+        assert_eq!(gate_decision(&receipt), "authorized_upstream_failed");
+
+        receipt.upstream_status = Some(200);
+        assert_eq!(gate_decision(&receipt), "forwarded");
+
+        receipt
+            .findings
+            .push(gate_finding("UPSTREAM_ERROR", "GATE_STREAM_INTERRUPTED"));
+        assert_eq!(gate_decision(&receipt), "forwarded_interrupted");
+
+        receipt.blocked = true;
+        assert_eq!(gate_decision(&receipt), "denied");
+    }
+
+    #[test]
+    fn explain_renders_a_denied_gate_receipt_with_the_reason_and_the_limit() {
+        let mut receipt = GateReceipt::new(
+            "strict-manifest",
+            "BOUNDARY_FAILED",
+            SAMPLE_HASH,
+            true,
+            vec![gate_finding(
+                "STRICT_MANIFEST_REQUIRED",
+                "REQUEST_MANIFEST_NOT_FOUND",
+            )],
+        )
+        .with_request_bytes(Some(2048))
+        .with_limit(crate::manifest::gate::GateLimit::max_request_bytes(
+            1024,
+            Some(2048),
+        ));
+        receipt.timestamp = "2026-11-25T12:00:00Z".to_owned();
+
+        let (exit_code, rendered) = explain_gate(&receipt, false);
+
+        assert_eq!(exit_code, 0);
+        assert!(rendered.starts_with("AIRLOCK GATE\n"));
+        assert!(rendered.contains("Decision: DENIED. The gate did not forward this request."));
+        assert!(rendered.contains("Mode: strict-manifest"));
+        assert!(rendered.contains(&format!("Request: {SAMPLE_HASH} (2048 bytes received)")));
+        assert!(rendered.contains("Limit hit: max_request_bytes 1024 (observed 2048)"));
+        assert!(rendered.contains("  - REQUEST_MANIFEST_NOT_FOUND [STRICT_MANIFEST_REQUIRED]"));
+        assert!(
+            rendered.contains("no verified manifest is bound to this request's canonical hash")
+        );
+        assert!(rendered.contains("Recorded: 2026-11-25T12:00:00Z"));
+        assert!(!rendered.contains("Upstream response:"));
+    }
+
+    #[test]
+    fn explain_does_not_present_the_no_hash_placeholder_as_a_request_hash() {
+        let receipt = GateReceipt::new(
+            "strict-manifest",
+            "BOUNDARY_FAILED",
+            blake3_hash(b"unavailable"),
+            true,
+            vec![gate_finding("REQUEST_SCAN_REFUSED", "REQUEST_SCAN_REFUSED")],
+        );
+
+        let (_, rendered) = explain_gate(&receipt, false);
+        assert!(rendered.contains("Request: no hash (the gate refused before it had one)"));
+        assert!(!rendered.contains(&blake3_hash(b"unavailable")));
+
+        let (_, json) = explain_gate(&receipt, true);
+        let explanation: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(explanation["schema"], "airlock.explain_gate.v1");
+        assert!(explanation["request"]["hash"].is_null());
+    }
+
+    #[test]
+    fn explain_gate_receipt_with_an_unsupported_version_emits_a_structured_refusal() {
+        let mut receipt = GateReceipt::new(
+            "strict-manifest",
+            "BOUNDARY_FAILED",
+            SAMPLE_HASH,
+            true,
+            vec![],
+        );
+        receipt.gate_version = "airlock.gate.v9".to_owned();
+
+        let (exit_code, output) = explain_gate(&receipt, false);
+
+        assert_eq!(exit_code, 2);
+        let refusal: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(refusal["refusal"]["code"], "E_BAD_MANIFEST");
+        assert_eq!(
+            refusal["refusal"]["detail"]["gate_version"],
+            "airlock.gate.v9"
         );
     }
 }

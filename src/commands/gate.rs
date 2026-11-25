@@ -848,6 +848,15 @@ fn forward_request(request: Request, state: &GateState, body: &[u8], admitted: A
     receipt.response_hash = Some(response_hash.clone());
     receipt.response_bytes = Some(response_bytes);
     receipt.upstream_status = Some(status);
+    if !completed {
+        // The hash and byte count above cover only what streamed before the stream ended.
+        receipt.findings.push(EgressFinding {
+            artifact_class: "UPSTREAM_ERROR".to_owned(),
+            rule_id: "GATE_STREAM_INTERRUPTED".to_owned(),
+            key_path: None,
+            span_hash: None,
+        });
+    }
     write_receipt_and_witness(
         state,
         &mut receipt,

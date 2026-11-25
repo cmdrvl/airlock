@@ -4,10 +4,11 @@ use std::io::{self, Write};
 
 use serde_json::{Value, json};
 
+use crate::assembler::NotCrossedReason;
 use crate::cli::ExplainArgs;
 use crate::hash::blake3_hash;
-use crate::manifest::AirlockManifest;
 use crate::manifest::gate::GateReceipt;
+use crate::manifest::{AirlockManifest, Attestation};
 use crate::output::canonical_json;
 use crate::refusal::RefusalEnvelope;
 use crate::types::{BlockedReason, ClaimLevel, Finding};
@@ -292,7 +293,7 @@ fn render_gate_receipt(receipt: &GateReceipt) -> String {
 }
 
 fn json_explanation(manifest: &AirlockManifest, manifest_ref: &str) -> Value {
-    json!({
+    let mut explanation = json!({
         "schema": "airlock.explain.v1",
         "tool": "airlock",
         "manifest_ref": manifest_ref,
@@ -322,7 +323,28 @@ fn json_explanation(manifest: &AirlockManifest, manifest_ref: &str) -> Value {
             "human_explain": format!("airlock explain --manifest {manifest_ref}"),
             "verify_again": "airlock verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out airlock_manifest.json"
         }
-    })
+    });
+
+    if has_v0_3_fields(manifest) {
+        // Mirrors the manifest's own member names. null means the manifest does not carry
+        // the member: `signature` null is an unsigned manifest, `not_crossed` null is a
+        // verify run that was not given the inventory (an empty array means nothing was
+        // left out). The signature value itself is not repeated here and `checked: false`
+        // says explain did not verify it.
+        explanation["bytes_crossed"] = json!(manifest.bytes_crossed);
+        explanation["attestation"] = json!(manifest.attestation.map(Attestation::as_str));
+        explanation["not_crossed"] = json!(manifest.not_crossed);
+        explanation["signature"] = match &manifest.signature {
+            Some(signature) => json!({
+                "algorithm": signature.algorithm,
+                "public_key_fingerprint": signature.public_key_fingerprint,
+                "checked": false
+            }),
+            None => Value::Null,
+        };
+    }
+
+    explanation
 }
 
 fn render_manifest(manifest: &AirlockManifest) -> String {
@@ -345,6 +367,10 @@ fn render_manifest(manifest: &AirlockManifest) -> String {
         presence_word(manifest.filing_derived_text_present)
     )
     .unwrap();
+
+    if has_v0_3_fields(manifest) {
+        render_v0_3_fields(&mut output, manifest);
+    }
 
     if manifest.achieved_claim == ClaimLevel::BoundaryFailed {
         writeln!(&mut output).unwrap();
@@ -399,6 +425,93 @@ fn presence_word(is_present: bool) -> &'static str {
     if is_present { "present" } else { "absent" }
 }
 
+/// True for a manifest that carries any airlock.v0.3 member. An airlock.v0.2 manifest has
+/// none, and its explanation stays exactly as it was before those members existed.
+fn has_v0_3_fields(manifest: &AirlockManifest) -> bool {
+    manifest.bytes_crossed.is_some()
+        || manifest.attestation.is_some()
+        || manifest.not_crossed.is_some()
+        || manifest.signature.is_some()
+}
+
+fn attestation_sentence(attestation: Attestation) -> String {
+    match attestation {
+        Attestation::SelfAttested => {
+            "self_attested (written by airlock verify, not by a send or gate receipt)".to_string()
+        }
+        other => other.as_str().to_string(),
+    }
+}
+
+/// The reason as it is written in the manifest. Exhaustive on purpose: a new reason must be
+/// named here, and a unit test holds these to the serialized names.
+fn not_crossed_reason_word(reason: NotCrossedReason) -> &'static str {
+    match reason {
+        NotCrossedReason::NotAllowed => "NOT_ALLOWED",
+        NotCrossedReason::ForbiddenKey => "FORBIDDEN_KEY",
+        NotCrossedReason::DerivedTextExcluded => "DERIVED_TEXT_EXCLUDED",
+        NotCrossedReason::ShadowedByEarlierInput => "SHADOWED_BY_EARLIER_INPUT",
+    }
+}
+
+/// What the manifest says about the request's size, who attested it, who signed it and what
+/// was left out. Values that were left out are never in the manifest, so they cannot appear
+/// here; only their paths, reasons and hashes do.
+fn render_v0_3_fields(output: &mut String, manifest: &AirlockManifest) {
+    writeln!(output).unwrap();
+    if let Some(bytes) = manifest.bytes_crossed {
+        writeln!(output, "Bytes crossed: {bytes}").unwrap();
+    }
+    if let Some(attestation) = manifest.attestation {
+        writeln!(output, "Attestation: {}", attestation_sentence(attestation)).unwrap();
+    }
+    match &manifest.signature {
+        Some(signature) => writeln!(
+            output,
+            "Signature: {} by {} (explain does not check it; run airlock verify-manifest)",
+            signature.algorithm, signature.public_key_fingerprint
+        )
+        .unwrap(),
+        None => writeln!(output, "Signature: none (unsigned manifest)").unwrap(),
+    }
+
+    match &manifest.not_crossed {
+        None => writeln!(
+            output,
+            "Left out of the request: not recorded (verify was not given a not-crossed inventory)"
+        )
+        .unwrap(),
+        Some(entries) if entries.is_empty() => writeln!(
+            output,
+            "Left out of the request: nothing (the not-crossed inventory is empty)"
+        )
+        .unwrap(),
+        Some(entries) => {
+            let noun = if entries.len() == 1 {
+                "field"
+            } else {
+                "fields"
+            };
+            writeln!(
+                output,
+                "Left out of the request: {} {noun} (values are never stored):",
+                entries.len()
+            )
+            .unwrap();
+            for entry in entries {
+                writeln!(
+                    output,
+                    "  - {} [{}] {}",
+                    entry.path,
+                    not_crossed_reason_word(entry.reason),
+                    entry.value_hash
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
 fn blocked_paths(blocked_reasons: &[BlockedReason]) -> Vec<String> {
     let mut unique = BTreeMap::new();
 
@@ -436,7 +549,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::manifest::{AIRLOCK_MANIFEST_VERSION, Attestation, ProvenanceSummary};
+    use crate::assembler::NotCrossedEntry;
+    use crate::manifest::{
+        AIRLOCK_MANIFEST_VERSION, Attestation, ManifestSignature, ProvenanceSummary,
+    };
     use crate::refusal::REFUSAL_OUTCOME;
     use crate::types::{BindingStatus, BoundaryMode, UpstreamArtifact};
 
@@ -702,6 +818,198 @@ mod tests {
                 .unwrap()
                 .starts_with("airlock explain --manifest ")
         );
+    }
+
+    fn hash_of(digit: char) -> String {
+        format!("blake3:{}", digit.to_string().repeat(64))
+    }
+
+    fn left_out(path: &str, reason: NotCrossedReason, value_digit: char) -> NotCrossedEntry {
+        NotCrossedEntry {
+            path: path.to_string(),
+            source_artifact_hash: hash_of('7'),
+            value_hash: hash_of(value_digit),
+            reason,
+        }
+    }
+
+    fn two_left_out() -> Vec<NotCrossedEntry> {
+        vec![
+            left_out("html_path", NotCrossedReason::ForbiddenKey, '9'),
+            left_out("operator_note", NotCrossedReason::NotAllowed, 'e'),
+        ]
+    }
+
+    /// An airlock.v0.3 manifest as `verify` writes it, with the signature optional.
+    fn v0_3_manifest(not_crossed: Option<Vec<NotCrossedEntry>>, signed: bool) -> AirlockManifest {
+        let mut manifest =
+            sample_manifest(ClaimLevel::RawDocumentAbsent, false, true, vec![], vec![]);
+        manifest.not_crossed = not_crossed;
+        manifest.signature = signed.then(|| ManifestSignature {
+            algorithm: "ed25519".to_string(),
+            public_key_fingerprint: hash_of('a'),
+            value: "b".repeat(128),
+        });
+        manifest
+    }
+
+    /// An airlock.v0.2 manifest: none of the v0.3 members.
+    fn v0_2_manifest() -> AirlockManifest {
+        let mut manifest =
+            sample_manifest(ClaimLevel::RawDocumentAbsent, false, true, vec![], vec![]);
+        manifest.manifest_version = "airlock.v0.2".to_string();
+        manifest.bytes_crossed = None;
+        manifest.attestation = None;
+        manifest
+    }
+
+    #[test]
+    fn explain_lists_what_was_left_out_by_path_reason_and_hash() {
+        let manifest = v0_3_manifest(Some(two_left_out()), true);
+
+        let rendered = render_manifest(&manifest);
+
+        let expected = format!(
+            "Derived filing text: present\n\
+             \n\
+             Bytes crossed: 1234\n\
+             Attestation: self_attested (written by airlock verify, not by a send or gate receipt)\n\
+             Signature: ed25519 by {} (explain does not check it; run airlock verify-manifest)\n\
+             Left out of the request: 2 fields (values are never stored):\n\
+             \x20 - html_path [FORBIDDEN_KEY] {}\n\
+             \x20 - operator_note [NOT_ALLOWED] {}\n",
+            hash_of('a'),
+            hash_of('9'),
+            hash_of('e'),
+        );
+        assert!(rendered.contains(&expected), "{rendered}");
+        // The input artifact's hash is in the manifest but is not part of this summary.
+        assert!(!rendered.contains(&hash_of('7')), "{rendered}");
+    }
+
+    #[test]
+    fn explain_says_when_the_manifest_is_unsigned_and_carries_no_inventory() {
+        let manifest = v0_3_manifest(None, false);
+
+        let rendered = render_manifest(&manifest);
+
+        assert!(rendered.contains("Signature: none (unsigned manifest)\n"));
+        assert!(rendered.contains(
+            "Left out of the request: not recorded (verify was not given a not-crossed inventory)\n"
+        ));
+    }
+
+    #[test]
+    fn explain_says_nothing_was_left_out_for_an_empty_inventory() {
+        let manifest = v0_3_manifest(Some(vec![]), true);
+
+        let rendered = render_manifest(&manifest);
+
+        assert!(
+            rendered.contains(
+                "Left out of the request: nothing (the not-crossed inventory is empty)\n"
+            )
+        );
+        assert!(!rendered.contains("not recorded"));
+    }
+
+    #[test]
+    fn explain_uses_the_singular_for_one_left_out_field() {
+        let one = vec![left_out("operator_note", NotCrossedReason::NotAllowed, 'e')];
+        let manifest = v0_3_manifest(Some(one), false);
+
+        let rendered = render_manifest(&manifest);
+
+        assert!(rendered.contains("Left out of the request: 1 field (values are never stored):\n"));
+    }
+
+    #[test]
+    fn explain_names_the_other_attestations_plainly() {
+        assert_eq!(
+            attestation_sentence(Attestation::Transmitted),
+            "transmitted"
+        );
+        assert_eq!(attestation_sentence(Attestation::Gated), "gated");
+        assert!(attestation_sentence(Attestation::SelfAttested).starts_with("self_attested ("));
+    }
+
+    #[test]
+    fn explain_json_carries_the_v0_3_members_and_never_the_signature_bytes() {
+        let manifest = v0_3_manifest(Some(two_left_out()), true);
+
+        let explanation = json_explanation(&manifest, "manifest.json");
+
+        assert_eq!(explanation["bytes_crossed"], 1234);
+        assert_eq!(explanation["attestation"], "self_attested");
+        assert_eq!(
+            explanation["not_crossed"],
+            json!([
+                {
+                    "path": "html_path",
+                    "source_artifact_hash": hash_of('7'),
+                    "value_hash": hash_of('9'),
+                    "reason": "FORBIDDEN_KEY"
+                },
+                {
+                    "path": "operator_note",
+                    "source_artifact_hash": hash_of('7'),
+                    "value_hash": hash_of('e'),
+                    "reason": "NOT_ALLOWED"
+                }
+            ])
+        );
+        assert_eq!(
+            explanation["signature"],
+            json!({
+                "algorithm": "ed25519",
+                "public_key_fingerprint": hash_of('a'),
+                "checked": false
+            })
+        );
+        assert!(!explanation.to_string().contains(&"b".repeat(128)));
+    }
+
+    #[test]
+    fn explain_json_says_null_for_v0_3_members_the_manifest_lacks() {
+        let manifest = v0_3_manifest(None, false);
+
+        let explanation = json_explanation(&manifest, "manifest.json");
+
+        let members = explanation.as_object().unwrap();
+        assert_eq!(members["signature"], Value::Null);
+        assert_eq!(members["not_crossed"], Value::Null);
+        assert_eq!(members["bytes_crossed"], 1234);
+        // An empty inventory is not the same thing as a missing one.
+        let empty = json_explanation(&v0_3_manifest(Some(vec![]), false), "manifest.json");
+        assert_eq!(empty["not_crossed"], json!([]));
+    }
+
+    #[test]
+    fn a_v0_2_manifest_explains_without_any_v0_3_member() {
+        let manifest = v0_2_manifest();
+
+        let rendered = render_manifest(&manifest);
+        let explanation = json_explanation(&manifest, "manifest.json");
+
+        for label in ["Bytes crossed", "Attestation", "Signature", "Left out"] {
+            assert!(!rendered.contains(label), "{label} in:\n{rendered}");
+        }
+        let members = explanation.as_object().unwrap();
+        for member in ["bytes_crossed", "attestation", "not_crossed", "signature"] {
+            assert!(!members.contains_key(member), "{member} in {explanation}");
+        }
+    }
+
+    #[test]
+    fn not_crossed_reason_words_are_the_serialized_names() {
+        for reason in [
+            NotCrossedReason::NotAllowed,
+            NotCrossedReason::ForbiddenKey,
+            NotCrossedReason::DerivedTextExcluded,
+            NotCrossedReason::ShadowedByEarlierInput,
+        ] {
+            assert_eq!(json!(reason), json!(not_crossed_reason_word(reason)));
+        }
     }
 
     fn gate_finding(artifact_class: &str, rule_id: &str) -> crate::scanner::egress::EgressFinding {

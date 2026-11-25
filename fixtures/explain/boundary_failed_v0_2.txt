@@ -1,0 +1,28 @@
+AIRLOCK
+
+Claim achieved: BOUNDARY_FAILED
+Boundary mode: TELEMETRY_ONLY
+
+Raw document artifacts: present
+Derived filing text: absent
+
+Boundary violation detected:
+  - html_path [forbidden_key via forbidden_keys[0]]
+  - raw_html_excerpt [raw_html via forbidden_patterns[0]] sample=<table><tr><td>Gross unrealized appreciation</td></tr></table>
+  - source_url [sec_archive_url via forbidden_patterns[1]] sample=https://www.sec.gov/Archives/edgar/data/0000000000/000000000026000001/index.htm
+  - html_path [REQUEST_UNBOUND via adapter.transport_keys]
+  - raw_html_excerpt [REQUEST_UNBOUND via adapter.transport_keys]
+  - source_url [REQUEST_UNBOUND via adapter.transport_keys]
+
+Why strict telemetry-only was not earned:
+  - html_path
+  - raw_html_excerpt
+  - source_url
+
+Prompt provenance:
+  - 16 prompt fragments emitted
+  - 16 TELEMETRY
+
+Policy: tournament_baseline (blake3:2a6241c3d80de4e540a1a5ab064b6f158a677985421397cb0b559c0c8505aff7)
+Manifest hash: blake3:00f468c023367853803fd5938f41c50a6d304f7f2fa1644ae7b6ba0521089379
+

@@ -1,0 +1,15 @@
+AIRLOCK
+
+Claim achieved: STRICT_TELEMETRY_ONLY
+Boundary mode: TELEMETRY_ONLY
+
+Raw document artifacts: absent
+Derived filing text: absent
+
+Prompt provenance:
+  - 18 prompt fragments emitted
+  - 18 TELEMETRY
+
+Policy: clean_telemetry_only (blake3:bccf2508420d83910bb57553eba079825d7fb6ce0bf76d4ad1deebc4e2d2710f)
+Manifest hash: blake3:d374b9c7b8c9e0eba9b1cae5fc8835d3bc43d86b28bc8fe4646ec4adddd70f04
+

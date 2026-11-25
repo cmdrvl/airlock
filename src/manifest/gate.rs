@@ -105,6 +105,17 @@ impl GateRefusal {
         )
     }
 
+    /// The gate refused to forward a request for a reason that is not a screening finding:
+    /// no manifest matches its hash, the body is unreadable, malformed or too large, or
+    /// the request target is invalid.
+    pub fn denied(findings: Vec<EgressFinding>) -> Self {
+        Self::with_code(
+            "E_GATE_DENIED",
+            "outbound request denied by airlock gate",
+            findings,
+        )
+    }
+
     pub fn with_code(
         code: impl Into<String>,
         message: impl Into<String>,

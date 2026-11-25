@@ -48,7 +48,7 @@
       "required": ["schema_version", "code", "message", "findings"],
       "properties": {
         "schema_version": { "const": "airlock.gate_refusal.v1" },
-        "code": { "enum": ["BOUNDARY_FAILED", "UPSTREAM_UNAVAILABLE", "GATE_BUSY"] },
+        "code": { "enum": ["BOUNDARY_FAILED", "E_GATE_DENIED", "UPSTREAM_UNAVAILABLE", "GATE_BUSY"] },
         "message": { "type": "string" },
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } }
       }

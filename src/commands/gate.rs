@@ -507,7 +507,7 @@ fn handle_request(mut request: Request, state: &GateState) {
                     key_path: None,
                     span_hash: None,
                 };
-                block_request_with_findings(request, state, &[finding], &canonical_request_hash);
+                deny_request(request, state, &[finding], &canonical_request_hash);
                 return;
             };
             (
@@ -544,14 +544,55 @@ fn block_request(
         span_hash: None,
     };
     let request_hash = request_hash.unwrap_or_else(|| blake3_hash(b"unavailable"));
-    block_request_with_findings(request, state, &[finding], &request_hash);
+    match state.mode {
+        GateMode::StrictManifest => deny_request(request, state, &[finding], &request_hash),
+        // policy-proxy keeps its published contract: a request it cannot screen is a
+        // boundary failure.
+        GateMode::PolicyProxy => {
+            block_request_with_findings(request, state, &[finding], &request_hash)
+        }
+    }
 }
 
+/// Refuse a request because screening found something: HTTP 403, code BOUNDARY_FAILED.
 fn block_request_with_findings(
     request: Request,
     state: &GateState,
     findings: &[EgressFinding],
     request_hash: &str,
+) {
+    refuse_request(
+        request,
+        state,
+        findings,
+        request_hash,
+        GateRefusal::blocked(findings.to_vec()),
+    );
+}
+
+/// Refuse a strict-manifest request the gate will not forward (no matching manifest,
+/// unreadable, malformed or oversized body, invalid target): HTTP 403, code E_GATE_DENIED.
+fn deny_request(
+    request: Request,
+    state: &GateState,
+    findings: &[EgressFinding],
+    request_hash: &str,
+) {
+    refuse_request(
+        request,
+        state,
+        findings,
+        request_hash,
+        GateRefusal::denied(findings.to_vec()),
+    );
+}
+
+fn refuse_request(
+    request: Request,
+    state: &GateState,
+    findings: &[EgressFinding],
+    request_hash: &str,
+    refusal: GateRefusal,
 ) {
     let mut receipt = GateReceipt::new(
         mode_name(state.mode),
@@ -565,7 +606,6 @@ fn block_request_with_findings(
         state.policy_hash.clone(),
     );
     write_receipt_and_witness(state, &mut receipt, "BOUNDARY_FAILED", 1);
-    let refusal = GateRefusal::blocked(findings.to_vec());
     return_json(
         request,
         StatusCode(403),

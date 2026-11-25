@@ -40,3 +40,23 @@ jobs:
 
       - name: Build release binary
         run: cargo build --locked --release
+
+  # tests/egress_seatbelt.rs is compiled only on macOS, so the ubuntu job above never runs it.
+  # It runs the Seatbelt profile from docs/deploy/egress-firewall.md against the real gate; if
+  # the runner cannot apply a sandbox profile the test fails rather than skips.
+  macos-seatbelt-egress:
+    name: macos-seatbelt-egress
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Prove the Seatbelt egress recipe
+        run: cargo test --locked --test egress_seatbelt

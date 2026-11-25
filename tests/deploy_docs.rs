@@ -142,6 +142,57 @@ fn firewall_rules_and_base_urls_name_the_gate_listen_address() {
     );
 }
 
+/// The Seatbelt profile is run for real by tests/egress_seatbelt.rs, but only on macOS. This is
+/// the part of that contract every platform can check: the block denies outbound, opens one
+/// exception, takes the gate's port as a parameter, and the command that applies it passes the
+/// gate's default listen port.
+#[test]
+fn the_seatbelt_profile_denies_outbound_and_opens_only_the_gate_port() {
+    let text = doc();
+    let blocks = fenced_blocks(&text);
+    let profiles: Vec<&str> = blocks
+        .iter()
+        .filter(|(tag, _)| tag == "seatbelt")
+        .map(|(_, body)| body.as_str())
+        .collect();
+    assert_eq!(
+        profiles.len(),
+        1,
+        "the doc must hold exactly one `seatbelt` block"
+    );
+    // Judge the code only: a commented-out `; (deny network-outbound)` must not count.
+    let profile = profiles[0]
+        .lines()
+        .map(|line| line.split(';').next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let profile = profile.as_str();
+    assert!(
+        profile.contains("(deny network-outbound)"),
+        "the profile must deny all outbound network, not a subset:\n{profile}"
+    );
+    assert_eq!(
+        profile.matches("(allow network-outbound").count(),
+        1,
+        "the profile must open exactly one exception:\n{profile}"
+    );
+    assert!(
+        profile.contains(r#"(param "GATE_PORT")"#),
+        "the exception must be the gate's port, taken as a parameter:\n{profile}"
+    );
+
+    let port = default_listen().port();
+    let applied: Vec<u16> = Regex::new(r"-D GATE_PORT=(\d+)")
+        .unwrap()
+        .captures_iter(&text)
+        .map(|captures| captures[1].parse().unwrap())
+        .collect();
+    assert!(
+        !applied.is_empty() && applied.iter().all(|applied| *applied == port),
+        "the doc applies the profile with GATE_PORT {applied:?} but the gate listens on {port}"
+    );
+}
+
 #[test]
 fn every_refusal_code_the_gate_schema_allows_has_a_row_in_the_doc() {
     let schema_path =

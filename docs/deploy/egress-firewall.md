@@ -8,7 +8,9 @@ policy screen).
 This page gives example rules. Airlock does not install, load or manage any
 firewall rule, and nothing here is automated. Read the rules, adapt the account
 names and port, syntax-check them (`nft -c -f FILE` on Linux, `pfctl -nf FILE`
-on macOS) and load them yourself.
+on macOS) and load them yourself. The one recipe an Airlock test actually runs is
+the macOS Seatbelt profile in section 2c; the firewall rules in 2a and 2b are
+examples that no Airlock test has executed.
 
 ## The model
 
@@ -168,6 +170,81 @@ pass out quick proto tcp from any to any port 443 user $gate_user
 block drop out quick proto { tcp, udp } from any to any port 443
 ```
 
+## 2c. Confine the agent process with the OS sandbox (no root, no accounts)
+
+Sections 2a and 2b need root and operating-system accounts. A process can instead
+be started under a sandbox profile that forbids every outbound connection except
+one loopback port: the gate's. The profile applies to the agent and everything it
+spawns, and needs no privilege and no firewall rule. What is proven, by platform:
+
+| Platform | Mechanism | Status |
+| -------- | --------- | ------ |
+| macOS | Seatbelt (`sandbox-exec`), below | Run by `tests/egress_seatbelt.rs` against the real gate on macOS 15.8.3. CI runs that test on macOS (job `macos-seatbelt-egress`). |
+| Linux | Landlock ABI 4 network rules (kernel 6.7 or later), or a network namespace | **Not proven.** No recipe is given because none has been run. |
+| macOS pf, Linux nftables | Sections 2a and 2b | Example rules; no Airlock test runs them. |
+
+### macOS: Seatbelt
+
+```seatbelt
+(version 1)
+(allow default)
+(deny network-outbound)
+(allow network-outbound
+  (remote ip (string-append "localhost:" (param "GATE_PORT"))))
+```
+
+Save the block as `egress.sb`, then start the agent under it, passing the port
+the gate listens on (8787 is the default):
+
+```sh
+sandbox-exec -f egress.sb -D GATE_PORT=8787 /path/to/agent
+```
+
+The gate itself must run **outside** the profile, because it has to reach the
+provider; start it as in section 1. `tests/egress_seatbelt.rs` extracts the block
+above from this file and runs it, so if you edit the block, the test runs your
+edit.
+
+What the test asserts, against the real `airlock gate` and a local origin that
+counts the connections it receives:
+
+- an unsandboxed client reaches the origin directly, so a block below is the
+  sandbox's doing and not a dead server;
+- a sandboxed client gets HTTP 200 from `GET /airlock/health`, and a request it
+  sends through the gate reaches the origin exactly once;
+- a sandboxed client connecting to the origin directly (any loopback port but the
+  gate's) fails with `Operation not permitted`, and the origin counts no
+  connection from it;
+- a sandboxed client connecting to an address outside the machine fails the same
+  way, immediately, not by timing out;
+- a UDP datagram and a unix-domain-socket connection from the sandbox are not
+  delivered, while the same attempts from outside the sandbox are;
+- a process inside the sandbox cannot apply a looser profile of its own
+  (`sandbox_apply: Operation not permitted`).
+
+What it does **not** give you:
+
+- It binds only processes started under the profile. A caller that is not
+  launched with `sandbox-exec -f egress.sb` is unconstrained, so the launcher has
+  to apply it. veil's `sandbox --egress airlock` is the intended launcher.
+- Services that fetch on a process's behalf over Mach/XPC (for example the system
+  background-download daemon) are not covered by `(allow default)`. This was
+  **not tested** and nothing here claims they are blocked.
+- It is a network rule only. It claims no filesystem confinement. veil's
+  `docs/plan.md` measured a hardlink bypass of a literal-path *file* deny under
+  the same `sandbox-exec` mechanism on a Mac (2026-11-25). That is not a network
+  finding, but it is the same mechanism, so do not extend this recipe to files
+  without testing that case.
+- `sandbox-exec` is deprecated by Apple and the profile language is not a stable
+  interface. The test shows this recipe works on the macOS version named above, not
+  on later ones.
+
+### Linux
+
+Not proven. A Landlock `LANDLOCK_ACCESS_NET_CONNECT_TCP` rule or a network
+namespace with a veth to the gate are the intended mechanisms, but no Airlock test
+has run either, so this page gives no recipe for them rather than an untested one.
+
 ## 3. Check it from the agent account
 
 Run these as the `agent` account. The first must fail; the others must reach the
@@ -222,6 +299,8 @@ airlock explain --manifest /var/lib/airlock/gate/RECEIPT.json
 
 ## What this does not give you
 
+- Nothing on Linux is proven by an Airlock test, and the firewall rules in 2a and
+  2b have never been run by one. Only the macOS Seatbelt recipe in 2c has.
 - It does not stop anything running as the gate account, or as root.
 - It constrains outbound traffic from this host only; it says nothing about
   other machines, containers with their own network namespace, or a VPN or

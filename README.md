@@ -427,7 +427,12 @@ the adapter's declared transport schema. The manifest records
 or altered message, or undeclared transport field, produces a
 `REQUEST_UNBOUND` finding, records `binding_status: UNBOUND`, and sets the
 achieved claim to `BOUNDARY_FAILED`. The finding does not echo the altered
-message content.
+message content. [docs/tamper-matrix.md](docs/tamper-matrix.md) lists what the
+real binary produced for each of these tampers and for content leaks the
+detectors and patterns catch, in both boundary modes. CI regenerates it, so it
+cannot drift from the tests. It also records what is not caught: the blobs pack
+does not flag a base64 run shorter than 512 characters, and the policy cannot
+change that.
 
 `verify` writes an `airlock.v0.3` manifest (see [Manifest versions](#manifest-versions)).
 `--not-crossed` copies the entries of an inventory from `assemble --not-crossed-out`

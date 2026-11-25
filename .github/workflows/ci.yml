@@ -41,6 +41,17 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release
 
+      # Runs the release binary over the tamper matrix (needs jq, preinstalled on the runner),
+      # then fails if regenerating docs/tamper-matrix.md changed it. The script writes the doc
+      # only when every cell matches fixtures/tamper_matrix.json.
+      - name: Tamper matrix e2e
+        run: bash tests/e2e_tamper_matrix.sh
+        env:
+          AIRLOCK_BIN: target/release/airlock
+
+      - name: Fail if docs/tamper-matrix.md drifted
+        run: git diff --exit-code -- docs/tamper-matrix.md
+
   # tests/egress_seatbelt.rs is compiled only on macOS, so the ubuntu job above never runs it.
   # It runs the Seatbelt profile from docs/deploy/egress-firewall.md against the real gate; if
   # the runner cannot apply a sandbox profile the test fails rather than skips.

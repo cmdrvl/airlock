@@ -1,0 +1,193 @@
+{
+  "schema": "airlock.tamper_matrix.v0",
+  "about": "Expected result per cell of the tamper matrix. tests/e2e_tamper_matrix.sh (jq) and tests/tamper_matrix.rs (serde_json) both read this file and apply the same ops. A cell is `assemble` then `verify --no-sign --no-witness --require-claim <require_claim>` on the (possibly tampered) request. `findings` is the sorted unique set of artifact_class, with detector hits written as DETECTED_SENSITIVE:<rule_id>. ANNOTATED cells carry derived_text_field_hit because the annotated fixture assembles derived text and the scanner records a finding for every derived-text leaf. Payloads are fabricated; the AWS-shaped token is random, not a credential.",
+  "model": "gpt-5",
+  "require_claim": "RAW_DOCUMENT_ABSENT",
+  "modes": ["ANNOTATED", "TELEMETRY_ONLY"],
+  "policy": "fixtures/tamper_matrix/policy.yaml",
+  "input": "fixtures/annotated_mode/strategy_space.json",
+  "system_prompt": "fixtures/annotated_mode/system_prompt.txt",
+  "leak_pointer": "/heuristic_reference/bundle_id",
+  "cases": [
+    {
+      "id": "clean",
+      "site": "request",
+      "title": "Clean request, unchanged",
+      "ops": [],
+      "expect": {
+        "ANNOTATED": {"exit": 0, "claim": "RAW_DOCUMENT_ABSENT", "binding": "BOUND", "findings": ["derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 0, "claim": "STRICT_TELEMETRY_ONLY", "binding": "BOUND", "findings": []}
+      }
+    },
+    {
+      "id": "pii_appended",
+      "site": "request",
+      "title": "PII appended as an extra message",
+      "ops": [{"op": "append_user_message", "text": "Borrower contact record: SSN 457-55-5462."}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["DETECTED_SENSITIVE:PII_US_SSN", "REQUEST_UNBOUND", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["DETECTED_SENSITIVE:PII_US_SSN", "REQUEST_UNBOUND"]}
+      }
+    },
+    {
+      "id": "messages_reordered",
+      "site": "request",
+      "title": "Messages reordered",
+      "ops": [{"op": "reverse_messages"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND"]}
+      }
+    },
+    {
+      "id": "message_altered_1byte",
+      "site": "request",
+      "title": "One byte of a message altered",
+      "ops": [{"op": "alter_last_byte", "pointer": "/messages/1/content/family_id"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND"]}
+      }
+    },
+    {
+      "id": "extra_transport_key",
+      "site": "request",
+      "title": "Extra top-level transport key",
+      "ops": [{"op": "add_top_level_key", "key": "hidden_enrichment", "value": {"content": "not in the adapter schema"}}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND"]}
+      }
+    },
+    {
+      "id": "html_injected",
+      "site": "request",
+      "title": "Raw HTML injected as an extra message",
+      "ops": [{"op": "append_user_message", "text": "<table><tr><td>Total</td></tr></table>"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND", "derived_text_field_hit", "raw_html"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND", "raw_html"]}
+      }
+    },
+    {
+      "id": "sec_gov_url",
+      "site": "request",
+      "title": "sec.gov archive URL injected as an extra message",
+      "ops": [{"op": "append_user_message", "text": "See https://www.sec.gov/Archives/edgar/data/1234567/000123456726000001/filing.htm for the source."}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND", "derived_text_field_hit", "sec_archive_url"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND", "sec_archive_url"]}
+      }
+    },
+    {
+      "id": "base64_blob",
+      "site": "request",
+      "title": "Base64 blob (744 characters) injected as an extra message",
+      "ops": [{"op": "append_user_message", "text": "VGhpcyBpcyBhIGJhc2U2NC1lbmNvZGVkIHN0YW5kLWluIGZvciBhIHJhdyBkb2N1bWVudCBwYXlsb2FkLiBUaGlzIGlzIGEgYmFzZTY0LWVuY29kZWQgc3RhbmQtaW4gZm9yIGEgcmF3IGRvY3VtZW50IHBheWxvYWQuIFRoaXMgaXMgYSBiYXNlNjQtZW5jb2RlZCBzdGFuZC1pbiBmb3IgYSByYXcgZG9jdW1lbnQgcGF5bG9hZC4gVGhpcyBpcyBhIGJhc2U2NC1lbmNvZGVkIHN0YW5kLWluIGZvciBhIHJhdyBkb2N1bWVudCBwYXlsb2FkLiBUaGlzIGlzIGEgYmFzZTY0LWVuY29kZWQgc3RhbmQtaW4gZm9yIGEgcmF3IGRvY3VtZW50IHBheWxvYWQuIFRoaXMgaXMgYSBiYXNlNjQtZW5jb2RlZCBzdGFuZC1pbiBmb3IgYSByYXcgZG9jdW1lbnQgcGF5bG9hZC4gVGhpcyBpcyBhIGJhc2U2NC1lbmNvZGVkIHN0YW5kLWluIGZvciBhIHJhdyBkb2N1bWVudCBwYXlsb2FkLiBUaGlzIGlzIGEgYmFzZTY0LWVuY29kZWQgc3RhbmQtaW4gZm9yIGEgcmF3IGRvY3VtZW50IHBheWxvYWQuIFRoaXMgaXMgYSBiYXNlNjQtZW5jb2RlZCBzdGFuZC1pbiBmb3IgYSByYXcgZG9jdW1lbnQgcGF5bG9hZC4g"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["DETECTED_SENSITIVE:BLOB_BASE64_RUN", "REQUEST_UNBOUND", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["DETECTED_SENSITIVE:BLOB_BASE64_RUN", "REQUEST_UNBOUND"]}
+      }
+    },
+    {
+      "id": "base64_short",
+      "site": "request",
+      "title": "Base64 blob (96 characters, under the detector's 512 minimum) injected as an extra message",
+      "ops": [{"op": "append_user_message", "text": "VGhpcyBpcyBhIGJhc2U2NC1lbmNvZGVkIGJsb2IgdGhhdCBzdGFuZHMgaW4gZm9yIGEgcmF3IGRvY3VtZW50IHBheWxvYWQu"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND"]}
+      }
+    },
+    {
+      "id": "aws_key",
+      "site": "request",
+      "title": "AWS access-key-shaped token injected as an extra message",
+      "ops": [{"op": "append_user_message", "text": "credential AKIAJ3QXK7M2ZP9WNB4D"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY", "REQUEST_UNBOUND", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY", "REQUEST_UNBOUND"]}
+      }
+    },
+    {
+      "id": "absolute_path",
+      "site": "request",
+      "title": "Absolute filesystem path injected as an extra message",
+      "ops": [{"op": "append_user_message", "text": "notes saved at /home/analyst/q3-close/filing_notes.txt"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["DETECTED_SENSITIVE:PATH_POSIX_ABSOLUTE", "REQUEST_UNBOUND", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["DETECTED_SENSITIVE:PATH_POSIX_ABSOLUTE", "REQUEST_UNBOUND"]}
+      }
+    },
+    {
+      "id": "leak_pii",
+      "site": "input_leak",
+      "title": "SSN in an allowed field, request honestly wrapped",
+      "ops": [{"op": "set_input", "value": "Borrower contact record: SSN 457-55-5462."}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:PII_US_SSN", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:PII_US_SSN"]}
+      }
+    },
+    {
+      "id": "leak_html",
+      "site": "input_leak",
+      "title": "Raw HTML in an allowed field, request honestly wrapped",
+      "ops": [{"op": "set_input", "value": "<table><tr><td>Total</td></tr></table>"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["derived_text_field_hit", "raw_html"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["raw_html"]}
+      }
+    },
+    {
+      "id": "leak_sec_gov_url",
+      "site": "input_leak",
+      "title": "sec.gov archive URL in an allowed field, request honestly wrapped",
+      "ops": [{"op": "set_input", "value": "See https://www.sec.gov/Archives/edgar/data/1234567/000123456726000001/filing.htm for the source."}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["derived_text_field_hit", "sec_archive_url"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["sec_archive_url"]}
+      }
+    },
+    {
+      "id": "leak_base64_blob",
+      "site": "input_leak",
+      "title": "Base64 blob (744 characters) in an allowed field, request honestly wrapped",
+      "ops": [{"op": "set_input", "value": "VGhpcyBpcyBhIGJhc2U2NC1lbmNvZGVkIHN0YW5kLWluIGZvciBhIHJhdyBkb2N1bWVudCBwYXlsb2FkLiBUaGlzIGlzIGEgYmFzZTY0LWVuY29kZWQgc3RhbmQtaW4gZm9yIGEgcmF3IGRvY3VtZW50IHBheWxvYWQuIFRoaXMgaXMgYSBiYXNlNjQtZW5jb2RlZCBzdGFuZC1pbiBmb3IgYSByYXcgZG9jdW1lbnQgcGF5bG9hZC4gVGhpcyBpcyBhIGJhc2U2NC1lbmNvZGVkIHN0YW5kLWluIGZvciBhIHJhdyBkb2N1bWVudCBwYXlsb2FkLiBUaGlzIGlzIGEgYmFzZTY0LWVuY29kZWQgc3RhbmQtaW4gZm9yIGEgcmF3IGRvY3VtZW50IHBheWxvYWQuIFRoaXMgaXMgYSBiYXNlNjQtZW5jb2RlZCBzdGFuZC1pbiBmb3IgYSByYXcgZG9jdW1lbnQgcGF5bG9hZC4gVGhpcyBpcyBhIGJhc2U2NC1lbmNvZGVkIHN0YW5kLWluIGZvciBhIHJhdyBkb2N1bWVudCBwYXlsb2FkLiBUaGlzIGlzIGEgYmFzZTY0LWVuY29kZWQgc3RhbmQtaW4gZm9yIGEgcmF3IGRvY3VtZW50IHBheWxvYWQuIFRoaXMgaXMgYSBiYXNlNjQtZW5jb2RlZCBzdGFuZC1pbiBmb3IgYSByYXcgZG9jdW1lbnQgcGF5bG9hZC4g"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:BLOB_BASE64_RUN", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:BLOB_BASE64_RUN"]}
+      }
+    },
+    {
+      "id": "leak_base64_short",
+      "site": "input_leak",
+      "title": "Base64 blob (96 characters, under the detector's 512 minimum) in an allowed field, request honestly wrapped",
+      "ops": [{"op": "set_input", "value": "VGhpcyBpcyBhIGJhc2U2NC1lbmNvZGVkIGJsb2IgdGhhdCBzdGFuZHMgaW4gZm9yIGEgcmF3IGRvY3VtZW50IHBheWxvYWQu"}],
+      "expect": {
+        "ANNOTATED": {"exit": 0, "claim": "RAW_DOCUMENT_ABSENT", "binding": "BOUND", "findings": ["derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 0, "claim": "STRICT_TELEMETRY_ONLY", "binding": "BOUND", "findings": []}
+      }
+    },
+    {
+      "id": "leak_aws_key",
+      "site": "input_leak",
+      "title": "AWS access-key-shaped token in an allowed field, request honestly wrapped",
+      "ops": [{"op": "set_input", "value": "credential AKIAJ3QXK7M2ZP9WNB4D"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY"]}
+      }
+    },
+    {
+      "id": "leak_absolute_path",
+      "site": "input_leak",
+      "title": "Absolute filesystem path in an allowed field, request honestly wrapped",
+      "ops": [{"op": "set_input", "value": "notes saved at /home/analyst/q3-close/filing_notes.txt"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:PATH_POSIX_ABSOLUTE", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:PATH_POSIX_ABSOLUTE"]}
+      }
+    }
+  ]
+}

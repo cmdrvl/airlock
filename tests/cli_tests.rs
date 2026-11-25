@@ -1382,3 +1382,230 @@ fn test_witness_append_failure_preserves_exit() {
     assert!(stderr.contains("witness append failed"));
     assert!(manifest_path.exists());
 }
+
+const FIXED_EPOCH: &str = "1700000000";
+
+fn assemble_with_out_flag(out_flag: &str, dir: &Path, label: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let prompt_path = dir.join(format!("{label}-prompt.json"));
+    let provenance_path = dir.join(format!("{label}-provenance.json"));
+    let stdout = airlock_cmd()
+        .args([
+            "assemble",
+            "--policy",
+            "fixtures/clean_telemetry_only/policy.yaml",
+            "--input",
+            "fixtures/clean_telemetry_only/strategy_space.json",
+            "--system-prompt",
+            "fixtures/clean_telemetry_only/system_prompt.txt",
+            "--boundary-mode",
+            "TELEMETRY_ONLY",
+            out_flag,
+            prompt_path.to_str().unwrap(),
+            "--provenance-out",
+            provenance_path.to_str().unwrap(),
+            "--no-witness",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    (
+        stdout,
+        fs::read(prompt_path).unwrap(),
+        fs::read(provenance_path).unwrap(),
+    )
+}
+
+#[test]
+fn test_assemble_output_alias_matches_out() {
+    let dir = tempdir().unwrap();
+
+    let canonical = assemble_with_out_flag("--out", dir.path(), "canonical");
+    let alias = assemble_with_out_flag("--output", dir.path(), "alias");
+
+    assert_eq!(canonical, alias);
+    assert_eq!(
+        alias.1,
+        fs::read(fixture(
+            "fixtures/clean_telemetry_only/expected_prompt_payload.json"
+        ))
+        .unwrap()
+    );
+}
+
+#[test]
+fn test_verify_output_alias_matches_out() {
+    let dir = tempdir().unwrap();
+    let run = |out_flag: &str, label: &str| {
+        let manifest_path = dir.path().join(format!("{label}.json"));
+        let stdout = airlock_cmd()
+            .env("SOURCE_DATE_EPOCH", FIXED_EPOCH)
+            .args([
+                "verify",
+                "--policy",
+                "fixtures/clean_telemetry_only/policy.yaml",
+                "--prompt",
+                "fixtures/clean_telemetry_only/expected_prompt_payload.json",
+                "--provenance",
+                "fixtures/clean_telemetry_only/expected_prompt_provenance.json",
+                "--request",
+                "fixtures/clean_telemetry_only/request.json",
+                out_flag,
+                manifest_path.to_str().unwrap(),
+                "--no-witness",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        (stdout, fs::read(manifest_path).unwrap())
+    };
+
+    assert_eq!(run("--out", "canonical"), run("--output", "alias"));
+}
+
+#[test]
+fn test_help_documents_the_output_alias() {
+    for command in ["assemble", "verify"] {
+        let output = airlock_cmd()
+            .args([command, "--help"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help = String::from_utf8(output).unwrap();
+        assert!(help.contains("--out"), "{command} help lists --out");
+        assert!(help.contains("--output"), "{command} help lists --output");
+    }
+}
+
+#[test]
+fn test_operator_json_declares_output_only_as_an_alias_of_out() {
+    let describe = read_json_output(
+        &airlock_cmd()
+            .arg("--describe")
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    let mut out_options = 0;
+    for command in describe["commands"].as_array().unwrap() {
+        for option in command["options"].as_array().into_iter().flatten() {
+            let flag = option["flag"].as_str().unwrap();
+            let aliases: Vec<&str> = option["aliases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|alias| alias.as_str().unwrap())
+                .collect();
+            assert_ne!(flag, "--output", "--output must not be a primary flag");
+            if flag == "--out" {
+                out_options += 1;
+                assert!(
+                    aliases.contains(&"--output"),
+                    "{} --out must declare --output as an alias",
+                    command["name"]
+                );
+            } else {
+                assert!(
+                    !aliases.contains(&"--output"),
+                    "{} {flag} must not claim the --output alias",
+                    command["name"]
+                );
+            }
+        }
+    }
+    assert_eq!(out_options, 2, "assemble and verify both take --out");
+}
+
+fn contains_escape(bytes: &[u8]) -> bool {
+    bytes.contains(&0x1b)
+}
+
+/// Every human and machine surface, run piped (non-TTY) under the color-related
+/// environment a caller might have, must contain no ANSI escape byte at all.
+#[test]
+fn test_no_ansi_on_any_surface_under_color_environment() {
+    let dir = tempdir().unwrap();
+    let witness_path = dir.path().join("witness.jsonl");
+
+    let surfaces: &[&[&str]] = &[
+        &[],
+        &["--help"],
+        &["assemble", "--help"],
+        &["verify", "--help"],
+        &["doctor", "--help"],
+        &["--bogus"],
+        &["assemble"],
+        &["doctor"],
+        &["doctor", "--json"],
+        &["doctor", "triage"],
+        &["doctor", "capabilities"],
+        &["doctor", "robot-docs"],
+        &["capabilities"],
+        &["capabilities", "--json"],
+        &["robot-docs", "guide"],
+        &["--describe"],
+        &["--schema"],
+        &["--version"],
+        &[
+            "explain",
+            "--manifest",
+            "fixtures/clean_telemetry_only/expected_manifest.json",
+        ],
+        &["explain", "--manifest", "does-not-exist/manifest.json"],
+        &["witness", "last"],
+        &["witness", "count", "--json"],
+    ];
+    // (label, NO_COLOR, TERM, CLICOLOR_FORCE)
+    let environments: &[(&str, Option<&str>, Option<&str>, Option<&str>)] = &[
+        ("NO_COLOR=1 TERM=dumb", Some("1"), Some("dumb"), None),
+        ("neither NO_COLOR nor TERM", None, None, None),
+        (
+            "NO_COLOR=1 beats CLICOLOR_FORCE=1",
+            Some("1"),
+            None,
+            Some("1"),
+        ),
+    ];
+
+    for (label, no_color, term, force) in environments {
+        for args in surfaces {
+            let mut cmd = airlock_cmd();
+            cmd.env("EPISTEMIC_WITNESS", &witness_path)
+                .env_remove("NO_COLOR")
+                .env_remove("TERM")
+                .env_remove("CLICOLOR_FORCE");
+            if let Some(value) = no_color {
+                cmd.env("NO_COLOR", value);
+            }
+            if let Some(value) = term {
+                cmd.env("TERM", value);
+            }
+            if let Some(value) = force {
+                cmd.env("CLICOLOR_FORCE", value);
+            }
+            let output = cmd.args(*args).output().unwrap();
+
+            assert!(
+                !output.stdout.is_empty() || !output.stderr.is_empty(),
+                "`airlock {}` produced no output ({label}); the check would be vacuous",
+                args.join(" ")
+            );
+            assert!(
+                !contains_escape(&output.stdout) && !contains_escape(&output.stderr),
+                "`airlock {}` emitted an ANSI escape byte ({label})",
+                args.join(" ")
+            );
+        }
+    }
+    assert!(
+        !witness_path.exists(),
+        "read-only surfaces must not create the ledger"
+    );
+}

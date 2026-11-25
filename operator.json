@@ -44,7 +44,7 @@
         { "name": "input", "flag": "--input", "type": "file_path", "required": true, "repeatable": true, "description": "Input JSON artifact; repeat for multiple upstream artifacts" },
         { "name": "system_prompt", "flag": "--system-prompt", "type": "file_path", "description": "Optional UTF-8 system prompt file included in provenance" },
         { "name": "boundary_mode", "flag": "--boundary-mode", "type": "string", "description": "Boundary exposure mode: ANNOTATED (default) or TELEMETRY_ONLY" },
-        { "name": "out", "flag": "--out", "type": "file_path", "required": true, "description": "Path to write prompt_payload.json" },
+        { "name": "out", "flag": "--out", "aliases": ["--output"], "type": "file_path", "required": true, "description": "Path to write prompt_payload.json" },
         { "name": "provenance_out", "flag": "--provenance-out", "type": "file_path", "required": true, "description": "Path to write prompt_provenance.json" },
         { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
       ],
@@ -59,7 +59,7 @@
         { "name": "prompt", "flag": "--prompt", "type": "file_path", "required": true, "description": "prompt_payload.json produced by airlock assemble" },
         { "name": "provenance", "flag": "--provenance", "type": "file_path", "required": true, "description": "prompt_provenance.json produced by airlock assemble" },
         { "name": "request", "flag": "--request", "type": "file_path", "required": true, "description": "Transport-wrapped model request JSON" },
-        { "name": "out", "flag": "--out", "type": "file_path", "required": true, "description": "Path to write airlock_manifest.json" },
+        { "name": "out", "flag": "--out", "aliases": ["--output"], "type": "file_path", "required": true, "description": "Path to write airlock_manifest.json" },
         { "name": "require_claim", "flag": "--require-claim", "type": "string", "description": "Minimum acceptable claim: BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT or STRICT_TELEMETRY_ONLY" },
         { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
       ],
@@ -135,7 +135,7 @@
   "env_vars": [
     { "name": "EPISTEMIC_WITNESS", "description": "Override the witness ledger path", "default": "~/.cmdrvl/state/witness/witness.jsonl" },
     { "name": "NO_COLOR", "description": "Disable ANSI color in human output (airlock emits none when piped)" },
-    { "name": "SOURCE_DATE_EPOCH", "description": "Fixed Unix timestamp used instead of the wall clock for reproducible output" },
+    { "name": "SOURCE_DATE_EPOCH", "description": "Unix seconds. Pins the `verify` manifest timestamp so identical inputs give a byte-identical manifest. A set but malformed value is an E_BAD_INPUT refusal, not a fallback to the clock. Witness records keep the real wall clock." },
     { "name": "TERM", "description": "TERM=dumb disables ANSI color in human output" }
   ],
   "formats": ["json", "text"],

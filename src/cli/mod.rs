@@ -85,7 +85,11 @@ pub struct AssembleArgs {
     )]
     pub boundary_mode: BoundaryMode,
 
-    #[arg(long, help = "Path to write prompt_payload.json")]
+    #[arg(
+        long,
+        visible_alias = "output",
+        help = "Path to write prompt_payload.json"
+    )]
     pub out: PathBuf,
 
     #[arg(long = "provenance-out", help = "Path to write prompt_provenance.json")]
@@ -112,7 +116,11 @@ pub struct VerifyArgs {
     #[arg(long, help = "Transport-wrapped model request JSON")]
     pub request: PathBuf,
 
-    #[arg(long, help = "Path to write airlock_manifest.json")]
+    #[arg(
+        long,
+        visible_alias = "output",
+        help = "Path to write airlock_manifest.json"
+    )]
     pub out: PathBuf,
 
     #[arg(

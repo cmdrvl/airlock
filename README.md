@@ -255,7 +255,7 @@ Deterministic prompt assembly from policy + inputs.
 airlock assemble \
   --policy <PATH>           # Boundary policy (YAML)
   --input <PATH>...         # Input artifacts (JSON, one or more)
-  --out <PATH>              # Output prompt_payload.json
+  --out <PATH>              # Output prompt_payload.json (alias: --output)
   --provenance-out <PATH>   # Output prompt_provenance.json
   --boundary-mode <MODE>    # ANNOTATED (default) or TELEMETRY_ONLY
   --system-prompt <PATH>    # Optional system prompt file
@@ -272,7 +272,7 @@ airlock verify \
   --prompt <PATH>           # prompt_payload.json from assemble
   --provenance <PATH>       # prompt_provenance.json from assemble
   --request <PATH>          # Transport-wrapped request (JSON)
-  --out <PATH>              # Output airlock_manifest.json
+  --out <PATH>              # Output airlock_manifest.json (alias: --output)
   --require-claim <LEVEL>   # Optional: fail if claim is below this level
   --no-witness              # Skip witness ledger recording
 ```
@@ -344,6 +344,14 @@ Flag precedence: `--describe` > `--schema` > `--version` > subcommand.
 
 Refusals emit structured JSON to stdout with a `refusal.code` field
 (`E_BAD_POLICY`, `E_MISSING_FILE`, `E_BAD_INPUT`, etc.).
+
+### Environment
+
+| Variable | Effect |
+|----------|--------|
+| `EPISTEMIC_WITNESS` | Override the witness ledger path (default `~/.cmdrvl/state/witness/witness.jsonl`) |
+| `SOURCE_DATE_EPOCH` | Unix seconds. Pins the `verify` manifest `timestamp`, so identical inputs produce a byte-identical manifest. A set but malformed value is an `E_BAD_INPUT` refusal (exit 2, `detail.env`/`value`/`expected`), never a silent fallback to the clock. Witness records keep the real wall clock. |
+| `NO_COLOR`, `TERM=dumb` | Airlock does not colorize output. No surface emits an ANSI escape when piped, with or without these set, and `NO_COLOR` wins over `CLICOLOR_FORCE` (regression-tested). |
 
 ## Proof-Carrying Prompt
 

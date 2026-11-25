@@ -1,9 +1,56 @@
 use std::io::{self, Write};
 
+use chrono::{DateTime, TimeZone, Utc};
 use serde_json::{Map, Value};
 
 const OPERATOR_JSON: &str = include_str!("../operator.json");
 const OUTPUT_SCHEMA: &str = include_str!("../schemas/airlock.v0.schema.json");
+
+/// Environment variable that pins the instant stamped into reproducible output
+/// (reproducible-builds.org convention: Unix seconds).
+pub const SOURCE_DATE_EPOCH_ENV: &str = "SOURCE_DATE_EPOCH";
+
+/// A `SOURCE_DATE_EPOCH` value that is not valid Unix seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidSourceDateEpoch {
+    /// The offending value (lossy for non-UTF-8).
+    pub value: String,
+    /// Why it was rejected.
+    pub reason: String,
+}
+
+/// The current UTC instant, or the fixed instant named by `SOURCE_DATE_EPOCH`.
+///
+/// A set-but-invalid value is an error, never a silent fallback to the wall
+/// clock: falling back would quietly break the reproducibility the caller asked for.
+pub fn now_utc() -> Result<DateTime<Utc>, InvalidSourceDateEpoch> {
+    match std::env::var_os(SOURCE_DATE_EPOCH_ENV) {
+        None => Ok(Utc::now()),
+        Some(raw) => match raw.to_str() {
+            Some(value) => fixed_instant(value),
+            None => Err(InvalidSourceDateEpoch {
+                value: raw.to_string_lossy().into_owned(),
+                reason: "value is not valid UTF-8".to_owned(),
+            }),
+        },
+    }
+}
+
+/// Parse a `SOURCE_DATE_EPOCH` value: whole Unix seconds, no surrounding whitespace.
+pub fn fixed_instant(value: &str) -> Result<DateTime<Utc>, InvalidSourceDateEpoch> {
+    let seconds = value
+        .parse::<i64>()
+        .map_err(|error| InvalidSourceDateEpoch {
+            value: value.to_owned(),
+            reason: format!("expected Unix seconds: {error}"),
+        })?;
+    Utc.timestamp_opt(seconds, 0)
+        .single()
+        .ok_or_else(|| InvalidSourceDateEpoch {
+            value: value.to_owned(),
+            reason: "Unix seconds out of range".to_owned(),
+        })
+}
 
 /// Recursively sort all object keys in a JSON value.
 ///
@@ -162,6 +209,24 @@ mod tests {
             value["invocation"]["output_schema"],
             "airlock.v0.schema.json"
         );
+    }
+
+    #[test]
+    fn fixed_instant_parses_unix_seconds() {
+        let instant = fixed_instant("1700000000").unwrap();
+        assert_eq!(instant.to_rfc3339(), "2023-11-14T22:13:20+00:00");
+        assert_eq!(fixed_instant("0").unwrap().timestamp(), 0);
+    }
+
+    #[test]
+    fn fixed_instant_rejects_malformed_and_out_of_range_values() {
+        for bad in ["", " 1700000000", "1700000000 ", "1.5", "yesterday", "0x10"] {
+            let error = fixed_instant(bad).unwrap_err();
+            assert_eq!(error.value, bad);
+            assert!(error.reason.starts_with("expected Unix seconds"), "{bad:?}");
+        }
+        let error = fixed_instant("9223372036854775807").unwrap_err();
+        assert_eq!(error.reason, "Unix seconds out of range");
     }
 
     #[test]

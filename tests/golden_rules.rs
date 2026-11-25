@@ -13,7 +13,11 @@
 //! - `fixture_empty_query_args`: `witness query|last|count` currently exits 1 on an
 //!   empty result, which the family contract wants as exit 0 with `[]`.
 //!   `operator.json` declares the current behaviour; the gap is tracked separately.
-//! - `fixture_timestamped_args` (`SOURCE_DATE_EPOCH`): see al-n9f.
+//!
+//! Also opted in: `fixture_timestamped_args` (`SOURCE_DATE_EPOCH`): a real `verify`
+//! run whose manifest stdout must be identical across runs under one epoch. The
+//! manifest is written under `CARGO_TARGET_TMPDIR` because `--out` writes atomically
+//! next to the destination; only that one generated test uses the path.
 
 use spine_rules::golden_rules_suite;
 
@@ -28,6 +32,15 @@ golden_rules_suite! {
         "--provenance", "does-not-exist/prompt_provenance.json",
         "--request", "does-not-exist/request.json",
         "--out", "does-not-exist/airlock_manifest.json",
+        "--no-witness",
+    ],
+    fixture_timestamped_args: &[
+        "verify",
+        "--policy", "fixtures/clean_telemetry_only/policy.yaml",
+        "--prompt", "fixtures/clean_telemetry_only/expected_prompt_payload.json",
+        "--provenance", "fixtures/clean_telemetry_only/expected_prompt_provenance.json",
+        "--request", "fixtures/clean_telemetry_only/request.json",
+        "--out", concat!(env!("CARGO_TARGET_TMPDIR"), "/golden_rules_manifest.json"),
         "--no-witness",
     ],
 }

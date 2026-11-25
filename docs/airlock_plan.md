@@ -902,6 +902,18 @@ after writing the manifest.
 existing manifest. It does not re-run policy loading, prompt assembly, request
 scanning, or witness recording.
 
+`--out` is the canonical output flag on `assemble` and `verify`; `--output` is
+accepted as a declared alias (`operator.json` lists it under `aliases`), never as
+a primary flag.
+
+`SOURCE_DATE_EPOCH` (Unix seconds) pins the `verify` manifest timestamp so the same
+inputs yield a byte-identical manifest. A set but malformed value is an
+`E_BAD_INPUT` refusal (exit 2) raised before any input is read, never a silent
+fallback to the wall clock. Witness records keep the real clock: the ledger is a
+local receipt of when a run actually happened. Airlock does not colorize output:
+no surface emits an ANSI escape when piped, with or without `NO_COLOR` /
+`TERM=dumb`, and `NO_COLOR` wins over `CLICOLOR_FORCE`.
+
 `operator.json` conforms to the `spine-rules` `operator.v1` family contract and
 is the single source for `--describe`, `capabilities --json` (byte-identical to
 `--describe`) and the `contract` embedded in `doctor capabilities --json`.

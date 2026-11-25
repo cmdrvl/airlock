@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::Path;
 
-use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::adapter::OPENAI_CHAT_COMPLETIONS_ADAPTER_NAME;
@@ -10,7 +9,7 @@ use crate::assembler::PromptProvenance;
 use crate::cli::{VERIFY_PARTIAL, VERIFY_PASS, VerifyArgs};
 use crate::hash::blake3_hash;
 use crate::manifest::ManifestBuilder;
-use crate::output::{canonical_json_bytes, sort_value};
+use crate::output::{SOURCE_DATE_EPOCH_ENV, canonical_json_bytes, now_utc, sort_value};
 use crate::policy::{self, AirlockPolicy};
 use crate::refusal::RefusalEnvelope;
 use crate::scanner;
@@ -34,6 +33,24 @@ fn run_with_writers(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> u8 {
+    // Resolve the manifest instant first: SOURCE_DATE_EPOCH pins it for reproducible
+    // output, and a malformed value refuses before any input is read.
+    let manifest_instant = match now_utc() {
+        Ok(instant) => instant,
+        Err(invalid) => {
+            return RefusalEnvelope::bad_input_with_next_command(
+                format!("invalid {SOURCE_DATE_EPOCH_ENV}: {}", invalid.reason),
+                json!({
+                    "env": SOURCE_DATE_EPOCH_ENV,
+                    "value": invalid.value,
+                    "expected": "Unix seconds",
+                }),
+                "airlock verify --help",
+            )
+            .write_to(stdout);
+        }
+    };
+
     let policy = match policy::load_policy(&args.policy) {
         Ok(policy) => policy,
         Err(refusal) => return refusal.write_to(stdout),
@@ -129,7 +146,7 @@ fn run_with_writers(
         .filing_derived_text_present(verify_result.filing_derived_text_present)
         .findings(verify_result.findings)
         .blocked_reasons(verify_result.blocked_reasons)
-        .timestamp(Utc::now().to_rfc3339())
+        .timestamp(manifest_instant.to_rfc3339())
         .build()
     {
         Ok(manifest) => manifest,

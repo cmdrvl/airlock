@@ -1546,9 +1546,10 @@ Lattice)**, projecting its exact `attestation_mode`, `achieved_claim`, and
    base64/hex decode-and-rescan and `PROTECTED_CORPUS_MATCH` Bloom matching) so
    ingress and egress scanners never drift.
 5. **Runtime & cryptographic scope discipline for v1 velocity:**
-   - Build `airlock gate` on **`asupersync`** for cancel-correct concurrent
-     HTTP/SSE proxying, strict upstream timeouts, zero-buffering SSE chunk
-     hashing, and guaranteed teardown when parent `veil sandbox` exits.
+   - Keep `airlock gate` lightweight and runtime-agnostic: prioritize
+     cancel-correct concurrent HTTP/SSE proxying, strict upstream timeouts,
+     zero-buffering SSE chunk hashing, and guaranteed teardown when parent
+     `veil sandbox` exits without forcing a heavy runtime migration.
    - Prioritize unprivileged **macOS Seatbelt** and **Linux Landlock ABI 4+**
      egress rules (`al-28e`); treat root `netns`/`veth` and `pf` anchors as
      optional hardening recipes.

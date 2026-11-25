@@ -1705,7 +1705,7 @@ fn test_operator_json_declares_output_only_as_an_alias_of_out() {
             .stdout,
     );
 
-    let mut out_options = 0;
+    let mut out_commands: Vec<String> = Vec::new();
     for command in describe["commands"].as_array().unwrap() {
         for option in command["options"].as_array().into_iter().flatten() {
             let flag = option["flag"].as_str().unwrap();
@@ -1717,7 +1717,7 @@ fn test_operator_json_declares_output_only_as_an_alias_of_out() {
                 .collect();
             assert_ne!(flag, "--output", "--output must not be a primary flag");
             if flag == "--out" {
-                out_options += 1;
+                out_commands.push(command["name"].as_str().unwrap().to_string());
                 assert!(
                     aliases.contains(&"--output"),
                     "{} --out must declare --output as an alias",
@@ -1732,7 +1732,13 @@ fn test_operator_json_declares_output_only_as_an_alias_of_out() {
             }
         }
     }
-    assert_eq!(out_options, 2, "assemble and verify both take --out");
+    // Named, not counted: a command that gains `--out` must be added here on purpose.
+    out_commands.sort();
+    assert_eq!(
+        out_commands,
+        ["assemble", "send", "verify"],
+        "assemble, verify and send take --out"
+    );
 }
 
 fn contains_escape(bytes: &[u8]) -> bool {

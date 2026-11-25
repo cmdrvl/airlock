@@ -12,6 +12,7 @@
     "usage": [
       "airlock assemble --policy <POLICY> --input <FILE>... --out <PROMPT> --provenance-out <PROVENANCE>",
       "airlock verify --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --request <REQUEST> --out <MANIFEST> [--require-claim <LEVEL>]",
+      "airlock send --policy <POLICY> --prompt <PROMPT> --provenance <PROVENANCE> --transport <TRANSPORT> --out <MANIFEST> --request-out <REQUEST> [--response-out <FILE>] [--require-claim <LEVEL>]",
       "airlock gate --mode policy-proxy --policy <POLICY> --upstream <ORIGIN> [--protected-bloom <FILE>]",
       "airlock gate --mode strict-manifest --manifest-dir <DIR> --upstream <ORIGIN>",
       "airlock explain --manifest <MANIFEST> [--json]",
@@ -68,6 +69,25 @@
         { "name": "require_claim", "flag": "--require-claim", "type": "string", "description": "Minimum acceptable claim: BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT or STRICT_TELEMETRY_ONLY" },
         { "name": "not_crossed", "flag": "--not-crossed", "type": "file_path", "description": "not_crossed.json from `airlock assemble --not-crossed-out`; refused unless it belongs to this run (same policy, prompt payload and boundary mode). Its entries are copied into the manifest; without it the manifest records no negative inventory" },
         { "name": "no_sign", "flag": "--no-sign", "type": "flag", "description": "Write the manifest without an Ed25519 signature. By default verify signs with the key from `airlock keygen` and refuses when there is none" },
+        { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
+      ],
+      "read_only": false,
+      "records_witness": true
+    },
+    {
+      "name": "send",
+      "description": "Verify a request and transmit it to a model endpoint in one process, then record what crossed. Builds the request from the assembled prompt with the adapter named in --transport, judges it with the same code as `verify`, POSTs exactly the RFC 8785 canonical bytes that request_payload_hash covers and bytes_crossed measures, and writes an airlock.v0.3 manifest whose `transmission` member records the endpoint host, bytes, hashes, status and latency. Only the request body is attested: headers are not hashed or recorded, and HTTP(S)_PROXY is honoured, so the manifest names the endpoint, not a proxy. Redirects are never followed. The API key is read from the environment variable the transport file names and is never written anywhere. https is required except to a loopback host. Exit 0: the exchange completed and a response was received (any HTTP status). Exit 1: the achieved claim was below --require-claim (default RAW_DOCUMENT_ABSENT) and nothing was sent. Exit 2: a refusal; for E_TRANSPORT, detail.sent says whether the body may have reached the endpoint.",
+      "options": [
+        { "name": "policy", "flag": "--policy", "type": "file_path", "required": true, "description": "Boundary policy YAML used during assembly" },
+        { "name": "prompt", "flag": "--prompt", "type": "file_path", "required": true, "description": "prompt_payload.json produced by airlock assemble" },
+        { "name": "provenance", "flag": "--provenance", "type": "file_path", "required": true, "description": "prompt_provenance.json produced by airlock assemble" },
+        { "name": "transport", "flag": "--transport", "type": "file_path", "required": true, "description": "JSON transport declaration: adapter, model, url, api_key_env, and optionally params, headers, auth_header, timeout_seconds (default 120, max 900), max_response_bytes (default 32 MiB, max 256 MiB) and, for generic_json, the JSON pointers. May not set credential or framing headers" },
+        { "name": "out", "flag": "--out", "aliases": ["--output"], "type": "file_path", "required": true, "description": "Path to write airlock_manifest.json. A pre-send manifest (self_attested, no transmission) is written first and replaced after the exchange" },
+        { "name": "request_out", "flag": "--request-out", "type": "file_path", "required": true, "description": "Path to write the exact request bytes that were sent (owner-only). It is the manifest's replay_ref" },
+        { "name": "response_out", "flag": "--response-out", "type": "file_path", "description": "Path to write the response body, only when it was received completely (owner-only)" },
+        { "name": "require_claim", "flag": "--require-claim", "type": "string", "description": "Minimum claim needed to send: BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT or STRICT_TELEMETRY_ONLY. Defaults to RAW_DOCUMENT_ABSENT, so a request that failed the boundary check is sent only with an explicit --require-claim BOUNDARY_FAILED" },
+        { "name": "not_crossed", "flag": "--not-crossed", "type": "file_path", "description": "not_crossed.json from `airlock assemble --not-crossed-out`; same rules as `verify`" },
+        { "name": "no_sign", "flag": "--no-sign", "type": "flag", "description": "Write the manifest without an Ed25519 signature. By default send signs with the key from `airlock keygen` and refuses when there is none" },
         { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
       ],
       "read_only": false,
@@ -163,8 +183,8 @@
     }
   ],
   "exit_codes": {
-    "0": { "meaning": "VERIFY_PASS: the command completed and any --require-claim was met; also a healthy doctor, every read-only discovery surface, any `witness query|last|count`, including one with an empty result, and a `witness verify` whose chain is intact (a verify that earns BOUNDARY_FAILED without --require-claim still exits 0 with an honest manifest verdict)", "domain": "positive" },
-    "1": { "meaning": "VERIFY_PARTIAL: verification completed but the achieved claim fell below --require-claim; also `doctor` reporting an unhealthy state (an error finding); also `witness verify` reporting CHAIN_BROKEN or HEAD_MISMATCH", "domain": "negative" },
+    "0": { "meaning": "VERIFY_PASS: the command completed and any --require-claim was met; also a healthy doctor, every read-only discovery surface, any `witness query|last|count`, including one with an empty result, a `witness verify` whose chain is intact, and a `send` whose exchange completed with a response (any HTTP status) (a verify that earns BOUNDARY_FAILED without --require-claim still exits 0 with an honest manifest verdict)", "domain": "positive" },
+    "1": { "meaning": "VERIFY_PARTIAL: verification completed but the achieved claim fell below --require-claim (for `send`, nothing was sent); also `doctor` reporting an unhealthy state (an error finding); also `witness verify` reporting CHAIN_BROKEN or HEAD_MISMATCH", "domain": "negative" },
     "2": { "meaning": "REFUSAL or CLI/usage error: a structured refusal envelope on stdout (bad policy, input, prompt, request, provenance or manifest, missing file, witness or internal error), or a clap usage error", "domain": "error" }
   },
   "refusals": [
@@ -181,6 +201,7 @@
   ],
   "env_vars": [
     { "name": "EPISTEMIC_WITNESS", "description": "Override the witness ledger path", "default": "~/.cmdrvl/state/witness/witness.jsonl" },
+    { "name": "HTTPS_PROXY", "description": "`send` honours HTTPS_PROXY, HTTP_PROXY, ALL_PROXY and NO_PROXY (and their lowercase forms) like any HTTP client. The manifest records the endpoint host, not the proxy the bytes went through" },
     { "name": "NO_COLOR", "description": "Disable ANSI color in human output (airlock emits none when piped)" },
     { "name": "SOURCE_DATE_EPOCH", "description": "Unix seconds. Pins the `verify` manifest timestamp so identical inputs give a byte-identical manifest. A set but malformed value is an E_BAD_INPUT refusal, not a fallback to the clock. Witness records keep the real wall clock." },
     { "name": "TERM", "description": "TERM=dumb disables ANSI color in human output" }
@@ -191,7 +212,7 @@
     "writes_files": true,
     "network": true,
     "writes_witness": true,
-    "notes": "assemble and verify write the paths given by --out/--provenance-out; gate writes receipts under --out-dir and forwards through its loopback listener. These commands append witness records unless --no-witness is set; explain, witness, doctor, capabilities, robot-docs and verify-manifest are read-only. keygen writes ed25519.key and ed25519.pub under ~/.cmdrvl/secrets/airlock/ (never overwriting) and records nothing in the witness ledger; verify reads that key to sign unless --no-sign is set."
+    "notes": "send is the one command that transmits a model request: it POSTs to the url in the --transport file, reads the API key from the environment variable that file names (api_key_env), and writes --out, --request-out and optionally --response-out. assemble and verify write the paths given by --out/--provenance-out; gate writes receipts under --out-dir and forwards through its loopback listener. These commands append witness records unless --no-witness is set; explain, witness, doctor, capabilities, robot-docs and verify-manifest are read-only. keygen writes ed25519.key and ed25519.pub under ~/.cmdrvl/secrets/airlock/ (never overwriting) and records nothing in the witness ledger; verify reads that key to sign unless --no-sign is set."
   },
   "pipeline": {
     "upstream": ["vacuum", "hash", "fingerprint", "benchmark", "assess"],
@@ -199,8 +220,8 @@
   },
   "witness": {
     "tool_name": "airlock",
-    "recording_commands": ["assemble", "verify", "gate"],
+    "recording_commands": ["assemble", "verify", "send", "gate"],
     "non_recording_commands": ["keygen", "verify-manifest", "explain", "doctor", "capabilities", "robot-docs", "witness"],
-    "outcomes": ["ASSEMBLED", "VERIFIED", "VERIFY_PARTIAL", "GATED", "BOUNDARY_FAILED", "GATE_UPSTREAM_ERROR", "GATE_STREAM_INTERRUPTED", "REFUSAL"]
+    "outcomes": ["ASSEMBLED", "VERIFIED", "VERIFY_PARTIAL", "GATED", "BOUNDARY_FAILED", "GATE_UPSTREAM_ERROR", "GATE_STREAM_INTERRUPTED", "SENDING", "SENT", "SEND_FAILED", "NOT_SENT", "REFUSAL"]
   }
 }

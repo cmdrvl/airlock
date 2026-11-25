@@ -93,6 +93,38 @@ airlock verify-manifest airlock_manifest.json
 needed unless you pass `--no-sign` (for CI, which has no key) to get an unsigned
 manifest. Step 4 and the `--not-crossed-out` / `--not-crossed` pair are optional.
 
+### Send
+
+`airlock send` is `verify` plus the transmission, in one process, so the bytes
+that were judged are the bytes that crossed. It builds the request from the
+assembled prompt, runs the same checks as `verify`, POSTs the RFC 8785 canonical
+request, and writes a manifest saying what crossed.
+
+```bash
+# transport.json: api_key_env names the environment variable that holds the key
+# {"adapter": "openai_chat_completions", "model": "gpt-5",
+#  "url": "https://api.openai.com/v1/chat/completions", "api_key_env": "OPENAI_API_KEY"}
+
+airlock send \
+  --policy rules/tournament_baseline.yaml \
+  --prompt prompt_payload.json \
+  --provenance prompt_provenance.json \
+  --transport transport.json \
+  --out airlock_manifest.json \
+  --request-out request.json \
+  --response-out response.json \
+  --require-claim STRICT_TELEMETRY_ONLY
+```
+
+The manifest's `transmission` member records the endpoint host, the request's
+size and hash, when it was sent, the response status, size and hash, and the
+latency (see [Manifest versions](#manifest-versions)). `request.json` holds the
+exact bytes that were sent and is the manifest's `replay_ref`.
+
+Read [`airlock send`](#airlock-send) before relying on it: what it attests is
+narrower than "the exchange", and a failed exchange is recorded as "may have
+been sent", not as "was not".
+
 ### Egress gate
 
 `airlock gate` exposes a loopback HTTP proxy for SDK driven conversations. Select
@@ -409,6 +441,86 @@ created. It loads that key before it reads any input, so with no usable key it
 refuses (`E_BAD_INPUT`, `next_command: airlock keygen`) instead of quietly
 writing an unsigned manifest. `--no-sign` writes the manifest without a signature.
 
+### `airlock send`
+
+Verify a prompt, transmit the request to a model endpoint, and record what
+crossed.
+
+```bash
+airlock send \
+  --policy <PATH>           # Boundary policy (YAML)
+  --prompt <PATH>           # prompt_payload.json from assemble
+  --provenance <PATH>       # prompt_provenance.json from assemble
+  --transport <PATH>        # Transport declaration (JSON, below)
+  --out <PATH>              # Output airlock_manifest.json (alias: --output)
+  --request-out <PATH>      # The exact request bytes sent (owner-only); the manifest's replay_ref
+  --response-out <PATH>     # Optional: the response body, only when received completely (owner-only)
+  --require-claim <LEVEL>   # Optional: the minimum claim needed to send (default RAW_DOCUMENT_ABSENT)
+  --not-crossed <PATH>      # Optional: not_crossed.json, as for verify
+  --no-sign                 # Write the manifest without a signature
+  --no-witness              # Skip witness ledger recording
+```
+
+**The transport file** names the adapter and endpoint. Members: `adapter`,
+`model`, `url` and `api_key_env` are required; `params` (`temperature`,
+`max_tokens` and `response_format` are typed, other members pass through to the
+adapter), `headers`, `auth_header`, `timeout_seconds` (default 120, at most 900),
+`max_response_bytes` (default 32 MiB, at most 256 MiB) and, for `generic_json`,
+the same pointers `verify --transport` takes. An unknown member is refused. The
+adapter must be named: `send` does not guess it.
+
+**What `send` does, in order.** It refuses before it writes or sends anything for
+a bad transport file, URL, key, input or output path. It then writes the request
+bytes to `--request-out`. If the achieved claim is below `--require-claim` it
+writes the manifest (`transmission.sent: false`, `CLAIM_BELOW_REQUIRED`), sends
+nothing and exits `1`. Otherwise it writes a pre-send manifest and a `SENDING`
+witness record, so a process killed during a model call that runs for tens of
+seconds leaves evidence that something may be in flight, then POSTs, reads the
+response, and replaces the manifest with the final, re-signed one.
+
+**`--require-claim` defaults to `RAW_DOCUMENT_ABSENT`.** A request that failed
+the boundary check is not sent unless you pass `--require-claim BOUNDARY_FAILED`.
+
+**The credential.** The API key is read from the environment variable named by
+`api_key_env` and goes only in a request header: `Authorization: Bearer` for the
+OpenAI adapters, `x-api-key` (plus `anthropic-version`) for Anthropic,
+`x-goog-api-key` for Gemini; `generic_json` has no default and requires
+`auth_header`, which overrides any adapter's default (`Bearer <key>` for the name
+`authorization`, the bare key for any other). It is never in
+the manifest, the witness record, the request or response file, stdout or
+stderr. A transport file may not set credential or framing headers itself.
+
+**The endpoint.** The URL must be `https`, except to a loopback host, and may not
+carry credentials, a query or a fragment. A refused URL is never quoted back in
+the refusal. Redirects are not followed: a 307 would re-send the body to a host
+the transport file did not name, so a 3xx is recorded as the response it is.
+
+**Exit codes.** `0`: the exchange completed and a response arrived (an HTTP 500
+is a completed exchange; read `transmission.response_status`). `1`: the claim was
+below `--require-claim` and nothing was sent. `2`: a refusal. An `E_TRANSPORT`
+refusal carries `detail.sent`: `false` means the body was certainly never written
+(no connection was made), `true` means it may have reached the endpoint. A write
+failure after a completed exchange is `E_BAD_INPUT` with `sent` and the
+`transmission` in its detail.
+
+**Witness outcomes** for `send`: `SENDING` (before the POST), then `SENT` (the
+exchange completed, or a later write failed), `SEND_FAILED` (sent, no complete
+response) or `NOT_SENT`.
+
+**What `send` does not attest.**
+
+- Only the request **body** is attested. Headers are not hashed or recorded.
+- `send` honours `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` like any
+  HTTP client, and the manifest records the endpoint host, not a proxy the bytes
+  went through.
+- `sent: true` means the body may have reached the endpoint. After connect, any
+  failure that cannot rule the write out (a TLS error, a reset, a timeout) is
+  recorded as sent with no response, so the manifest over-reports what crossed
+  and never under-reports it.
+- `response_hash` covers the response body as received, not that it is correct.
+- No overall timeout is set, only per-phase ones, because an overall timeout that
+  fires during a stalled connect looks the same as a stall after the body went out.
+
 ### `airlock explain`
 
 Manifest rendering as human-readable text or deterministic explanation JSON.
@@ -432,6 +544,13 @@ that was given no inventory; `[]` means nothing was left out). `signature.checke
 is always `false`: `explain` does not verify the signature, `verify-manifest` does,
 and the signature bytes are not repeated. An `airlock.v0.2` manifest explains
 exactly as it did before v0.3.
+
+A manifest written by `airlock send` also gets a `Transmission:` block: `SENT` or
+`NOT SENT`, the endpoint host, when, the request's size and hash, and the response's
+status, size and hash. A failed exchange reads "the request body may have reached
+the endpoint", never "delivered". `--json` adds a `transmission` member, left out
+(not `null`) for a manifest that has none, so every other manifest explains exactly
+as before.
 
 `--manifest` also accepts an `airlock.gate.v1` gate receipt. The output then says
 what the gate did (denied, forwarded, forwarded with an incomplete response, or
@@ -517,7 +636,7 @@ airlock witness verify [--expect-head HASH] [--json]
 
 #### The witness chain
 
-Every record Airlock appends (`assemble`, `verify`, `gate`) carries a
+Every record Airlock appends (`assemble`, `verify`, `send`, `gate`) carries a
 `prev_hash`: `blake3:` and the hash of the exact bytes of the previous
 *airlock* line in the ledger (without its newline), or 64 zeros for the first.
 Other tools append to the same ledger without taking part, so their lines are
@@ -570,12 +689,12 @@ Flag precedence: `--describe` > `--schema` > `--version` > subcommand.
 
 | Code | Domain | Meaning |
 |------|--------|---------|
-| `0`  | positive | `VERIFY_PASS` — achieved claim meets or exceeds requirement; also a healthy `doctor`; also any `witness query\|last\|count`, including one with no matching records, and a `witness verify` whose chain holds |
-| `1`  | negative | `VERIFY_PARTIAL` — achieved claim is below `--require-claim`; also an unhealthy `doctor`; also `witness verify` reporting `CHAIN_BROKEN` or `HEAD_MISMATCH` |
+| `0`  | positive | `VERIFY_PASS` — achieved claim meets or exceeds requirement; also a healthy `doctor`; also any `witness query\|last\|count`, including one with no matching records, and a `witness verify` whose chain holds; also a `send` whose exchange completed with a response (any HTTP status) |
+| `1`  | negative | `VERIFY_PARTIAL` — achieved claim is below `--require-claim` (for `send`, nothing was sent); also an unhealthy `doctor`; also `witness verify` reporting `CHAIN_BROKEN` or `HEAD_MISMATCH` |
 | `2`  | error | `REFUSAL` — structured error (bad input, missing file, etc.) or CLI usage error |
 
 Refusals emit structured JSON to stdout with a `refusal.code` field
-(`E_BAD_POLICY`, `E_MISSING_FILE`, `E_BAD_INPUT`, etc.).
+(`E_BAD_POLICY`, `E_MISSING_FILE`, `E_BAD_INPUT`, `E_TRANSPORT`, etc.).
 
 ### Environment
 
@@ -584,6 +703,8 @@ Refusals emit structured JSON to stdout with a `refusal.code` field
 | `EPISTEMIC_WITNESS` | Override the witness ledger path (default `~/.cmdrvl/state/witness/witness.jsonl`) |
 | `HOME` (or `USERPROFILE`) | Where the signing key pair lives, `~/.cmdrvl/secrets/airlock/`. `keygen`, `verify` and `verify-manifest` refuse when it is unset or empty; there is no relative-path fallback. |
 | `SOURCE_DATE_EPOCH` | Unix seconds. Pins the `verify` manifest `timestamp`, so identical inputs produce a byte-identical manifest. A set but malformed value is an `E_BAD_INPUT` refusal (exit 2, `detail.env`/`value`/`expected`), never a silent fallback to the clock. Witness records keep the real wall clock. |
+| the variable named by `api_key_env` | `send` reads its API key from here, only into a request header. A transport file naming an unset or empty variable is refused before anything is written. |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` (and lowercase) | `send` honours these like any HTTP client. The manifest records the endpoint host, not the proxy. |
 | `NO_COLOR`, `TERM=dumb` | Airlock does not colorize output. No surface emits an ANSI escape when piped, with or without these set, and `NO_COLOR` wins over `CLICOLOR_FORCE` (regression-tested). |
 
 ## Transport adapters
@@ -644,15 +765,16 @@ Airlock artifacts, not in operator memory.
 
 ### Manifest versions
 
-`airlock.v0.2` is the earlier manifest. `airlock.v0.3`, which `verify` now writes,
-adds four members, none of which a v0.2 manifest may carry (the schema forbids
-it). Existing v0.2 manifests stay valid and unchanged, and `airlock gate` reads
+`airlock.v0.2` is the earlier manifest. `airlock.v0.3`, which `verify` and `send`
+now write, adds five members, none of which a v0.2 manifest may carry (the schema
+forbids it). Existing v0.2 manifests stay valid and unchanged, and `airlock gate` reads
 both versions.
 
 | Member | Meaning |
 |--------|---------|
 | `bytes_crossed` | Length in bytes of the RFC 8785 canonical request JSON that `request_payload_hash` covers |
-| `attestation` | `self_attested`: written by `airlock verify`. `transmitted` and `gated` are reserved for send and gate receipts and are not written yet |
+| `attestation` | `self_attested`: written by `airlock verify`, or by `airlock send` when nothing was sent. `transmitted`: written by `airlock send` when `transmission.sent` is true. `gated` is reserved for gate receipts and is not written yet |
+| `transmission` | Only a manifest written by `airlock send`. `sent` (true means the body **may** have reached the endpoint), `endpoint_host` (never the path, query or credentials), `request_bytes`, `request_hash`, and, when sent, `sent_at` and `latency_ms`. A completed exchange adds `response_status`, `response_hash` and `response_bytes` (all three or none). `error` is one of `CLAIM_BELOW_REQUIRED`, `CONNECT_FAILED` (both: not sent), `RESPONSE_TIMEOUT`, `RESPONSE_TOO_LARGE`, `TRANSPORT_ERROR` (sent, no complete response). `request_hash` is `request_payload_hash` and `request_bytes` is `bytes_crossed` |
 | `not_crossed` | Only when `verify` was given `--not-crossed`: one entry per input field that did not cross, with `path`, `source_artifact_hash`, `value_hash` and `reason` (`NOT_ALLOWED`, `FORBIDDEN_KEY`, `DERIVED_TEXT_EXCLUDED` or `SHADOWED_BY_EARLIER_INPUT`) |
 | `signature` | Absent under `--no-sign`. `{algorithm: "ed25519", public_key_fingerprint, value}` over the manifest without this member |
 
@@ -727,6 +849,9 @@ includes detector findings from the manifest.
 - why stronger claims failed
 - which exact prompt fragments were `TELEMETRY` vs `DERIVED_TEXT`
 - how many bytes crossed (`bytes_crossed`, v0.3)
+- for a manifest written by `airlock send`: that the exact request bytes the manifest
+  hashes were handed to the connection for the named endpoint host, or that nothing
+  was (`transmission`, v0.3)
 - which input fields stayed behind and why, by hash, when `verify` was given the inventory (v0.3)
 - that a signed manifest has not changed since it was signed with a given key (`verify-manifest`)
 
@@ -735,8 +860,13 @@ includes detector findings from the manifest.
 - who holds the signing key, or that it was not copied: the key is local and
   self-issued, so a signature shows the manifest is unaltered since signing, not
   who signed it
-- that a v0.3 manifest was witnessed by anything but `airlock verify`
-  (`attestation: self_attested`)
+- that a v0.3 manifest was witnessed by anything but `airlock verify` or
+  `airlock send` (`attestation: self_attested` or `transmitted`): both are
+  written by the process that made the request
+- what a `send` request carried beyond its body: headers are not attested, and
+  a proxy honoured from the environment is not recorded
+- that the endpoint is the party it claims to be, beyond the TLS the platform
+  verifies, or that the response is correct
 - that a strict-manifest gate checked any signature: it does so only when a key
   is configured, and `GET /airlock/health` shows whether one was (`signature_key`)
 - that the witness ledger is complete or unaltered: the `prev_hash` chain

@@ -8,7 +8,7 @@ use crate::assembler::NotCrossedReason;
 use crate::cli::ExplainArgs;
 use crate::hash::blake3_hash;
 use crate::manifest::gate::GateReceipt;
-use crate::manifest::{AirlockManifest, Attestation};
+use crate::manifest::{AirlockManifest, Attestation, Transmission};
 use crate::output::canonical_json;
 use crate::refusal::RefusalEnvelope;
 use crate::types::{BlockedReason, ClaimLevel, Finding};
@@ -333,6 +333,11 @@ fn json_explanation(manifest: &AirlockManifest, manifest_ref: &str) -> Value {
         // says explain did not verify it.
         explanation["bytes_crossed"] = json!(manifest.bytes_crossed);
         explanation["attestation"] = json!(manifest.attestation.map(Attestation::as_str));
+        // Only a manifest written by `airlock send` carries this. It is left out, not null,
+        // for every other manifest, so their explanation is unchanged.
+        if let Some(transmission) = &manifest.transmission {
+            explanation["transmission"] = json!(transmission);
+        }
         explanation["not_crossed"] = json!(manifest.not_crossed);
         explanation["signature"] = match &manifest.signature {
             Some(signature) => json!({
@@ -431,7 +436,49 @@ fn has_v0_3_fields(manifest: &AirlockManifest) -> bool {
     manifest.bytes_crossed.is_some()
         || manifest.attestation.is_some()
         || manifest.not_crossed.is_some()
+        || manifest.transmission.is_some()
         || manifest.signature.is_some()
+}
+
+/// What `airlock send` recorded about the exchange. `sent: true` is the claim that the request
+/// body may have reached the endpoint, so a failed exchange is worded as "may have", never as
+/// a delivery. Hashes are printed in full; the endpoint is a host only.
+fn render_transmission(output: &mut String, transmission: &Transmission) {
+    let host = &transmission.endpoint_host;
+    let error = transmission.error.map(|error| error.as_str());
+    match (transmission.sent, error) {
+        (false, error) => writeln!(
+            output,
+            "Transmission: NOT SENT to {host} ({}); no request body was written to a connection",
+            error.unwrap_or("no reason recorded")
+        ),
+        (true, None) => writeln!(output, "Transmission: SENT to {host}"),
+        (true, Some(error)) => writeln!(
+            output,
+            "Transmission: SENT to {host} with no complete response ({error}); the request body may have reached the endpoint"
+        ),
+    }
+    .unwrap();
+    if let Some(sent_at) = &transmission.sent_at {
+        match transmission.latency_ms {
+            Some(latency) => writeln!(output, "  At: {sent_at} ({latency} ms to the end)"),
+            None => writeln!(output, "  At: {sent_at}"),
+        }
+        .unwrap();
+    }
+    writeln!(
+        output,
+        "  Request: {} bytes {}",
+        transmission.request_bytes, transmission.request_hash
+    )
+    .unwrap();
+    if let (Some(status), Some(bytes), Some(hash)) = (
+        transmission.response_status,
+        transmission.response_bytes,
+        &transmission.response_hash,
+    ) {
+        writeln!(output, "  Response: HTTP {status}, {bytes} bytes {hash}").unwrap();
+    }
 }
 
 fn attestation_sentence(attestation: Attestation) -> String {
@@ -464,6 +511,9 @@ fn render_v0_3_fields(output: &mut String, manifest: &AirlockManifest) {
     }
     if let Some(attestation) = manifest.attestation {
         writeln!(output, "Attestation: {}", attestation_sentence(attestation)).unwrap();
+    }
+    if let Some(transmission) = &manifest.transmission {
+        render_transmission(output, transmission);
     }
     match &manifest.signature {
         Some(signature) => writeln!(
@@ -552,6 +602,7 @@ mod tests {
     use crate::assembler::NotCrossedEntry;
     use crate::manifest::{
         AIRLOCK_MANIFEST_VERSION, Attestation, ManifestSignature, ProvenanceSummary,
+        TransmissionError,
     };
     use crate::refusal::REFUSAL_OUTCOME;
     use crate::types::{BindingStatus, BoundaryMode, UpstreamArtifact};
@@ -932,6 +983,102 @@ mod tests {
         );
         assert_eq!(attestation_sentence(Attestation::Gated), "gated");
         assert!(attestation_sentence(Attestation::SelfAttested).starts_with("self_attested ("));
+    }
+
+    fn a_transmission(sent: bool, error: Option<TransmissionError>) -> Transmission {
+        Transmission {
+            sent,
+            endpoint_host: "api.example.test".to_string(),
+            request_bytes: 1234,
+            request_hash: hash_of('6'),
+            sent_at: sent.then(|| "2026-03-26T14:00:01Z".to_string()),
+            latency_ms: sent.then_some(87),
+            response_status: None,
+            response_hash: None,
+            response_bytes: None,
+            error,
+        }
+    }
+
+    #[test]
+    fn explain_renders_a_completed_exchange_with_its_response() {
+        let mut manifest = v0_3_manifest(None, false);
+        manifest.attestation = Some(Attestation::Transmitted);
+        let mut transmission = a_transmission(true, None);
+        transmission.response_status = Some(200);
+        transmission.response_hash = Some(hash_of('c'));
+        transmission.response_bytes = Some(5678);
+        manifest.transmission = Some(transmission);
+
+        let rendered = render_manifest(&manifest);
+
+        let expected = format!(
+            "Attestation: transmitted\n\
+             Transmission: SENT to api.example.test\n\
+             \x20 At: 2026-03-26T14:00:01Z (87 ms to the end)\n\
+             \x20 Request: 1234 bytes {}\n\
+             \x20 Response: HTTP 200, 5678 bytes {}\n\
+             Signature: none (unsigned manifest)\n",
+            hash_of('6'),
+            hash_of('c'),
+        );
+        assert!(rendered.contains(&expected), "{rendered}");
+    }
+
+    #[test]
+    fn explain_words_a_failed_exchange_as_may_have_reached_never_as_delivered() {
+        let mut manifest = v0_3_manifest(None, false);
+        manifest.attestation = Some(Attestation::Transmitted);
+        manifest.transmission = Some(a_transmission(
+            true,
+            Some(TransmissionError::ResponseTimeout),
+        ));
+
+        let rendered = render_manifest(&manifest);
+
+        assert!(
+            rendered.contains(
+                "Transmission: SENT to api.example.test with no complete response \
+                 (RESPONSE_TIMEOUT); the request body may have reached the endpoint\n"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("  Response:"), "{rendered}");
+    }
+
+    #[test]
+    fn explain_says_plainly_when_nothing_was_sent() {
+        let mut manifest = v0_3_manifest(None, false);
+        manifest.transmission = Some(a_transmission(
+            false,
+            Some(TransmissionError::ClaimBelowRequired),
+        ));
+
+        let rendered = render_manifest(&manifest);
+
+        assert!(
+            rendered.contains(
+                "Transmission: NOT SENT to api.example.test (CLAIM_BELOW_REQUIRED); \
+                 no request body was written to a connection\n"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("  At:"), "{rendered}");
+    }
+
+    #[test]
+    fn explain_json_carries_transmission_only_when_the_manifest_has_one() {
+        let verified = v0_3_manifest(None, false);
+        let without = json_explanation(&verified, "manifest.json");
+        assert!(without.get("transmission").is_none(), "{without}");
+        assert!(!render_manifest(&verified).contains("Transmission:"));
+
+        let mut sent = v0_3_manifest(None, false);
+        sent.transmission = Some(a_transmission(true, None));
+        let with = json_explanation(&sent, "manifest.json");
+        assert_eq!(with["transmission"]["sent"], true);
+        assert_eq!(with["transmission"]["endpoint_host"], "api.example.test");
+        assert_eq!(with["transmission"]["request_bytes"], 1234);
     }
 
     #[test]

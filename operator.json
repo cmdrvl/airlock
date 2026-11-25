@@ -16,6 +16,7 @@
       "airlock gate --mode strict-manifest --manifest-dir <DIR> --upstream <ORIGIN>",
       "airlock explain --manifest <MANIFEST> [--json]",
       "airlock witness <query|last|count> [filters] [--json]",
+      "airlock witness verify [--expect-head <HASH>] [--json]",
       "airlock doctor [--json]",
       "airlock doctor capabilities --json",
       "airlock doctor triage --json",
@@ -122,10 +123,11 @@
     },
     {
       "name": "witness",
-      "description": "Query the local witness ledger (`query`, `last`, `count`) without recording witness entries. An empty result (no ledger, no records, or a filter that matches nothing) is success: exit 0, with `[]` from `query --json`, `{\"count\":0}` from `count --json` and `null` from `last --json`. A ledger or filter that cannot be read or parsed is a refusal (exit 2).",
-      "subcommands": ["query", "last", "count"],
+      "description": "Query the local witness ledger (`query`, `last`, `count`) and check its hash chain (`verify`) without recording witness entries. An empty result (no ledger, no records, or a filter that matches nothing) is success: exit 0, with `[]` from `query --json`, `{\"count\":0}` from `count --json` and `null` from `last --json`. `verify` walks the airlock entries and checks that each `prev_hash` is the blake3 of the previous airlock line: exit 0 when the chain is intact (or the ledger has no airlock entries), exit 1 with status CHAIN_BROKEN when a link does not hold, or HEAD_MISMATCH when `--expect-head` is given and the chain's head differs. The chain is a local tamper hint, not a proof: it does not detect entries removed from the end or a ledger rewritten whole with recomputed hashes, and covers airlock entries only. A ledger or filter that cannot be read or parsed, or a malformed `--expect-head`, is a refusal (exit 2).",
+      "subcommands": ["query", "last", "count", "verify"],
       "options": [
-        { "name": "json", "flag": "--json", "type": "flag", "description": "Emit machine-readable JSON" }
+        { "name": "json", "flag": "--json", "type": "flag", "description": "Emit machine-readable JSON" },
+        { "name": "expect_head", "flag": "--expect-head", "type": "string", "description": "verify only: fail with HEAD_MISMATCH unless the chain head is this blake3:<64 hex> value, one an earlier run printed and you kept where the ledger's writers cannot reach" }
       ],
       "read_only": true,
       "records_witness": false
@@ -161,8 +163,8 @@
     }
   ],
   "exit_codes": {
-    "0": { "meaning": "VERIFY_PASS: the command completed and any --require-claim was met; also a healthy doctor, every read-only discovery surface, and any `witness query|last|count`, including one with an empty result (a verify that earns BOUNDARY_FAILED without --require-claim still exits 0 with an honest manifest verdict)", "domain": "positive" },
-    "1": { "meaning": "VERIFY_PARTIAL: verification completed but the achieved claim fell below --require-claim; also `doctor` reporting an unhealthy state (an error finding)", "domain": "negative" },
+    "0": { "meaning": "VERIFY_PASS: the command completed and any --require-claim was met; also a healthy doctor, every read-only discovery surface, any `witness query|last|count`, including one with an empty result, and a `witness verify` whose chain is intact (a verify that earns BOUNDARY_FAILED without --require-claim still exits 0 with an honest manifest verdict)", "domain": "positive" },
+    "1": { "meaning": "VERIFY_PARTIAL: verification completed but the achieved claim fell below --require-claim; also `doctor` reporting an unhealthy state (an error finding); also `witness verify` reporting CHAIN_BROKEN or HEAD_MISMATCH", "domain": "negative" },
     "2": { "meaning": "REFUSAL or CLI/usage error: a structured refusal envelope on stdout (bad policy, input, prompt, request, provenance or manifest, missing file, witness or internal error), or a clap usage error", "domain": "error" }
   },
   "refusals": [

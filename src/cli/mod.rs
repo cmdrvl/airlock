@@ -345,6 +345,10 @@ pub enum WitnessCommands {
     Last(WitnessLastArgs),
     #[command(about = "Count matching witness records")]
     Count(WitnessCountArgs),
+    #[command(
+        about = "Check the prev_hash chain of airlock entries in the ledger (a tamper hint, not a proof)"
+    )]
+    Verify(WitnessVerifyArgs),
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -359,6 +363,19 @@ pub struct WitnessQueryArgs {
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
 pub struct WitnessLastArgs {
     #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct WitnessVerifyArgs {
+    #[arg(
+        long = "expect-head",
+        value_name = "HASH",
+        help = "Fail unless the chain's head is HASH, a blake3:<64 hex> value an earlier run printed and you kept somewhere the ledger's writers cannot reach. Without it, removing the newest entries or rewriting the whole ledger goes unnoticed"
+    )]
+    pub expect_head: Option<String>,
+
+    #[arg(long, help = "Emit the report as JSON")]
     pub json: bool,
 }
 
@@ -630,6 +647,42 @@ mod tests {
             return;
         };
         assert!(args.json);
+    }
+
+    #[test]
+    fn parses_witness_verify_flags() {
+        let cli = Cli::try_parse_from([
+            "airlock",
+            "witness",
+            "verify",
+            "--expect-head",
+            "blake3:abc",
+            "--json",
+        ])
+        .unwrap();
+
+        let command = cli.command.unwrap();
+        assert!(matches!(
+            &command,
+            Commands::Witness(WitnessCommands::Verify(_))
+        ));
+        let Commands::Witness(WitnessCommands::Verify(args)) = command else {
+            return;
+        };
+        assert_eq!(args.expect_head.as_deref(), Some("blake3:abc"));
+        assert!(args.json);
+
+        let cli = Cli::try_parse_from(["airlock", "witness", "verify"]).unwrap();
+        let command = cli.command.unwrap();
+        assert!(matches!(
+            &command,
+            Commands::Witness(WitnessCommands::Verify(_))
+        ));
+        let Commands::Witness(WitnessCommands::Verify(args)) = command else {
+            return;
+        };
+        assert_eq!(args.expect_head, None);
+        assert!(!args.json);
     }
 
     #[test]

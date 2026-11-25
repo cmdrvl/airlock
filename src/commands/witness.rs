@@ -7,10 +7,11 @@ use serde_json::{Value, json};
 
 use crate::cli::{
     WitnessCommands, WitnessCountArgs, WitnessFilterArgs, WitnessLastArgs, WitnessQueryArgs,
+    WitnessVerifyArgs,
 };
 use crate::output::canonical_json;
 use crate::refusal::RefusalEnvelope;
-use crate::witness::{self, WitnessError, WitnessFilters, WitnessRecord};
+use crate::witness::{self, WitnessError, WitnessFilters, WitnessRecord, chain};
 
 pub fn run(args: WitnessCommands) -> u8 {
     let mut stdout = io::stdout();
@@ -19,7 +20,8 @@ pub fn run(args: WitnessCommands) -> u8 {
 
 // Exit codes for the read-only witness commands: an empty result (no ledger, no records, or
 // a filter that matches nothing) is success, exit 0, per the spine-rules family contract.
-// Exit 1 is reserved for a negative verdict or an unhealthy doctor and is never used here.
+// Exit 1 is reserved for a negative verdict or an unhealthy doctor; of the witness commands
+// only `verify` uses it, for a broken chain or a head that is not the expected one.
 // Anything that stops the ledger being read or the filters being parsed is a refusal,
 // exit 2. Only the exit code reports "nothing matched": `query --json` prints `[]`,
 // `count --json` prints `{"count":0}` and `last --json` prints `null`.
@@ -29,7 +31,138 @@ fn run_with_writer(args: WitnessCommands, ledger_path: &Path, stdout: &mut impl 
         WitnessCommands::Query(args) => run_query(args, ledger_path, stdout),
         WitnessCommands::Last(args) => run_last(args, ledger_path, stdout),
         WitnessCommands::Count(args) => run_count(args, ledger_path, stdout),
+        WitnessCommands::Verify(args) => run_verify(args, ledger_path, stdout),
     }
+}
+
+/// `blake3:` followed by 64 lowercase hex digits, the form of a chain hash.
+fn is_chain_hash(value: &str) -> bool {
+    value.strip_prefix("blake3:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+fn run_verify(args: WitnessVerifyArgs, ledger_path: &Path, stdout: &mut impl Write) -> u8 {
+    if let Some(expected) = &args.expect_head
+        && !is_chain_hash(expected)
+    {
+        return RefusalEnvelope::bad_input_with_next_command(
+            "--expect-head must be blake3: followed by 64 lowercase hex digits",
+            json!({ "flag": "--expect-head", "value": expected }),
+            "airlock witness verify --json".to_string(),
+        )
+        .write_to(stdout);
+    }
+
+    let report = match chain::verify_chain_at(ledger_path) {
+        Ok(report) => report,
+        Err(error) => {
+            return RefusalEnvelope::witness_error(
+                "failed to read witness ledger",
+                json!({
+                    "path": ledger_path.display().to_string(),
+                    "error": error.to_string(),
+                }),
+            )
+            .write_to(stdout);
+        }
+    };
+
+    let head_differs = args
+        .expect_head
+        .as_ref()
+        .is_some_and(|expected| report.head.as_ref() != Some(expected));
+    let status = if !report.is_intact() {
+        "CHAIN_BROKEN"
+    } else if head_differs {
+        "HEAD_MISMATCH"
+    } else {
+        "CHAIN_OK"
+    };
+
+    if args.json {
+        let mut value = serde_json::to_value(&report).expect("chain report should serialize");
+        value["status"] = json!(status);
+        value["ledger"] = json!(ledger_path.display().to_string());
+        value["expected_head"] = json!(args.expect_head);
+        write_json(stdout, &value);
+    } else {
+        write_chain_report(
+            stdout,
+            status,
+            ledger_path,
+            &report,
+            args.expect_head.as_deref(),
+        );
+    }
+
+    if status == "CHAIN_OK" { 0 } else { 1 }
+}
+
+/// The SCREAMING_SNAKE_CASE name a reason has in the JSON report, so the text report shows the
+/// same name rather than a second spelling.
+fn reason_name(reason: &impl serde::Serialize) -> String {
+    serde_json::to_value(reason)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn write_chain_report(
+    stdout: &mut impl Write,
+    status: &str,
+    ledger_path: &Path,
+    report: &chain::ChainReport,
+    expected_head: Option<&str>,
+) {
+    let _ = writeln!(stdout, "WITNESS CHAIN: {status}");
+    let _ = writeln!(stdout);
+    let _ = writeln!(stdout, "Ledger: {}", ledger_path.display());
+    let _ = writeln!(
+        stdout,
+        "Airlock entries: {} ({} chained, {} without prev_hash)",
+        report.airlock_entries, report.chained, report.unchained
+    );
+    if report.skipped_lines > 0 {
+        let _ = writeln!(stdout, "Lines that are not JSON: {}", report.skipped_lines);
+    }
+    let _ = writeln!(
+        stdout,
+        "Head: {}",
+        report
+            .head
+            .as_deref()
+            .unwrap_or("none (no airlock entries)")
+    );
+    if let Some(expected) = expected_head {
+        let _ = writeln!(stdout, "Expected head: {expected}");
+    }
+    for chain_break in &report.breaks {
+        let _ = writeln!(
+            stdout,
+            "BREAK at line {}: {} (expected {}, found {})",
+            chain_break.line,
+            reason_name(&chain_break.reason),
+            chain_break.expected.as_deref().unwrap_or("-"),
+            chain_break.found.as_deref().unwrap_or("-"),
+        );
+    }
+    for warning in &report.warnings {
+        let _ = writeln!(
+            stdout,
+            "WARNING at line {}: {}",
+            warning.line,
+            reason_name(&warning.reason)
+        );
+    }
+    let _ = writeln!(stdout);
+    let _ = writeln!(
+        stdout,
+        "A hash chain is a tamper hint, not a proof: it cannot show that the newest entries were not removed, or that the ledger was not rewritten whole. Keep the head somewhere the ledger's writers cannot reach and pass it as --expect-head."
+    );
 }
 
 fn run_query(args: WitnessQueryArgs, ledger_path: &Path, stdout: &mut impl Write) -> u8 {

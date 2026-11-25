@@ -1,3 +1,5 @@
+pub mod chain;
+
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -272,12 +274,17 @@ fn lock_exclusive(file: &File, wait: Duration) -> Result<(), String> {
     }
 }
 
-/// The chain hash of `line` (its exact bytes, without the newline) when it is an airlock entry:
-/// a JSON document whose `tool` is `airlock`. `None` for every other line, including one that is
-/// not JSON. The writer and `witness verify` both use this, so they agree on what a link means.
+/// Whether a parsed ledger line is an airlock entry: a JSON object whose `tool` is `airlock`.
+/// The writer and `witness verify` both use this, so they agree on what counts.
+pub(crate) fn is_airlock_entry(value: &Value) -> bool {
+    value.get("tool").and_then(Value::as_str) == Some(TOOL_NAME)
+}
+
+/// The chain hash of `line` (its exact bytes, without the newline) when it is an airlock entry.
+/// `None` for every other line, including one that is not JSON.
 pub(crate) fn airlock_line_hash(line: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(line).ok()?;
-    (value.get("tool")?.as_str()? == TOOL_NAME).then(|| blake3_hash(line))
+    is_airlock_entry(&value).then(|| blake3_hash(line))
 }
 
 #[derive(Debug, PartialEq, Eq)]

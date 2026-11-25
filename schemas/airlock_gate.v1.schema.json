@@ -34,6 +34,16 @@
         "request_hash": { "$ref": "#/$defs/blake3" },
         "response_hash": { "$ref": "#/$defs/blake3" },
         "upstream_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "request_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Request-body bytes the gate received from the client; absent when it refused before reading the body."
+        },
+        "response_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Response-body bytes the gate read from the upstream and handed to the client."
+        },
         "blocked": { "type": "boolean" },
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
         "timestamp": { "type": "string", "format": "date-time" },

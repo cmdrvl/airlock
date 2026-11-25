@@ -32,6 +32,11 @@ impl Drop for Origin {
 
 /// A mock provider that counts every request it receives and answers 200.
 fn start_origin() -> Origin {
+    start_origin_replying(b"{\"ok\":true}".to_vec())
+}
+
+/// Like `start_origin`, with a chosen response body.
+fn start_origin_replying(reply: Vec<u8>) -> Origin {
     let server = Server::http("127.0.0.1:0").unwrap();
     let address = server.server_addr().to_ip().unwrap();
     let count = Arc::new(AtomicUsize::new(0));
@@ -45,7 +50,7 @@ fn start_origin() -> Origin {
                 Err(_) => break,
             };
             thread_count.fetch_add(1, Ordering::AcqRel);
-            let _ = request.respond(Response::from_string("{\"ok\":true}"));
+            let _ = request.respond(Response::from_data(reply.clone()));
         }
     });
     Origin {
@@ -207,4 +212,128 @@ fn malformed_request_body_is_denied_with_e_gate_denied() {
     assert_valid_gate_document(&refusal);
     assert_eq!(receipts.len(), 1);
     assert_valid_gate_document(&receipts[0]);
+}
+
+/// Run `airlock verify` on the clean fixture and leave the bound manifest in a new
+/// directory, so the gate has a manifest whose request hash a request can match.
+fn bound_manifest_dir(parent: &Path) -> (PathBuf, Value) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/clean_telemetry_only");
+    let manifest_dir = parent.join("manifests");
+    std::fs::create_dir(&manifest_dir).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_airlock"))
+        .args(["verify", "--policy"])
+        .arg(root.join("policy.yaml"))
+        .arg("--prompt")
+        .arg(root.join("expected_prompt_payload.json"))
+        .arg("--provenance")
+        .arg(root.join("expected_prompt_provenance.json"))
+        .arg("--request")
+        .arg(root.join("request.json"))
+        .arg("--out")
+        .arg(manifest_dir.join("verified.json"))
+        .arg("--no-witness")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fixture verification failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request =
+        serde_json::from_slice(&std::fs::read(root.join("request.json")).unwrap()).unwrap();
+    (manifest_dir, request)
+}
+
+fn read_witness(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn forwarded_and_denied_requests_record_byte_counts_in_receipt_and_witness() {
+    const REPLY_BYTES: usize = 1234;
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin_replying(vec![b'x'; REPLY_BYTES]);
+    let receipts_dir = temp.path().join("receipts");
+    let witness_path = temp.path().join("witness.jsonl");
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &receipts_dir,
+        &witness_path,
+        &[],
+    );
+    let agent = client();
+
+    // A matched request sent in pretty-printed (non-canonical) form: the byte count must be
+    // what the client sent, not the canonical bytes the gate forwards.
+    let pretty = serde_json::to_vec_pretty(&request).unwrap();
+    let canonical = airlock::hash::jcs::canonicalize(&request).unwrap();
+    assert_ne!(pretty.len(), canonical.len(), "test needs distinct sizes");
+    let unmatched = br#"{"messages":[]}"#;
+    let malformed = b"{not json";
+
+    let response = agent
+        .post(&format!("http://{}/v1/chat/completions", gate.address))
+        .header("Content-Type", "application/json")
+        .send(pretty.clone())
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let mut reply = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .read_to_end(&mut reply)
+        .unwrap();
+    assert_eq!(reply.len(), REPLY_BYTES);
+    assert_eq!(post(&agent, gate.address, unmatched).0, 403);
+    assert_eq!(post(&agent, gate.address, malformed).0, 403);
+    drop(gate);
+
+    let receipts = read_receipts(&receipts_dir);
+    assert_eq!(receipts.len(), 3);
+    receipts.iter().for_each(assert_valid_gate_document);
+    let find = |predicate: &dyn Fn(&Value) -> bool| {
+        receipts
+            .iter()
+            .find(|receipt| predicate(receipt))
+            .unwrap_or_else(|| panic!("no matching receipt in {receipts:?}"))
+    };
+    let forwarded = find(&|receipt| receipt["blocked"] == false);
+    assert_eq!(forwarded["request_bytes"], pretty.len());
+    assert_eq!(forwarded["response_bytes"], REPLY_BYTES);
+    assert_eq!(forwarded["upstream_status"], 200);
+    let denied_unmatched = find(&|receipt| receipt["request_bytes"] == unmatched.len());
+    assert_eq!(denied_unmatched["blocked"], true);
+    assert!(denied_unmatched.get("response_bytes").is_none());
+    let denied_malformed = find(&|receipt| receipt["request_bytes"] == malformed.len());
+    assert_eq!(denied_malformed["blocked"], true);
+
+    let witness = read_witness(&witness_path);
+    let gated = witness
+        .iter()
+        .find(|record| record["outcome"] == "GATED")
+        .expect("a GATED witness record");
+    assert_eq!(gated["params"]["request_bytes"], pretty.len());
+    assert_eq!(gated["params"]["response_bytes"], REPLY_BYTES);
+    assert_eq!(gated["params"]["upstream_status"], 200);
+    let denied: Vec<&Value> = witness
+        .iter()
+        .filter(|record| record["outcome"] == "BOUNDARY_FAILED")
+        .collect();
+    assert_eq!(denied.len(), 2);
+    assert!(
+        denied
+            .iter()
+            .any(|record| record["params"]["request_bytes"] == unmatched.len())
+    );
+    assert!(
+        denied
+            .iter()
+            .all(|record| record["params"]["response_bytes"].is_null())
+    );
 }

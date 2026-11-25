@@ -328,6 +328,7 @@ fn handle_request(mut request: Request, state: &GateState) {
             "request body exceeds the scan limit",
             "REQUEST_SCAN_REFUSED",
             None,
+            None,
         );
         return;
     }
@@ -343,6 +344,7 @@ fn handle_request(mut request: Request, state: &GateState) {
             "request body could not be read",
             "REQUEST_SCAN_REFUSED",
             None,
+            None,
         );
         return;
     }
@@ -353,9 +355,11 @@ fn handle_request(mut request: Request, state: &GateState) {
             "request body exceeds the scan limit",
             "REQUEST_SCAN_REFUSED",
             None,
+            None,
         );
         return;
     }
+    let received = body.len() as u64;
     let request_value: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(_) => {
@@ -365,6 +369,7 @@ fn handle_request(mut request: Request, state: &GateState) {
                 "request body is not valid JSON",
                 "REQUEST_SCAN_REFUSED",
                 None,
+                Some(received),
             );
             return;
         }
@@ -390,6 +395,7 @@ fn handle_request(mut request: Request, state: &GateState) {
                         "request shape is not declared",
                         "ADAPTER_SELECTION_REFUSED",
                         Some(canonical_request_hash.clone()),
+                        Some(received),
                     );
                     return;
                 }
@@ -403,6 +409,7 @@ fn handle_request(mut request: Request, state: &GateState) {
                         "request shape could not be screened",
                         "ADAPTER_SCREENING_REFUSED",
                         Some(canonical_request_hash.clone()),
+                        Some(received),
                     );
                     return;
                 }
@@ -426,6 +433,7 @@ fn handle_request(mut request: Request, state: &GateState) {
                         &error.to_string(),
                         "REQUEST_SCAN_REFUSED",
                         Some(canonical_request_hash.clone()),
+                        Some(received),
                     );
                     return;
                 }
@@ -449,6 +457,7 @@ fn handle_request(mut request: Request, state: &GateState) {
                             &error.to_string(),
                             "REQUEST_SCAN_REFUSED",
                             Some(canonical_request_hash.clone()),
+                            Some(received),
                         );
                         return;
                     }
@@ -489,7 +498,13 @@ fn handle_request(mut request: Request, state: &GateState) {
             });
             scan.findings.dedup();
             if should_block {
-                block_request_with_findings(request, state, &scan.findings, &scan.request_hash);
+                block_request_with_findings(
+                    request,
+                    state,
+                    &scan.findings,
+                    &scan.request_hash,
+                    Some(received),
+                );
                 return;
             }
             (
@@ -507,7 +522,13 @@ fn handle_request(mut request: Request, state: &GateState) {
                     key_path: None,
                     span_hash: None,
                 };
-                deny_request(request, state, &[finding], &canonical_request_hash);
+                deny_request(
+                    request,
+                    state,
+                    &[finding],
+                    &canonical_request_hash,
+                    Some(received),
+                );
                 return;
             };
             (
@@ -523,11 +544,24 @@ fn handle_request(mut request: Request, state: &GateState) {
         request,
         state,
         &canonical_body,
-        &request_hash,
-        &achieved_claim,
-        findings,
-        matched_manifest_hash,
+        Admitted {
+            request_hash,
+            achieved_claim,
+            findings,
+            matched_manifest_hash,
+            request_bytes: received,
+        },
     );
+}
+
+/// A request the gate has decided to forward, and what it recorded about it on the way in.
+struct Admitted {
+    request_hash: String,
+    achieved_claim: String,
+    findings: Vec<EgressFinding>,
+    matched_manifest_hash: Option<String>,
+    /// Bytes of request body received from the client (not the canonical bytes forwarded).
+    request_bytes: u64,
 }
 
 fn block_request(
@@ -536,6 +570,7 @@ fn block_request(
     _message: &str,
     rule_id: &str,
     request_hash: Option<String>,
+    request_bytes: Option<u64>,
 ) {
     let finding = EgressFinding {
         artifact_class: "REQUEST_SCAN_REFUSED".to_owned(),
@@ -545,11 +580,13 @@ fn block_request(
     };
     let request_hash = request_hash.unwrap_or_else(|| blake3_hash(b"unavailable"));
     match state.mode {
-        GateMode::StrictManifest => deny_request(request, state, &[finding], &request_hash),
+        GateMode::StrictManifest => {
+            deny_request(request, state, &[finding], &request_hash, request_bytes)
+        }
         // policy-proxy keeps its published contract: a request it cannot screen is a
         // boundary failure.
         GateMode::PolicyProxy => {
-            block_request_with_findings(request, state, &[finding], &request_hash)
+            block_request_with_findings(request, state, &[finding], &request_hash, request_bytes)
         }
     }
 }
@@ -560,12 +597,14 @@ fn block_request_with_findings(
     state: &GateState,
     findings: &[EgressFinding],
     request_hash: &str,
+    request_bytes: Option<u64>,
 ) {
     refuse_request(
         request,
         state,
         findings,
         request_hash,
+        request_bytes,
         GateRefusal::blocked(findings.to_vec()),
     );
 }
@@ -577,12 +616,14 @@ fn deny_request(
     state: &GateState,
     findings: &[EgressFinding],
     request_hash: &str,
+    request_bytes: Option<u64>,
 ) {
     refuse_request(
         request,
         state,
         findings,
         request_hash,
+        request_bytes,
         GateRefusal::denied(findings.to_vec()),
     );
 }
@@ -592,6 +633,7 @@ fn refuse_request(
     state: &GateState,
     findings: &[EgressFinding],
     request_hash: &str,
+    request_bytes: Option<u64>,
     refusal: GateRefusal,
 ) {
     let mut receipt = GateReceipt::new(
@@ -604,7 +646,8 @@ fn refuse_request(
     .with_policy(
         state.policy.as_ref().map(|policy| policy.policy_id.clone()),
         state.policy_hash.clone(),
-    );
+    )
+    .with_request_bytes(request_bytes);
     write_receipt_and_witness(state, &mut receipt, "BOUNDARY_FAILED", 1);
     return_json(
         request,
@@ -613,15 +656,7 @@ fn refuse_request(
     );
 }
 
-fn forward_request(
-    request: Request,
-    state: &GateState,
-    body: &[u8],
-    request_hash: &str,
-    achieved_claim: &str,
-    findings: Vec<EgressFinding>,
-    matched_manifest_hash: Option<String>,
-) {
+fn forward_request(request: Request, state: &GateState, body: &[u8], admitted: Admitted) {
     let path = request.url().to_owned();
     if !path.starts_with('/') || path.starts_with("//") || path.contains(['\r', '\n']) {
         block_request(
@@ -629,7 +664,8 @@ fn forward_request(
             state,
             "request target is invalid",
             "INVALID_REQUEST_TARGET",
-            Some(request_hash.to_owned()),
+            Some(admitted.request_hash.clone()),
+            Some(admitted.request_bytes),
         );
         return;
     }
@@ -648,14 +684,7 @@ fn forward_request(
     let upstream_response = match upstream_request.send(body) {
         Ok(response) => response,
         Err(_) => {
-            gateway_error(
-                request,
-                state,
-                request_hash,
-                achieved_claim,
-                matched_manifest_hash,
-                "UPSTREAM_UNAVAILABLE",
-            );
+            gateway_error(request, state, &admitted, "UPSTREAM_UNAVAILABLE");
             return;
         }
     };
@@ -673,36 +702,37 @@ fn forward_request(
             response_headers.push(header);
         }
     }
-    let hasher = Arc::new(Mutex::new(blake3::Hasher::new()));
+    let digest = Arc::new(Mutex::new(ResponseDigest::default()));
     let reader = HashingReader {
         inner: upstream_response.into_body().into_reader(),
-        hasher: Arc::clone(&hasher),
+        digest: Arc::clone(&digest),
     };
     let proxy_response = Response::new(StatusCode(status), response_headers, reader, None, None);
     let response_result = request.respond(proxy_response);
-    let response_hash = format!(
-        "blake3:{}",
-        hasher
-            .lock()
-            .expect("response hasher poisoned")
-            .finalize()
-            .to_hex()
-    );
+    let (response_hash, response_bytes) = {
+        let digest = digest.lock().expect("response digest poisoned");
+        (
+            format!("blake3:{}", digest.hasher.finalize().to_hex()),
+            digest.bytes,
+        )
+    };
     let completed = response_result.is_ok();
 
     let mut receipt = GateReceipt::new(
         mode_name(state.mode),
-        achieved_claim,
-        request_hash,
+        &admitted.achieved_claim,
+        &admitted.request_hash,
         false,
-        findings,
+        admitted.findings,
     )
     .with_policy(
         state.policy.as_ref().map(|policy| policy.policy_id.clone()),
         state.policy_hash.clone(),
     )
-    .with_matched_manifest(matched_manifest_hash);
+    .with_request_bytes(Some(admitted.request_bytes))
+    .with_matched_manifest(admitted.matched_manifest_hash);
     receipt.response_hash = Some(response_hash.clone());
+    receipt.response_bytes = Some(response_bytes);
     receipt.upstream_status = Some(status);
     write_receipt_and_witness(
         state,
@@ -716,18 +746,11 @@ fn forward_request(
     );
 }
 
-fn gateway_error(
-    request: Request,
-    state: &GateState,
-    request_hash: &str,
-    achieved_claim: &str,
-    matched_manifest_hash: Option<String>,
-    rule_id: &str,
-) {
+fn gateway_error(request: Request, state: &GateState, admitted: &Admitted, rule_id: &str) {
     let mut receipt = GateReceipt::new(
         mode_name(state.mode),
-        achieved_claim,
-        request_hash,
+        &admitted.achieved_claim,
+        &admitted.request_hash,
         false,
         vec![EgressFinding {
             artifact_class: "UPSTREAM_ERROR".to_owned(),
@@ -740,7 +763,8 @@ fn gateway_error(
         state.policy.as_ref().map(|policy| policy.policy_id.clone()),
         state.policy_hash.clone(),
     )
-    .with_matched_manifest(matched_manifest_hash);
+    .with_request_bytes(Some(admitted.request_bytes))
+    .with_matched_manifest(admitted.matched_manifest_hash.clone());
     write_receipt_and_witness(state, &mut receipt, "GATE_UPSTREAM_ERROR", REFUSAL);
     let refusal = GateRefusal::with_code(
         "UPSTREAM_UNAVAILABLE",
@@ -774,6 +798,8 @@ fn write_receipt_and_witness(
         "request_hash": receipt.request_hash,
         "response_hash": receipt.response_hash,
         "upstream_status": receipt.upstream_status,
+        "request_bytes": receipt.request_bytes,
+        "response_bytes": receipt.response_bytes,
         "blocked": receipt.blocked,
         "finding_rules": receipt.findings.iter().map(|finding| finding.rule_id.as_str()).collect::<Vec<_>>(),
         "matched_manifest_hash": receipt.matched_manifest_hash,
@@ -856,19 +882,28 @@ fn mode_name(mode: GateMode) -> &'static str {
     }
 }
 
+/// Running hash and byte count of a response body as it streams through the gate.
+#[derive(Default)]
+struct ResponseDigest {
+    hasher: blake3::Hasher,
+    bytes: u64,
+}
+
 struct HashingReader<R> {
     inner: R,
-    hasher: Arc<Mutex<blake3::Hasher>>,
+    digest: Arc<Mutex<ResponseDigest>>,
 }
 
 impl<R: Read> Read for HashingReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let read = self.inner.read(buffer)?;
         if read > 0 {
-            self.hasher
+            let mut digest = self
+                .digest
                 .lock()
-                .map_err(|_| io::Error::other("response hasher poisoned"))?
-                .update(&buffer[..read]);
+                .map_err(|_| io::Error::other("response digest poisoned"))?;
+            digest.hasher.update(&buffer[..read]);
+            digest.bytes += read as u64;
         }
         Ok(read)
     }
@@ -889,16 +924,18 @@ mod tests {
     }
 
     #[test]
-    fn response_hashing_reader_hashes_streamed_bytes_without_buffering() {
-        let hasher = Arc::new(Mutex::new(blake3::Hasher::new()));
+    fn response_hashing_reader_hashes_and_counts_streamed_bytes_without_buffering() {
+        let digest = Arc::new(Mutex::new(ResponseDigest::default()));
         let mut reader = HashingReader {
             inner: &b"event: data\n\n"[..],
-            hasher: Arc::clone(&hasher),
+            digest: Arc::clone(&digest),
         };
         let mut bytes = [0; 5];
         while reader.read(&mut bytes).unwrap() > 0 {}
-        let actual = format!("blake3:{}", hasher.lock().unwrap().finalize().to_hex());
+        let digest = digest.lock().unwrap();
+        let actual = format!("blake3:{}", digest.hasher.finalize().to_hex());
         assert_eq!(actual, blake3_hash(b"event: data\n\n"));
+        assert_eq!(digest.bytes, 13);
     }
 
     #[test]

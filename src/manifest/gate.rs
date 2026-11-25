@@ -20,6 +20,12 @@ pub struct GateReceipt {
     pub response_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_status: Option<u16>,
+    /// Request-body bytes the gate received from the client, when it had read the body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_bytes: Option<u64>,
+    /// Response-body bytes the gate read from the upstream and handed to the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_bytes: Option<u64>,
     pub blocked: bool,
     pub findings: Vec<EgressFinding>,
     pub timestamp: String,
@@ -46,6 +52,8 @@ impl GateReceipt {
             request_hash: request_hash.into(),
             response_hash: None,
             upstream_status: None,
+            request_bytes: None,
+            response_bytes: None,
             blocked,
             findings,
             timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -59,6 +67,12 @@ impl GateReceipt {
     pub fn with_policy(mut self, policy_id: Option<String>, policy_hash: Option<String>) -> Self {
         self.policy_id = policy_id;
         self.policy_hash = policy_hash;
+        self
+    }
+
+    /// Record how many request-body bytes the gate received, if it had read the body.
+    pub fn with_request_bytes(mut self, request_bytes: Option<u64>) -> Self {
+        self.request_bytes = request_bytes;
         self
     }
 

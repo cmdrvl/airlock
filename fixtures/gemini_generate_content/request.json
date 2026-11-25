@@ -1,0 +1,1 @@
+{"contents":[{"parts":[{"text":"{\"benchmark_summary\":{\"coverage\":0.98},\"challenge_profile\":{\"page_count\":12}}"}],"role":"user"}],"generationConfig":{"maxOutputTokens":2048,"temperature":0.0},"model":"models/gemini-2.5-pro","systemInstruction":{"parts":[{"text":"You are a careful boundary verifier."}]}}

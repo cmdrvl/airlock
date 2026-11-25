@@ -1,0 +1,25 @@
+{
+  "model": "gpt-5",
+  "instructions": "You review documents.",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "Summarize the attached files."},
+        {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=", "detail": "auto"},
+        {"type": "input_file", "filename": "report.pdf", "file_data": "data:application/pdf;base64,JVBERi0xLjQK"}
+      ]
+    },
+    {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"query\":\"acct 4417\"}"},
+    {"type": "function_call_output", "call_id": "call_1", "output": "balance 12.40"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "lookup",
+      "description": "Look up a record",
+      "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+      "strict": false
+    }
+  ]
+}

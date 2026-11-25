@@ -1,0 +1,28 @@
+{
+  "model": "models/gemini-2.5-pro",
+  "systemInstruction": {"parts": [{"text": "You review documents."}]},
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {"text": "Summarize the attached files."},
+        {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}},
+        {"fileData": {"mimeType": "application/pdf", "fileUri": "https://generativelanguage.googleapis.com/v1beta/files/abc-123"}}
+      ]
+    },
+    {"role": "model", "parts": [{"functionCall": {"name": "lookup", "args": {"query": "acct 4417"}}}]},
+    {"role": "user", "parts": [{"functionResponse": {"name": "lookup", "response": {"result": "balance 12.40"}}}]}
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "lookup",
+          "description": "Look up a record",
+          "parameters": {"type": "OBJECT", "properties": {"query": {"type": "STRING"}}}
+        }
+      ]
+    }
+  ],
+  "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024}
+}

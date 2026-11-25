@@ -1,0 +1,37 @@
+{
+  "model": "claude-sonnet-5-5",
+  "max_tokens": 1024,
+  "system": [
+    {"type": "text", "text": "You review documents.", "cache_control": {"type": "ephemeral"}}
+  ],
+  "tools": [
+    {
+      "name": "lookup",
+      "description": "Look up a record",
+      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Summarize the attached files."},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+        {"type": "document", "title": "Report", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}}
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {"type": "text", "text": "Looking it up."},
+        {"type": "tool_use", "id": "toolu_01", "name": "lookup", "input": {"query": "acct 4417"}}
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_01", "content": [{"type": "text", "text": "balance 12.40"}]}
+      ]
+    }
+  ]
+}

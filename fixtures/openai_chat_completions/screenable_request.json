@@ -1,0 +1,23 @@
+{
+  "model": "gpt-5",
+  "messages": [
+    {"role": "system", "content": "You review documents."},
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Summarize the attached files."},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo=", "detail": "low"}},
+        {"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}},
+        {"type": "file", "file": {"filename": "report.pdf", "file_data": "data:application/pdf;base64,JVBERi0xLjQK"}}
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{\"query\":\"acct 4417\"}"}}
+      ]
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": "balance 12.40"}
+  ]
+}

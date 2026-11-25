@@ -205,8 +205,9 @@ string-valued `contract` field is now `read_only_contract` (`contract` carries t
 
 ### Configuration Footprint
 
-Airlock has no durable config file, cache, or lock. It manages two paths under
-your home directory: the shared spine witness ledger
+Airlock has no durable config file, cache, or lock file; while it appends a
+witness record it holds an advisory lock on the ledger file itself. It manages
+two paths under your home directory: the shared spine witness ledger
 `~/.cmdrvl/state/witness/witness.jsonl`, and the manifest signing key pair in
 `~/.cmdrvl/secrets/airlock/` (`ed25519.key`, mode 0600, and `ed25519.pub`).
 `airlock keygen` is the only command that creates the secrets directory, and it
@@ -503,7 +504,7 @@ Deprecated aliases: `airlock doctor health [--json]`, `airlock doctor
 
 ### `airlock witness`
 
-Query the spine-standard witness ledger.
+Query the spine-standard witness ledger, and check its hash chain.
 By default this is `~/.cmdrvl/state/witness/witness.jsonl`; set
 `EPISTEMIC_WITNESS` to use an explicit operator-supplied ledger path.
 
@@ -511,7 +512,42 @@ By default this is `~/.cmdrvl/state/witness/witness.jsonl`; set
 airlock witness query [--tool T] [--since T] [--until T] [--outcome O] [--input-hash H] [--limit N] [--json]
 airlock witness last [--json]
 airlock witness count [--tool T] [--since T] [--until T] [--outcome O] [--input-hash H] [--json]
+airlock witness verify [--expect-head HASH] [--json]
 ```
+
+#### The witness chain
+
+Every record Airlock appends (`assemble`, `verify`, `gate`) carries a
+`prev_hash`: `blake3:` and the hash of the exact bytes of the previous
+*airlock* line in the ledger (without its newline), or 64 zeros for the first.
+Other tools append to the same ledger without taking part, so their lines are
+skipped, not linked. A ledger from before the chain is extended, not restarted:
+the first chained record links to the last older Airlock line.
+
+`airlock witness verify` walks the Airlock records and checks each link. It
+exits `0` when the chain holds (or there are no Airlock records), `1` with
+status `CHAIN_BROKEN` when a link does not, and `2` for an unreadable ledger or
+a malformed `--expect-head`. A break is reported on the record *after* the one
+that was edited, deleted, inserted or moved (`PREV_HASH_MISMATCH`), and a first
+record that still names a predecessor means older records were cut off the
+front (`FIRST_ENTRY_HAS_PREDECESSOR`). The report, text or `--json`, includes
+the `head` hash and the counts. A record an older Airlock wrote, or one written
+when the ledger could not be locked, has no `prev_hash`: that is a warning, not
+a break, and the next record links over it.
+
+Appends take an advisory lock on the ledger file, waiting up to 2 seconds, so
+concurrent Airlock processes extend one chain. If the lock cannot be taken the
+record is still appended, without `prev_hash`, and Airlock says so on stderr;
+an append problem never changes a command's exit code.
+
+**This is a tamper hint, not a proof.** It does not detect entries removed from
+the end of the ledger, nor a ledger rewritten whole by someone who recomputes
+every hash. It adds no signature and covers Airlock's records only. The one
+defence against the first two is a head you kept somewhere the ledger's writers
+cannot reach: `airlock witness verify --json` prints `head`, and
+`--expect-head HASH` fails with `HEAD_MISMATCH` unless the chain ends there.
+Trimming old records off the front of a ledger shows up as a break; moving the
+whole file away starts a new chain.
 
 ### Introspection Flags
 
@@ -534,8 +570,8 @@ Flag precedence: `--describe` > `--schema` > `--version` > subcommand.
 
 | Code | Domain | Meaning |
 |------|--------|---------|
-| `0`  | positive | `VERIFY_PASS` — achieved claim meets or exceeds requirement; also a healthy `doctor` |
-| `1`  | negative | `VERIFY_PARTIAL` — achieved claim is below `--require-claim`; also an unhealthy `doctor`; also `witness query\|last\|count` with no matching records |
+| `0`  | positive | `VERIFY_PASS` — achieved claim meets or exceeds requirement; also a healthy `doctor`; also any `witness query\|last\|count`, including one with no matching records, and a `witness verify` whose chain holds |
+| `1`  | negative | `VERIFY_PARTIAL` — achieved claim is below `--require-claim`; also an unhealthy `doctor`; also `witness verify` reporting `CHAIN_BROKEN` or `HEAD_MISMATCH` |
 | `2`  | error | `REFUSAL` — structured error (bad input, missing file, etc.) or CLI usage error |
 
 Refusals emit structured JSON to stdout with a `refusal.code` field
@@ -703,6 +739,10 @@ includes detector findings from the manifest.
   (`attestation: self_attested`)
 - that a strict-manifest gate checked any signature: it does so only when a key
   is configured, and `GET /airlock/health` shows whether one was (`signature_key`)
+- that the witness ledger is complete or unaltered: the `prev_hash` chain
+  (`airlock witness verify`) is a local tamper hint that misses removed tail
+  entries and a ledger rewritten with recomputed hashes, unless you keep the
+  head elsewhere and pass `--expect-head`
 - that the source document is true
 - that the parser extracted the right facts
 - that the model response is correct

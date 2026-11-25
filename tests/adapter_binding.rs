@@ -265,6 +265,7 @@ fn run_verify(request: &Value, transport: Option<&Value>) -> (i32, Value) {
 
     let mut arguments: Vec<String> = [
         "verify",
+        "--no-sign",
         "--policy",
         "fixtures/clean_telemetry_only/policy.yaml",
         "--prompt",

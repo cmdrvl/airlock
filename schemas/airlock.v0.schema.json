@@ -118,6 +118,28 @@
       "items": {
         "$ref": "#/$defs/notCrossedEntry"
       }
+    },
+    "signature": {
+      "description": "airlock.v0.3 and later, absent when verify ran with --no-sign. Ed25519 signature over the canonical JSON of this manifest with the signature member removed. The public key is not embedded: public_key_fingerprint names the signer and `airlock verify-manifest` is given the key.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "ed25519"
+        },
+        "public_key_fingerprint": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{128}$"
+        }
+      },
+      "required": [
+        "algorithm",
+        "public_key_fingerprint",
+        "value"
+      ]
     }
   },
   "allOf": [
@@ -151,6 +173,11 @@
             {
               "required": [
                 "not_crossed"
+              ]
+            },
+            {
+              "required": [
+                "signature"
               ]
             }
           ]

@@ -115,6 +115,24 @@ pub struct AirlockManifest {
     /// same as an empty list: an empty list says nothing was left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_crossed: Option<Vec<NotCrossedEntry>>,
+    /// Ed25519 signature over this manifest with the `signature` member removed. From v0.3,
+    /// and only when `verify` was not run with `--no-sign`. Set by [`crate::signing::sign`],
+    /// never by the builder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<ManifestSignature>,
+}
+
+/// The signature recorded in a signed manifest. It does not embed the public key: the
+/// fingerprint names which key signed, and the verifier supplies the key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestSignature {
+    /// Always `ed25519`.
+    pub algorithm: String,
+    /// `blake3:{64 hex}` of the 32 raw bytes of the signer's public key.
+    pub public_key_fingerprint: String,
+    /// The 64-byte signature as 128 lowercase hex characters.
+    pub value: String,
 }
 
 impl AirlockManifest {
@@ -440,6 +458,7 @@ impl ManifestBuilder {
             bytes_crossed: Some(bytes_crossed),
             attestation: Some(attestation),
             not_crossed: self.not_crossed,
+            signature: None,
         })
     }
 }

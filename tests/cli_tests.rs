@@ -827,6 +827,7 @@ fn test_verify_strict_telemetry() {
     let output = airlock_cmd()
         .args([
             "verify",
+            "--no-sign",
             "--policy",
             "fixtures/clean_telemetry_only/policy.yaml",
             "--prompt",
@@ -865,6 +866,7 @@ fn test_verify_annotated() {
     let output = airlock_cmd()
         .args([
             "verify",
+            "--no-sign",
             "--policy",
             "fixtures/annotated_mode/policy.yaml",
             "--prompt",
@@ -899,6 +901,7 @@ fn test_verify_boundary_failed() {
     let output = airlock_cmd()
         .args([
             "verify",
+            "--no-sign",
             "--policy",
             "fixtures/boundary_failed/policy.yaml",
             "--prompt",
@@ -940,6 +943,7 @@ fn test_verify_require_claim_met() {
     airlock_cmd()
         .args([
             "verify",
+            "--no-sign",
             "--policy",
             "fixtures/annotated_mode/policy.yaml",
             "--prompt",
@@ -965,6 +969,7 @@ fn test_verify_require_claim_not_met() {
     let output = airlock_cmd()
         .args([
             "verify",
+            "--no-sign",
             "--policy",
             "fixtures/annotated_mode/policy.yaml",
             "--prompt",
@@ -998,6 +1003,7 @@ fn test_verify_always_emits_manifest() {
     airlock_cmd()
         .args([
             "verify",
+            "--no-sign",
             "--policy",
             "fixtures/boundary_failed/policy.yaml",
             "--prompt",
@@ -1182,6 +1188,7 @@ fn test_witness_append_on_verify() {
         .env("EPISTEMIC_WITNESS", &ledger_path)
         .args([
             "verify",
+            "--no-sign",
             "--policy",
             "fixtures/clean_telemetry_only/policy.yaml",
             "--prompt",
@@ -1564,6 +1571,7 @@ fn test_witness_append_failure_preserves_exit() {
         .env("EPISTEMIC_WITNESS", dir.path())
         .args([
             "verify",
+            "--no-sign",
             "--policy",
             "fixtures/annotated_mode/policy.yaml",
             "--prompt",
@@ -1645,6 +1653,7 @@ fn test_verify_output_alias_matches_out() {
             .env("SOURCE_DATE_EPOCH", FIXED_EPOCH)
             .args([
                 "verify",
+                "--no-sign",
                 "--policy",
                 "fixtures/clean_telemetry_only/policy.yaml",
                 "--prompt",

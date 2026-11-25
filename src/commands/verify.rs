@@ -15,6 +15,7 @@ use crate::output::{SOURCE_DATE_EPOCH_ENV, now_utc};
 use crate::policy::{self, AirlockPolicy};
 use crate::refusal::RefusalEnvelope;
 use crate::scanner;
+use crate::signing;
 use crate::types::{BoundaryMode, UpstreamArtifact};
 use crate::witness::{self, WitnessRecord};
 
@@ -50,6 +51,18 @@ fn run_with_writers(
                 "airlock verify --help",
             )
             .write_to(stdout);
+        }
+    };
+
+    // Signing is the default. A missing or unusable key refuses here, before any input is read
+    // and before anything is written, so a run never produces a manifest it cannot sign. CI
+    // without a key says so with --no-sign.
+    let signing_key = if args.no_sign {
+        None
+    } else {
+        match signing::secrets_dir().and_then(|dir| signing::load_signing_key(&dir)) {
+            Ok(key) => Some(key),
+            Err(error) => return error.refusal().write_to(stdout),
         }
     };
 
@@ -219,7 +232,7 @@ fn run_with_writers(
         Some(loaded) => builder.not_crossed(loaded.entries.clone()),
         None => builder,
     };
-    let manifest = match builder.build() {
+    let mut manifest = match builder.build() {
         Ok(manifest) => manifest,
         Err(error) => {
             return RefusalEnvelope::internal(
@@ -229,6 +242,11 @@ fn run_with_writers(
             .write_to(stdout);
         }
     };
+    if let Some(key) = &signing_key
+        && let Err(error) = signing::sign(&mut manifest, key)
+    {
+        return error.refusal().write_to(stdout);
+    }
 
     if let Err(error) = manifest.write_to(&args.out) {
         return RefusalEnvelope::bad_input(
@@ -593,6 +611,7 @@ mod tests {
             out: dir.path().join("manifest.json"),
             require_claim: None,
             not_crossed: None,
+            no_sign: true,
             no_witness: false,
         }
     }

@@ -325,7 +325,7 @@ fn add_bound_manifest(manifest_dir: &Path, fixture: &str) -> Value {
         .join("fixtures")
         .join(fixture);
     let output = Command::new(env!("CARGO_BIN_EXE_airlock"))
-        .args(["verify", "--policy"])
+        .args(["verify", "--no-sign", "--policy"])
         .arg(root.join("policy.yaml"))
         .arg("--prompt")
         .arg(root.join("expected_prompt_payload.json"))
@@ -1285,6 +1285,40 @@ fn gate_still_forwards_against_a_v0_2_manifest_during_the_transition() {
         status, 200,
         "a v0.2 manifest must still authorize its request"
     );
+    assert_eq!(origin.count.load(Ordering::Acquire), 1);
+}
+
+/// A signed v0.3 manifest still authorizes its request. This only shows the gate reads the
+/// `signature` member without choking on it; the gate does not verify signatures. That check is
+/// `airlock verify-manifest`, which a deployment runs before it fills the manifest directory.
+#[test]
+fn gate_forwards_against_a_signed_v0_3_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest_dir = temp.path().join("manifests");
+    std::fs::create_dir(&manifest_dir).unwrap();
+    let signed = fixture_root().join("expected_manifest_v0_3_signed.json");
+    let manifest: Value = serde_json::from_slice(&std::fs::read(&signed).unwrap()).unwrap();
+    assert!(manifest["signature"]["value"].is_string());
+    std::fs::copy(&signed, manifest_dir.join("signed.json")).unwrap();
+    let request: Value =
+        serde_json::from_slice(&std::fs::read(fixture_root().join("request.json")).unwrap())
+            .unwrap();
+    let origin = start_origin();
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+
+    let (status, _) = post(
+        &client(),
+        gate.address,
+        &serde_json::to_vec(&request).unwrap(),
+    );
+
+    assert_eq!(status, 200);
     assert_eq!(origin.count.load(Ordering::Acquire), 1);
 }
 

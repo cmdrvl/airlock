@@ -90,6 +90,7 @@ fn resolves_child_overrides_and_records_policy_sources_in_manifest() {
         .current_dir(&dir)
         .args([
             "verify",
+            "--no-sign",
             "--policy",
             policy_copy.to_str().unwrap(),
             "--prompt",

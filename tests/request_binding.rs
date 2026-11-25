@@ -67,6 +67,7 @@ fn verify_request_with_policy(request: &Value, policy_path: &Path, output_dir: &
         .expect("airlock binary should build")
         .current_dir(repo_file("."))
         .arg("verify")
+        .arg("--no-sign")
         .arg("--policy")
         .arg(policy_path)
         .arg("--prompt")

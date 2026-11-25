@@ -48,6 +48,7 @@
         { "name": "boundary_mode", "flag": "--boundary-mode", "type": "string", "description": "Boundary exposure mode: ANNOTATED (default) or TELEMETRY_ONLY" },
         { "name": "out", "flag": "--out", "aliases": ["--output"], "type": "file_path", "required": true, "description": "Path to write prompt_payload.json" },
         { "name": "provenance_out", "flag": "--provenance-out", "type": "file_path", "required": true, "description": "Path to write prompt_provenance.json" },
+        { "name": "not_crossed_out", "flag": "--not-crossed-out", "type": "file_path", "description": "Optional path to write not_crossed.json (airlock.not_crossed.v1): every input field that did not cross the boundary, by path, source hash, value hash and reason; values are never stored" },
         { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
       ],
       "read_only": false,
@@ -64,10 +65,31 @@
         { "name": "transport", "flag": "--transport", "type": "file_path", "description": "Optional adapter declaration; generic_json requires JSON pointers" },
         { "name": "out", "flag": "--out", "aliases": ["--output"], "type": "file_path", "required": true, "description": "Path to write airlock_manifest.json" },
         { "name": "require_claim", "flag": "--require-claim", "type": "string", "description": "Minimum acceptable claim: BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT or STRICT_TELEMETRY_ONLY" },
+        { "name": "not_crossed", "flag": "--not-crossed", "type": "file_path", "description": "not_crossed.json from `airlock assemble --not-crossed-out`; refused unless it belongs to this run (same policy, prompt payload and boundary mode). Its entries are copied into the manifest; without it the manifest records no negative inventory" },
+        { "name": "no_sign", "flag": "--no-sign", "type": "flag", "description": "Write the manifest without an Ed25519 signature. By default verify signs with the key from `airlock keygen` and refuses when there is none" },
         { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
       ],
       "read_only": false,
       "records_witness": true
+    },
+    {
+      "name": "keygen",
+      "description": "Generate the Ed25519 key pair that `verify` signs manifests with, under ~/.cmdrvl/secrets/airlock/ (ed25519.key owner-only, ed25519.pub). Never overwrites an existing key; prints the public key and fingerprint, never the secret.",
+      "options": [],
+      "read_only": false,
+      "records_witness": false
+    },
+    {
+      "name": "verify-manifest",
+      "description": "Check the Ed25519 signature on an airlock.v0.3 manifest. Exit 0 when valid; a refusal (exit 2) with reason unsigned, signature_mismatch, fingerprint_mismatch, unsupported_manifest_version, unsupported_algorithm or malformed_signature otherwise.",
+      "arguments": [
+        { "name": "manifest", "type": "file_path", "position": 0, "required": true, "description": "airlock_manifest.json whose signature to check" }
+      ],
+      "options": [
+        { "name": "pubkey", "flag": "--pubkey", "type": "file_path", "description": "Public key file (hex, as airlock keygen writes it); default ~/.cmdrvl/secrets/airlock/ed25519.pub" }
+      ],
+      "read_only": true,
+      "records_witness": false
     },
     {
       "name": "gate",
@@ -165,7 +187,7 @@
     "writes_files": true,
     "network": true,
     "writes_witness": true,
-    "notes": "assemble and verify write the paths given by --out/--provenance-out; gate writes receipts under --out-dir and forwards through its loopback listener. These commands append witness records unless --no-witness is set; explain, witness, doctor, capabilities and robot-docs are read-only."
+    "notes": "assemble and verify write the paths given by --out/--provenance-out; gate writes receipts under --out-dir and forwards through its loopback listener. These commands append witness records unless --no-witness is set; explain, witness, doctor, capabilities, robot-docs and verify-manifest are read-only. keygen writes ed25519.key and ed25519.pub under ~/.cmdrvl/secrets/airlock/ (never overwriting) and records nothing in the witness ledger; verify reads that key to sign unless --no-sign is set."
   },
   "pipeline": {
     "upstream": ["vacuum", "hash", "fingerprint", "benchmark", "assess"],
@@ -174,7 +196,7 @@
   "witness": {
     "tool_name": "airlock",
     "recording_commands": ["assemble", "verify", "gate"],
-    "non_recording_commands": ["explain", "doctor", "capabilities", "robot-docs", "witness"],
+    "non_recording_commands": ["keygen", "verify-manifest", "explain", "doctor", "capabilities", "robot-docs", "witness"],
     "outcomes": ["ASSEMBLED", "VERIFIED", "VERIFY_PARTIAL", "GATED", "BOUNDARY_FAILED", "GATE_UPSTREAM_ERROR", "GATE_STREAM_INTERRUPTED", "REFUSAL"]
   }
 }

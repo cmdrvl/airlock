@@ -11,6 +11,7 @@ const WITNESS_ENV: &str = "EPISTEMIC_WITNESS";
 
 pub const CANONICAL_ROOT: &str = "~/.cmdrvl";
 pub const CANONICAL_WITNESS: &str = "~/.cmdrvl/state/witness/witness.jsonl";
+pub const SECRETS_DIR: &str = "~/.cmdrvl/secrets/airlock";
 pub const MIGRATION_LOG: &str = "~/.cmdrvl/migrations/applied.jsonl";
 pub const DEPRECATION_NOTICES: &str = "~/.cmdrvl/notices/deprecated-paths.jsonl";
 pub const LEGACY_HOME_WITNESS: &str = "~/.epistemic/witness.jsonl";
@@ -18,6 +19,27 @@ pub const LEGACY_RELATIVE_WITNESS: &str = ".epistemic/witness.jsonl";
 
 pub fn default_witness_path() -> PathBuf {
     default_witness_path_from_env(env_value)
+}
+
+/// Where the manifest signing key pair lives: `<home>/.cmdrvl/secrets/airlock`.
+///
+/// `None` when neither `HOME` nor `USERPROFILE` is set. Unlike the witness ledger there is no
+/// relative fallback: a secret key must never be written into the working directory.
+pub fn airlock_secrets_dir() -> Option<PathBuf> {
+    airlock_secrets_dir_from_env(env_value)
+}
+
+fn airlock_secrets_dir_from_env<F>(get_env: F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<OsString> + Copy,
+{
+    let home = non_empty_env(get_env, "HOME").or_else(|| non_empty_env(get_env, "USERPROFILE"))?;
+    Some(
+        PathBuf::from(home)
+            .join(".cmdrvl")
+            .join("secrets")
+            .join("airlock"),
+    )
 }
 
 pub fn prepare_witness_path_for_append() -> io::Result<PathBuf> {
@@ -41,6 +63,7 @@ pub fn config_footprint() -> Value {
         "canonical_root": CANONICAL_ROOT,
         "managed_config_paths": [],
         "managed_state_paths": [CANONICAL_WITNESS],
+        "managed_secret_paths": [SECRETS_DIR],
         "managed_cache_paths": [],
         "managed_lock_paths": [],
         "env_overrides": [
@@ -313,6 +336,36 @@ mod tests {
             path,
             PathBuf::from("/tmp/home/.cmdrvl/state/witness/witness.jsonl")
         );
+    }
+
+    #[test]
+    fn secrets_dir_is_under_the_home_directory() {
+        let values = [("HOME", OsString::from("/tmp/home"))];
+
+        assert_eq!(
+            airlock_secrets_dir_from_env(env_map(&values)),
+            Some(PathBuf::from("/tmp/home/.cmdrvl/secrets/airlock"))
+        );
+        let windows = [("USERPROFILE", OsString::from("/tmp/profile"))];
+        assert_eq!(
+            airlock_secrets_dir_from_env(env_map(&windows)),
+            Some(PathBuf::from("/tmp/profile/.cmdrvl/secrets/airlock"))
+        );
+    }
+
+    #[test]
+    fn secrets_dir_has_no_relative_fallback_when_home_is_unset_or_blank() {
+        // The witness ledger falls back to ./.cmdrvl; a secret key must refuse instead.
+        assert_eq!(airlock_secrets_dir_from_env(env_map(&[])), None);
+        let blank = [("HOME", OsString::from("  "))];
+        assert_eq!(airlock_secrets_dir_from_env(env_map(&blank)), None);
+        let empty = [("HOME", OsString::new())];
+        assert_eq!(airlock_secrets_dir_from_env(env_map(&empty)), None);
+    }
+
+    #[test]
+    fn config_footprint_declares_the_secrets_directory() {
+        assert_eq!(config_footprint()["managed_secret_paths"][0], SECRETS_DIR);
     }
 
     #[test]

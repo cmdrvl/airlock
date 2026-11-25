@@ -11,6 +11,8 @@ blake3 = "=1.8.2"
 boundary-detectors = { git = "https://github.com/cmdrvl/boundary-detectors", rev = "679d490964a58f2b0f0c2fbc8a51d05503143e04" }
 chrono = "=0.4.41"
 clap = { version = "=4.5.60", features = ["derive"] }
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "zeroize"] }
+getrandom = "=0.2.17"
 regex = "=1.11"
 serde = { version = "=1.0.225", features = ["derive"] }
 serde_json = { version = "=1.0.143", features = ["float_roundtrip"] }

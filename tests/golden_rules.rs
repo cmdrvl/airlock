@@ -32,6 +32,7 @@ golden_rules_suite! {
     source_files: &["src/refusal/mod.rs"],
     fixture_refusal_args: &[
         "verify",
+        "--no-sign",
         "--policy", "does-not-exist/policy.yaml",
         "--prompt", "does-not-exist/prompt_payload.json",
         "--provenance", "does-not-exist/prompt_provenance.json",
@@ -41,6 +42,7 @@ golden_rules_suite! {
     ],
     fixture_timestamped_args: &[
         "verify",
+        "--no-sign",
         "--policy", "fixtures/clean_telemetry_only/policy.yaml",
         "--prompt", "fixtures/clean_telemetry_only/expected_prompt_payload.json",
         "--provenance", "fixtures/clean_telemetry_only/expected_prompt_provenance.json",

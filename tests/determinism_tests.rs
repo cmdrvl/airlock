@@ -91,6 +91,7 @@ fn test_manifest_deterministic() {
         let output = airlock_cmd()
             .args([
                 "verify",
+                "--no-sign",
                 "--policy",
                 "fixtures/clean_telemetry_only/policy.yaml",
                 "--prompt",
@@ -136,6 +137,7 @@ fn verify_command(manifest_path: &Path, source_date_epoch: Option<&str>) -> Comm
     let mut cmd = airlock_cmd();
     cmd.args([
         "verify",
+        "--no-sign",
         "--policy",
         "fixtures/clean_telemetry_only/policy.yaml",
         "--prompt",

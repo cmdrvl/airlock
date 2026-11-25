@@ -500,6 +500,7 @@ mod tests {
             bytes_crossed: Some(1234),
             attestation: Some(Attestation::SelfAttested),
             not_crossed: None,
+            signature: None,
         }
     }
 

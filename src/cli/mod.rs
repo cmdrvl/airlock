@@ -45,6 +45,13 @@ pub enum Commands {
     Assemble(AssembleArgs),
     #[command(about = "Verify a prompt/request boundary and emit airlock_manifest.json")]
     Verify(VerifyArgs),
+    #[command(about = "Generate the Ed25519 key pair that `verify` signs manifests with")]
+    Keygen(KeygenArgs),
+    #[command(
+        name = "verify-manifest",
+        about = "Check the Ed25519 signature on an airlock manifest"
+    )]
+    VerifyManifest(VerifyManifestArgs),
     #[command(about = "Render an airlock manifest as text or machine-readable explanation JSON")]
     Explain(ExplainArgs),
     #[command(about = "Read-only health, capabilities, robot docs, and triage for agents")]
@@ -229,8 +236,35 @@ pub struct VerifyArgs {
     )]
     pub not_crossed: Option<PathBuf>,
 
+    #[arg(
+        long = "no-sign",
+        help = "Write the manifest without an Ed25519 signature (for CI without a key). By default verify signs with the key from `airlock keygen` and refuses if there is none"
+    )]
+    pub no_sign: bool,
+
     #[arg(long = "no-witness", help = "Skip ambient witness ledger recording")]
     pub no_witness: bool,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+#[command(
+    after_help = "Writes ed25519.key (owner-only) and ed25519.pub under ~/.cmdrvl/secrets/airlock/. Never overwrites an existing key. Prints the public key and its fingerprint, never the secret.\n\nExample:\n  airlock keygen"
+)]
+pub struct KeygenArgs {}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+#[command(
+    after_help = "Exit 0 when the signature is valid, 2 with a refusal when the manifest is unsigned, altered, signed by another key, or is not airlock.v0.3.\n\nExamples:\n  airlock verify-manifest airlock_manifest.json\n  airlock verify-manifest airlock_manifest.json --pubkey signer.pub"
+)]
+pub struct VerifyManifestArgs {
+    #[arg(help = "airlock_manifest.json whose signature to check")]
+    pub manifest: PathBuf,
+
+    #[arg(
+        long,
+        help = "Public key file (hex, as written by airlock keygen). Defaults to ~/.cmdrvl/secrets/airlock/ed25519.pub"
+    )]
+    pub pubkey: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args, PartialEq, Eq)]

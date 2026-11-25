@@ -93,7 +93,7 @@ fn extended_input(dir: &Path) -> PathBuf {
 fn verify(assembled: &Assembled, not_crossed: Option<&Path>, out: &Path) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_airlock"));
     command
-        .args(["verify", "--policy"])
+        .args(["verify", "--no-sign", "--policy"])
         .arg(fixture("policy.yaml"))
         .arg("--prompt")
         .arg(&assembled.prompt)

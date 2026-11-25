@@ -165,6 +165,79 @@ fn test_not_crossed_is_optional_on_v0_3_and_validated_when_present() {
     }
 }
 
+const SIGNED_GOLDEN: &str = "fixtures/clean_telemetry_only/expected_manifest_v0_3_signed.json";
+
+#[test]
+fn test_signed_v0_3_manifest_validates_and_signature_is_optional() {
+    let schema = compile_schema("schemas/airlock.v0.schema.json");
+    let signed = read_json(&repo_root().join(SIGNED_GOLDEN));
+    assert!(signed.get("signature").is_some());
+    assert!(schema.is_valid(&signed), "{signed}");
+
+    // --no-sign output is a valid v0.3 manifest too.
+    let mut unsigned = signed.clone();
+    unsigned.as_object_mut().unwrap().remove("signature");
+    assert!(schema.is_valid(&unsigned));
+}
+
+#[test]
+fn test_malformed_signature_does_not_validate() {
+    let schema = compile_schema("schemas/airlock.v0.schema.json");
+    let signed = read_json(&repo_root().join(SIGNED_GOLDEN));
+    let signature = signed["signature"].clone();
+    let with = |field: &str, value: Value| {
+        let mut changed = signed.clone();
+        changed["signature"][field] = value;
+        changed
+    };
+    let mut extra = signed.clone();
+    extra["signature"]["public_key"] = Value::from("d75a98");
+    let mut missing = signed.clone();
+    missing["signature"]
+        .as_object_mut()
+        .unwrap()
+        .remove("public_key_fingerprint");
+    let value = signature["value"].as_str().unwrap();
+
+    for (label, manifest) in [
+        ("other algorithm", with("algorithm", Value::from("ed448"))),
+        ("short value", with("value", Value::from(&value[..126]))),
+        (
+            "long value",
+            with("value", Value::from(format!("{value}00"))),
+        ),
+        (
+            "uppercase hex",
+            with("value", Value::from(value.to_uppercase())),
+        ),
+        ("non-hex value", with("value", Value::from("zz".repeat(64)))),
+        (
+            "bad fingerprint",
+            with("public_key_fingerprint", Value::from("sha256:abc")),
+        ),
+        ("embedded public key", extra),
+        ("missing fingerprint", missing),
+        ("not an object", {
+            let mut changed = signed.clone();
+            changed["signature"] = Value::from("deadbeef");
+            changed
+        }),
+    ] {
+        assert!(!schema.is_valid(&manifest), "{label} must not validate");
+    }
+}
+
+#[test]
+fn test_v0_2_manifest_may_not_carry_a_signature() {
+    let schema = compile_schema("schemas/airlock.v0.schema.json");
+    let mut manifest =
+        read_json(&repo_root().join("fixtures/clean_telemetry_only/expected_manifest.json"));
+    assert_eq!(manifest["manifest_version"], "airlock.v0.2");
+    manifest["signature"] = read_json(&repo_root().join(SIGNED_GOLDEN))["signature"].clone();
+
+    assert!(!schema.is_valid(&manifest));
+}
+
 #[test]
 fn test_v0_2_manifest_may_not_carry_not_crossed() {
     let schema = compile_schema("schemas/airlock.v0.schema.json");

@@ -94,6 +94,7 @@ fn assemble_output_round_trips_through_verify() {
         .env("EPISTEMIC_WITNESS", &witness_path)
         .args([
             "verify",
+            "--no-sign",
             "--policy",
             policy_path.to_str().unwrap(),
             "--prompt",

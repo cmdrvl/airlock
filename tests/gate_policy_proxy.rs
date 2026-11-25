@@ -520,7 +520,7 @@ fn strict_manifest_mode_forwards_only_a_preverified_canonical_request_hash() {
     std::fs::create_dir(&manifest_dir).unwrap();
     let verified_manifest = manifest_dir.join("verified.json");
     let verification = Command::new(env!("CARGO_BIN_EXE_airlock"))
-        .args(["verify", "--policy"])
+        .args(["verify", "--no-sign", "--policy"])
         .arg(root.join("fixtures/clean_telemetry_only/policy.yaml"))
         .arg("--prompt")
         .arg(root.join("fixtures/clean_telemetry_only/expected_prompt_payload.json"))

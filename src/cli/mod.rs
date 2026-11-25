@@ -124,6 +124,13 @@ pub struct GateArgs {
     pub max_request_bytes: Option<u64>,
 
     #[arg(
+        long = "require-claim",
+        value_parser = parse_claim_level,
+        help = "Strict-manifest mode: lowest claim a matching manifest may carry (BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT, or STRICT_TELEMETRY_ONLY); a request whose manifest is weaker is denied"
+    )]
+    pub require_claim: Option<ClaimLevel>,
+
+    #[arg(
         long = "out-dir",
         default_value = "airlock-gate",
         help = "Directory for gate receipts"

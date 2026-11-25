@@ -65,6 +65,7 @@ struct GateState {
     no_witness: bool,
     max_request_bytes: u64,
     timeout_seconds: u64,
+    required_claim: Option<ClaimLevel>,
 }
 
 pub fn run(args: GateArgs) -> u8 {
@@ -97,6 +98,13 @@ pub fn run(args: GateArgs) -> u8 {
                 let _ = writeln!(
                     stderr,
                     "airlock gate: --manifest-dir only applies to strict-manifest mode"
+                );
+                return REFUSAL;
+            }
+            if args.require_claim.is_some() {
+                let _ = writeln!(
+                    stderr,
+                    "airlock gate: --require-claim only applies to strict-manifest mode"
                 );
                 return REFUSAL;
             }
@@ -205,6 +213,7 @@ pub fn run(args: GateArgs) -> u8 {
         no_witness: args.no_witness,
         max_request_bytes,
         timeout_seconds: args.timeout_seconds,
+        required_claim: args.require_claim,
     });
     let server = match Server::http(listen) {
         Ok(server) => server,
@@ -545,6 +554,25 @@ fn handle_request(mut request: Request, state: &GateState) {
                 );
                 return;
             };
+            if state
+                .required_claim
+                .is_some_and(|required| manifest.achieved_claim < required)
+            {
+                let finding = EgressFinding {
+                    artifact_class: "STRICT_MANIFEST_REQUIRED".to_owned(),
+                    rule_id: "REQUEST_CLAIM_BELOW_REQUIRED".to_owned(),
+                    key_path: None,
+                    span_hash: None,
+                };
+                deny_request(
+                    request,
+                    state,
+                    &[finding],
+                    &canonical_request_hash,
+                    Some(received),
+                );
+                return;
+            }
             (
                 canonical_request_hash,
                 manifest.achieved_claim.to_string(),

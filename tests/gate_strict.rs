@@ -237,9 +237,18 @@ fn malformed_request_body_is_denied_with_e_gate_denied() {
 /// Run `airlock verify` on the clean fixture and leave the bound manifest in a new
 /// directory, so the gate has a manifest whose request hash a request can match.
 fn bound_manifest_dir(parent: &Path) -> (PathBuf, Value) {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/clean_telemetry_only");
     let manifest_dir = parent.join("manifests");
     std::fs::create_dir(&manifest_dir).unwrap();
+    let request = add_bound_manifest(&manifest_dir, "clean_telemetry_only");
+    (manifest_dir, request)
+}
+
+/// Run `airlock verify` on `fixtures/<fixture>` and add the bound manifest to `manifest_dir`
+/// as `<fixture>.json`. Returns that fixture's request, which the manifest matches.
+fn add_bound_manifest(manifest_dir: &Path, fixture: &str) -> Value {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(fixture);
     let output = Command::new(env!("CARGO_BIN_EXE_airlock"))
         .args(["verify", "--policy"])
         .arg(root.join("policy.yaml"))
@@ -250,18 +259,16 @@ fn bound_manifest_dir(parent: &Path) -> (PathBuf, Value) {
         .arg("--request")
         .arg(root.join("request.json"))
         .arg("--out")
-        .arg(manifest_dir.join("verified.json"))
+        .arg(manifest_dir.join(format!("{fixture}.json")))
         .arg("--no-witness")
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "fixture verification failed: {}",
+        "fixture {fixture} verification failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let request =
-        serde_json::from_slice(&std::fs::read(root.join("request.json")).unwrap()).unwrap();
-    (manifest_dir, request)
+    serde_json::from_slice(&std::fs::read(root.join("request.json")).unwrap()).unwrap()
 }
 
 fn read_witness(path: &Path) -> Vec<Value> {
@@ -594,6 +601,149 @@ fn policy_proxy_refuses_a_size_cap_above_its_scan_limit_at_startup() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("--max-request-bytes cannot exceed the policy-proxy scan limit of 4194304"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+/// What a strict gate did with one request from each of two fixtures whose bound manifests
+/// carry different claim levels.
+struct ClaimRun {
+    /// `annotated_mode`, whose manifest claims RAW_DOCUMENT_ABSENT.
+    weaker: (u16, Value),
+    /// `clean_telemetry_only`, whose manifest claims STRICT_TELEMETRY_ONLY.
+    stronger: (u16, Value),
+    forwarded: usize,
+    receipts: Vec<Value>,
+}
+
+fn run_with_claims(extra: &[&str]) -> ClaimRun {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest_dir = temp.path().join("manifests");
+    std::fs::create_dir(&manifest_dir).unwrap();
+    let weaker_request = add_bound_manifest(&manifest_dir, "annotated_mode");
+    let stronger_request = add_bound_manifest(&manifest_dir, "clean_telemetry_only");
+    let origin = start_origin();
+    let receipts_dir = temp.path().join("receipts");
+    let witness_path = temp.path().join("witness.jsonl");
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &receipts_dir,
+        &witness_path,
+        extra,
+    );
+    let agent = client();
+    let weaker = post(
+        &agent,
+        gate.address,
+        &serde_json::to_vec(&weaker_request).unwrap(),
+    );
+    let stronger = post(
+        &agent,
+        gate.address,
+        &serde_json::to_vec(&stronger_request).unwrap(),
+    );
+    let (receipts, _) = wait_for_recorded(&receipts_dir, &witness_path, 2);
+    drop(gate);
+    ClaimRun {
+        weaker,
+        stronger,
+        forwarded: origin.count.load(Ordering::Acquire),
+        receipts,
+    }
+}
+
+fn claims_of_forwarded(receipts: &[Value]) -> Vec<String> {
+    let mut claims: Vec<String> = receipts
+        .iter()
+        .filter(|receipt| receipt["blocked"] == false)
+        .map(|receipt| receipt["achieved_claim"].as_str().unwrap().to_owned())
+        .collect();
+    claims.sort();
+    claims
+}
+
+#[test]
+fn strict_gate_without_require_claim_forwards_every_bound_manifest_level() {
+    let run = run_with_claims(&[]);
+
+    assert_eq!(run.weaker.0, 200);
+    assert_eq!(run.stronger.0, 200);
+    assert_eq!(run.forwarded, 2);
+    run.receipts.iter().for_each(assert_valid_gate_document);
+    assert_eq!(
+        claims_of_forwarded(&run.receipts),
+        ["RAW_DOCUMENT_ABSENT", "STRICT_TELEMETRY_ONLY"]
+    );
+}
+
+#[test]
+fn require_claim_denies_a_request_whose_manifest_claims_less() {
+    let run = run_with_claims(&["--require-claim", "STRICT_TELEMETRY_ONLY"]);
+
+    assert_eq!(run.weaker.0, 403);
+    assert_eq!(run.weaker.1["code"], "E_GATE_DENIED");
+    assert_eq!(
+        run.weaker.1["findings"][0]["rule_id"],
+        "REQUEST_CLAIM_BELOW_REQUIRED"
+    );
+    assert_valid_gate_document(&run.weaker.1);
+    assert_eq!(run.stronger.0, 200);
+    assert_eq!(
+        run.forwarded, 1,
+        "only the request whose manifest meets the required claim reaches the origin"
+    );
+    run.receipts.iter().for_each(assert_valid_gate_document);
+    assert_eq!(
+        claims_of_forwarded(&run.receipts),
+        ["STRICT_TELEMETRY_ONLY"]
+    );
+    let denied: Vec<&Value> = run
+        .receipts
+        .iter()
+        .filter(|receipt| receipt["blocked"] == true)
+        .collect();
+    assert_eq!(denied.len(), 1);
+    assert_eq!(
+        denied[0]["findings"][0]["rule_id"],
+        "REQUEST_CLAIM_BELOW_REQUIRED"
+    );
+}
+
+#[test]
+fn require_claim_forwards_manifests_at_that_level_and_above() {
+    let run = run_with_claims(&["--require-claim", "RAW_DOCUMENT_ABSENT"]);
+
+    assert_eq!(run.weaker.0, 200);
+    assert_eq!(run.stronger.0, 200);
+    assert_eq!(run.forwarded, 2);
+}
+
+#[test]
+fn policy_proxy_refuses_require_claim_at_startup() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/clean_telemetry_only");
+    let temp = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_airlock"))
+        .args([
+            "gate",
+            "--mode",
+            "policy-proxy",
+            "--upstream",
+            "https://api.openai.com",
+            "--require-claim",
+            "RAW_DOCUMENT_ABSENT",
+            "--policy",
+        ])
+        .arg(root.join("policy.yaml"))
+        .arg("--out-dir")
+        .arg(temp.path().join("receipts"))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--require-claim only applies to strict-manifest mode"),
         "unexpected stderr: {stderr}"
     );
 }

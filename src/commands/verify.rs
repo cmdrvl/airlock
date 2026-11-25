@@ -2,15 +2,17 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
+use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 
-use crate::adapter::{self, TransportDeclaration};
+use crate::adapter::{self, Adapter, TransportDeclaration};
 use crate::assembler::{
     NOT_CROSSED_VERSION, NotCrossedEntry, NotCrossedInventory, PromptProvenance,
 };
 use crate::cli::{VERIFY_PARTIAL, VERIFY_PASS, VerifyArgs};
 use crate::hash::{blake3_hash, jcs, jcs_blake3_hash};
-use crate::manifest::{Attestation, ManifestBuilder};
+use crate::manifest::{AirlockManifest, Attestation, ManifestBuilder};
 use crate::output::{SOURCE_DATE_EPOCH_ENV, now_utc};
 use crate::policy::{self, AirlockPolicy};
 use crate::refusal::RefusalEnvelope;
@@ -38,56 +40,21 @@ fn run_with_writers(
 ) -> u8 {
     // Resolve the manifest instant first: SOURCE_DATE_EPOCH pins it for reproducible
     // output, and a malformed value refuses before any input is read.
-    let manifest_instant = match now_utc() {
+    let manifest_instant = match manifest_instant("verify") {
         Ok(instant) => instant,
-        Err(invalid) => {
-            return RefusalEnvelope::bad_input_with_next_command(
-                format!("invalid {SOURCE_DATE_EPOCH_ENV}: {}", invalid.reason),
-                json!({
-                    "env": SOURCE_DATE_EPOCH_ENV,
-                    "value": invalid.value,
-                    "expected": "Unix seconds",
-                }),
-                "airlock verify --help",
-            )
-            .write_to(stdout);
-        }
+        Err(refusal) => return refusal.write_to(stdout),
     };
 
     // Signing is the default. A missing or unusable key refuses here, before any input is read
     // and before anything is written, so a run never produces a manifest it cannot sign. CI
     // without a key says so with --no-sign.
-    let signing_key = if args.no_sign {
-        None
-    } else {
-        match signing::secrets_dir().and_then(|dir| signing::load_signing_key(&dir)) {
-            Ok(key) => Some(key),
-            Err(error) => return error.refusal().write_to(stdout),
-        }
-    };
-
-    let policy = match policy::load_policy(&args.policy) {
-        Ok(policy) => policy,
+    let signing_key = match resolve_signing_key(args.no_sign) {
+        Ok(key) => key,
         Err(refusal) => return refusal.write_to(stdout),
     };
 
-    let policy_hash = canonical_policy_hash(&policy);
-    let prompt_value = match read_json_value(
-        &args.prompt,
-        RefusalEnvelope::bad_prompt,
-        "failed to read prompt payload",
-        "prompt payload is not valid JSON",
-    ) {
-        Ok(value) => value,
-        Err(refusal) => return refusal.write_to(stdout),
-    };
-    let prompt_provenance = match read_json_typed::<PromptProvenance>(
-        &args.provenance,
-        RefusalEnvelope::bad_provenance,
-        "failed to read prompt provenance",
-        "prompt provenance is not valid JSON",
-    ) {
-        Ok(value) => value,
+    let inputs = match load_inputs(&args.policy, &args.prompt, &args.provenance) {
+        Ok(inputs) => inputs,
         Err(refusal) => return refusal.write_to(stdout),
     };
     let request_value = match read_json_value(
@@ -100,148 +67,38 @@ fn run_with_writers(
         Err(refusal) => return refusal.write_to(stdout),
     };
 
-    // Both payload hashes are blake3(RFC 8785 JCS(payload)) so a third party can recompute them
-    // with any standard JCS library. A payload JCS cannot represent interoperably (an integer
-    // beyond 2^53) is refused here instead of being hashed into something nobody else can
-    // reproduce.
-    let prompt_payload_hash = match jcs_blake3_hash(&prompt_value) {
-        Ok(hash) => hash,
-        Err(error) => {
-            return RefusalEnvelope::bad_prompt(
-                format!("prompt payload cannot be hashed as RFC 8785 canonical JSON: {error}"),
-                error.detail(),
-            )
-            .write_to(stdout);
-        }
-    };
-    // One canonicalization feeds both the hash and bytes_crossed, so the recorded length is by
-    // construction the length of the bytes that request_payload_hash covers.
-    let canonical_request = match jcs::canonicalize(&request_value) {
-        Ok(canonical) => canonical,
-        Err(error) => {
-            return RefusalEnvelope::bad_request(
-                format!("request payload cannot be hashed as RFC 8785 canonical JSON: {error}"),
-                error.detail(),
-            )
-            .write_to(stdout);
-        }
-    };
-    let request_payload_hash = blake3_hash(canonical_request.as_bytes());
-    let bytes_crossed = canonical_request.len() as u64;
-    if prompt_provenance.prompt_payload_hash != prompt_payload_hash {
-        return RefusalEnvelope::bad_provenance(
-            "prompt provenance does not match prompt payload hash",
-            json!({
-                "expected_prompt_payload_hash": prompt_payload_hash,
-                "prompt_payload_hash": prompt_provenance.prompt_payload_hash,
-                "path": args.provenance.display().to_string(),
-            }),
-        )
-        .write_to(stdout);
-    }
-
-    if prompt_provenance.policy_hash != policy_hash {
-        return RefusalEnvelope::bad_provenance(
-            "prompt provenance does not match policy hash",
-            json!({
-                "expected_policy_hash": policy_hash,
-                "policy_hash": prompt_provenance.policy_hash,
-                "path": args.provenance.display().to_string(),
-            }),
-        )
-        .write_to(stdout);
-    }
-
-    let boundary_mode = prompt_provenance.boundary_mode;
-    let not_crossed = match args.not_crossed.as_deref() {
-        Some(path) => {
-            match load_not_crossed(path, &policy_hash, &prompt_payload_hash, boundary_mode) {
-                Ok(loaded) => Some(loaded),
-                Err(refusal) => return refusal.write_to(stdout),
-            }
-        }
-        None => None,
-    };
-    let system_prompt_hash = match system_prompt_hash(&prompt_value) {
-        Ok(hash) => hash,
-        Err(refusal) => return refusal.write_to(stdout),
-    };
-    let declared_transport = match args.transport.as_deref() {
-        Some(path) => match read_json_typed::<TransportDeclaration>(
-            path,
-            RefusalEnvelope::bad_input,
-            "failed to read transport declaration",
-            "transport declaration is not a valid transport JSON object",
-        ) {
-            Ok(declaration) => Some(declaration),
-            Err(refusal) => return refusal.write_to(stdout),
+    let verified = match verify_request(
+        &RequestToVerify {
+            inputs: &inputs,
+            provenance_path: &args.provenance,
+            request_value: &request_value,
+            replay_ref: args.request.display().to_string(),
+            not_crossed_path: args.not_crossed.as_deref(),
+            timestamp: manifest_instant.to_rfc3339(),
         },
-        None => None,
-    };
-    let adapter = match adapter::select(&request_value, declared_transport.as_ref()) {
-        Ok(adapter) => adapter,
-        Err(refusal) => return refusal.write_to(stdout),
-    };
-    let model_id = match adapter.model_id(&request_value) {
-        Some(model_id) => model_id,
-        None => {
-            return RefusalEnvelope::bad_request(
-                "request payload must contain a non-empty model id",
-                json!({ "adapter": adapter.name() }),
-            )
-            .write_to(stdout);
-        }
-    };
-    let adapter_name = adapter.name().to_string();
-
-    let verify_result = match scanner::verify(
-        &policy,
-        &prompt_value,
-        &prompt_provenance,
-        &request_value,
-        boundary_mode,
-        adapter.as_ref(),
+        |request| {
+            let declared_transport = match args.transport.as_deref() {
+                Some(path) => Some(read_json_typed::<TransportDeclaration>(
+                    path,
+                    RefusalEnvelope::bad_input,
+                    "failed to read transport declaration",
+                    "transport declaration is not a valid transport JSON object",
+                )?),
+                None => None,
+            };
+            adapter::select(request, declared_transport.as_ref())
+        },
     ) {
-        Ok(result) => result,
+        Ok(verified) => verified,
         Err(refusal) => return refusal.write_to(stdout),
     };
-
-    let builder = ManifestBuilder::new()
-        .binding_status(verify_result.binding_status)
-        .boundary_mode(boundary_mode)
-        .policy_id(policy.policy_id.clone())
-        .policy_hash(policy_hash.clone())
-        .claim_levels_evaluated(policy.claim_levels.clone())
-        .achieved_claim(verify_result.achieved_claim)
-        .upstream_artifact_inventory(upstream_inventory(&prompt_provenance, &policy))
-        .system_prompt_hash(system_prompt_hash)
-        .prompt_payload_hash(prompt_payload_hash)
-        .prompt_provenance(args.provenance.display().to_string(), &prompt_provenance)
-        .request_payload_hash(request_payload_hash)
-        .replay_ref(args.request.display().to_string())
-        .model_id(model_id)
-        .adapter(adapter_name)
-        .raw_document_present(verify_result.raw_document_present)
-        .filing_derived_text_present(verify_result.filing_derived_text_present)
-        .findings(verify_result.findings)
-        .blocked_reasons(verify_result.blocked_reasons)
-        .timestamp(manifest_instant.to_rfc3339())
-        .bytes_crossed(bytes_crossed)
-        .attestation(Attestation::SelfAttested);
-    let builder = match &not_crossed {
-        Some(loaded) => builder.not_crossed(loaded.entries.clone()),
-        None => builder,
-    };
-    let mut manifest = match builder.build() {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            return RefusalEnvelope::internal(
-                "failed to build airlock manifest",
-                json!({ "error": error.to_string() }),
-            )
-            .write_to(stdout);
-        }
-    };
+    let Verified {
+        mut manifest,
+        not_crossed,
+        ..
+    } = verified;
+    let policy_hash = inputs.policy_hash.clone();
+    let boundary_mode = manifest.boundary_mode;
     if let Some(key) = &signing_key
         && let Err(error) = signing::sign(&mut manifest, key)
     {
@@ -321,6 +178,216 @@ fn run_with_writers(
     )
 }
 
+/// The instant a manifest is stamped with: the fixed one `SOURCE_DATE_EPOCH` names, else now.
+/// A malformed value refuses rather than falling back to the clock. `command` names the
+/// subcommand in the refusal's next step.
+pub(crate) fn manifest_instant(command: &str) -> Result<DateTime<Utc>, RefusalEnvelope> {
+    now_utc().map_err(|invalid| {
+        RefusalEnvelope::bad_input_with_next_command(
+            format!("invalid {SOURCE_DATE_EPOCH_ENV}: {}", invalid.reason),
+            json!({
+                "env": SOURCE_DATE_EPOCH_ENV,
+                "value": invalid.value,
+                "expected": "Unix seconds",
+            }),
+            format!("airlock {command} --help"),
+        )
+    })
+}
+
+/// The key manifests are signed with, or `None` for `--no-sign`. A missing or unusable key is
+/// a refusal.
+pub(crate) fn resolve_signing_key(no_sign: bool) -> Result<Option<SigningKey>, RefusalEnvelope> {
+    if no_sign {
+        return Ok(None);
+    }
+    signing::secrets_dir()
+        .and_then(|dir| signing::load_signing_key(&dir))
+        .map(Some)
+        .map_err(|error| error.refusal())
+}
+
+/// What `verify` and `send` both load before a request exists: the policy, the assembled prompt
+/// and its provenance, read in that order.
+pub(crate) struct LoadedInputs {
+    pub(crate) policy: AirlockPolicy,
+    pub(crate) policy_hash: String,
+    pub(crate) prompt_value: Value,
+    pub(crate) prompt_provenance: PromptProvenance,
+}
+
+pub(crate) fn load_inputs(
+    policy_path: &Path,
+    prompt_path: &Path,
+    provenance_path: &Path,
+) -> Result<LoadedInputs, RefusalEnvelope> {
+    let policy = policy::load_policy(policy_path)?;
+    let policy_hash = canonical_policy_hash(&policy);
+    let prompt_value = read_json_value(
+        prompt_path,
+        RefusalEnvelope::bad_prompt,
+        "failed to read prompt payload",
+        "prompt payload is not valid JSON",
+    )?;
+    let prompt_provenance = read_json_typed::<PromptProvenance>(
+        provenance_path,
+        RefusalEnvelope::bad_provenance,
+        "failed to read prompt provenance",
+        "prompt provenance is not valid JSON",
+    )?;
+    Ok(LoadedInputs {
+        policy,
+        policy_hash,
+        prompt_value,
+        prompt_provenance,
+    })
+}
+
+/// One request to check against the loaded inputs.
+pub(crate) struct RequestToVerify<'a> {
+    pub(crate) inputs: &'a LoadedInputs,
+    pub(crate) provenance_path: &'a Path,
+    pub(crate) request_value: &'a Value,
+    /// What the manifest's `replay_ref` says the request came from.
+    pub(crate) replay_ref: String,
+    pub(crate) not_crossed_path: Option<&'a Path>,
+    /// The manifest's `timestamp`, already resolved.
+    pub(crate) timestamp: String,
+}
+
+/// A request that passed every check that can refuse: its manifest, unsigned and
+/// `self_attested`, and the not-crossed inventory it carries, if any.
+pub(crate) struct Verified {
+    pub(crate) manifest: AirlockManifest,
+    pub(crate) not_crossed: Option<LoadedNotCrossed>,
+}
+
+/// The verification `airlock verify` writes a manifest from, shared with `airlock send` so a
+/// sent request is judged by exactly the code that judges a verified one. `select_adapter` runs
+/// at the point the adapter is chosen, after the payload and provenance checks, so the order
+/// in which bad inputs are refused does not depend on the caller.
+pub(crate) fn verify_request(
+    request: &RequestToVerify<'_>,
+    select_adapter: impl FnOnce(&Value) -> Result<Box<dyn Adapter>, RefusalEnvelope>,
+) -> Result<Verified, RefusalEnvelope> {
+    let policy = &request.inputs.policy;
+    let policy_hash = request.inputs.policy_hash.as_str();
+    let prompt_value = &request.inputs.prompt_value;
+    let prompt_provenance = &request.inputs.prompt_provenance;
+    let request_value = request.request_value;
+
+    // Both payload hashes are blake3(RFC 8785 JCS(payload)) so a third party can recompute them
+    // with any standard JCS library. A payload JCS cannot represent interoperably (an integer
+    // beyond 2^53) is refused here instead of being hashed into something nobody else can
+    // reproduce.
+    let prompt_payload_hash = jcs_blake3_hash(prompt_value).map_err(|error| {
+        RefusalEnvelope::bad_prompt(
+            format!("prompt payload cannot be hashed as RFC 8785 canonical JSON: {error}"),
+            error.detail(),
+        )
+    })?;
+    // One canonicalization feeds both the hash and bytes_crossed, so the recorded length is by
+    // construction the length of the bytes that request_payload_hash covers.
+    let canonical_request = jcs::canonicalize(request_value).map_err(|error| {
+        RefusalEnvelope::bad_request(
+            format!("request payload cannot be hashed as RFC 8785 canonical JSON: {error}"),
+            error.detail(),
+        )
+    })?;
+    let request_payload_hash = blake3_hash(canonical_request.as_bytes());
+    let bytes_crossed = canonical_request.len() as u64;
+    if prompt_provenance.prompt_payload_hash != prompt_payload_hash {
+        return Err(RefusalEnvelope::bad_provenance(
+            "prompt provenance does not match prompt payload hash",
+            json!({
+                "expected_prompt_payload_hash": prompt_payload_hash,
+                "prompt_payload_hash": prompt_provenance.prompt_payload_hash,
+                "path": request.provenance_path.display().to_string(),
+            }),
+        ));
+    }
+
+    if prompt_provenance.policy_hash != policy_hash {
+        return Err(RefusalEnvelope::bad_provenance(
+            "prompt provenance does not match policy hash",
+            json!({
+                "expected_policy_hash": policy_hash,
+                "policy_hash": prompt_provenance.policy_hash,
+                "path": request.provenance_path.display().to_string(),
+            }),
+        ));
+    }
+
+    let boundary_mode = prompt_provenance.boundary_mode;
+    let not_crossed = match request.not_crossed_path {
+        Some(path) => Some(load_not_crossed(
+            path,
+            policy_hash,
+            &prompt_payload_hash,
+            boundary_mode,
+        )?),
+        None => None,
+    };
+    let system_prompt_hash = system_prompt_hash(prompt_value)?;
+    let adapter = select_adapter(request_value)?;
+    let model_id = adapter.model_id(request_value).ok_or_else(|| {
+        RefusalEnvelope::bad_request(
+            "request payload must contain a non-empty model id",
+            json!({ "adapter": adapter.name() }),
+        )
+    })?;
+    let adapter_name = adapter.name().to_string();
+
+    let verify_result = scanner::verify(
+        policy,
+        prompt_value,
+        prompt_provenance,
+        request_value,
+        boundary_mode,
+        adapter.as_ref(),
+    )?;
+
+    let builder = ManifestBuilder::new()
+        .binding_status(verify_result.binding_status)
+        .boundary_mode(boundary_mode)
+        .policy_id(policy.policy_id.clone())
+        .policy_hash(policy_hash.to_owned())
+        .claim_levels_evaluated(policy.claim_levels.clone())
+        .achieved_claim(verify_result.achieved_claim)
+        .upstream_artifact_inventory(upstream_inventory(prompt_provenance, policy))
+        .system_prompt_hash(system_prompt_hash)
+        .prompt_payload_hash(prompt_payload_hash)
+        .prompt_provenance(
+            request.provenance_path.display().to_string(),
+            prompt_provenance,
+        )
+        .request_payload_hash(request_payload_hash)
+        .replay_ref(request.replay_ref.clone())
+        .model_id(model_id)
+        .adapter(adapter_name)
+        .raw_document_present(verify_result.raw_document_present)
+        .filing_derived_text_present(verify_result.filing_derived_text_present)
+        .findings(verify_result.findings)
+        .blocked_reasons(verify_result.blocked_reasons)
+        .timestamp(request.timestamp.clone())
+        .bytes_crossed(bytes_crossed)
+        .attestation(Attestation::SelfAttested);
+    let builder = match &not_crossed {
+        Some(loaded) => builder.not_crossed(loaded.entries.clone()),
+        None => builder,
+    };
+    let manifest = builder.build().map_err(|error| {
+        RefusalEnvelope::internal(
+            "failed to build airlock manifest",
+            json!({ "error": error.to_string() }),
+        )
+    })?;
+    Ok(Verified {
+        manifest,
+        not_crossed,
+    })
+}
+
 fn read_json_value(
     path: &Path,
     constructor: fn(String, Value) -> RefusalEnvelope,
@@ -385,9 +452,9 @@ fn read_json_bytes(
 
 /// A not-crossed inventory accepted by verify: the entries to copy into the manifest and the
 /// hash of the file they came from, for the witness record.
-struct LoadedNotCrossed {
-    entries: Vec<NotCrossedEntry>,
-    content_hash: String,
+pub(crate) struct LoadedNotCrossed {
+    pub(crate) entries: Vec<NotCrossedEntry>,
+    pub(crate) content_hash: String,
 }
 
 /// Read the inventory `assemble --not-crossed-out` wrote and check it belongs to this run: the

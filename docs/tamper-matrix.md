@@ -4,14 +4,15 @@
      CI regenerates this file and fails on any difference. -->
 
 What the `airlock` binary does with tampered requests. Each row is one real run of
-`airlock assemble` followed by `airlock verify --no-sign --no-witness --require-claim RAW_DOCUMENT_ABSENT`.
+`airlock assemble` (with the chain flags for the conversation-chain rows) followed by
+`airlock verify --no-sign --no-witness --require-claim RAW_DOCUMENT_ABSENT`.
 **Exit** is verify's exit code: 0 means the claim met the requirement, 1 means the achieved claim
 fell below it (a sender requiring RAW_DOCUMENT_ABSENT would be stopped). **Findings** are the sorted
 finding classes; a detector hit is written `DETECTED_SENSITIVE:<rule>` because every detector hit
 shares one class and only the rule says which pack fired.
 
 Both modes are assembled from `fixtures/annotated_mode` with `fixtures/tamper_matrix/policy.yaml`
-(that policy plus all five detector packs). That input carries derived text, so every ANNOTATED row
+(that policy, all five detector packs and two declared tool-result artifacts). That input carries derived text, so every ANNOTATED row
 also has `derived_text_field_hit` (the scanner records one finding per derived-text leaf) and a
 clean ANNOTATED request earns RAW_DOCUMENT_ABSENT, never STRICT_TELEMETRY_ONLY. The payloads are
 fabricated; the AWS-shaped token is random, not a credential.
@@ -35,6 +36,8 @@ also saw the injected bytes.
 | `base64_short` | Base64 blob (96 characters, under the detector's 512 minimum) injected as an extra message | ANNOTATED | 1 | BOUNDARY_FAILED | UNBOUND | `REQUEST_UNBOUND`, `derived_text_field_hit` |
 | `aws_key` | AWS access-key-shaped token injected as an extra message | ANNOTATED | 1 | BOUNDARY_FAILED | UNBOUND | `DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY`, `REQUEST_UNBOUND`, `derived_text_field_hit` |
 | `absolute_path` | Absolute filesystem path injected as an extra message | ANNOTATED | 1 | BOUNDARY_FAILED | UNBOUND | `DETECTED_SENSITIVE:PATH_POSIX_ABSOLUTE`, `REQUEST_UNBOUND`, `derived_text_field_hit` |
+| `mo_smuggled` | Assistant message appended to a request whose prompt never admitted a model reply | ANNOTATED | 1 | BOUNDARY_FAILED | UNBOUND | `REQUEST_UNBOUND`, `derived_text_field_hit` |
+| `tr_smuggled` | Tool-role message appended to a request whose prompt never admitted a tool result | ANNOTATED | 1 | BOUNDARY_FAILED | UNBOUND | `REQUEST_UNBOUND`, `derived_text_field_hit` |
 | `clean` | Clean request, unchanged | TELEMETRY_ONLY | 0 | STRICT_TELEMETRY_ONLY | BOUND | none |
 | `pii_appended` | PII appended as an extra message | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | UNBOUND | `DETECTED_SENSITIVE:PII_US_SSN`, `REQUEST_UNBOUND` |
 | `messages_reordered` | Messages reordered | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | UNBOUND | `REQUEST_UNBOUND` |
@@ -46,6 +49,8 @@ also saw the injected bytes.
 | `base64_short` | Base64 blob (96 characters, under the detector's 512 minimum) injected as an extra message | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | UNBOUND | `REQUEST_UNBOUND` |
 | `aws_key` | AWS access-key-shaped token injected as an extra message | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | UNBOUND | `DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY`, `REQUEST_UNBOUND` |
 | `absolute_path` | Absolute filesystem path injected as an extra message | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | UNBOUND | `DETECTED_SENSITIVE:PATH_POSIX_ABSOLUTE`, `REQUEST_UNBOUND` |
+| `mo_smuggled` | Assistant message appended to a request whose prompt never admitted a model reply | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | UNBOUND | `REQUEST_UNBOUND` |
+| `tr_smuggled` | Tool-role message appended to a request whose prompt never admitted a tool result | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | UNBOUND | `REQUEST_UNBOUND` |
 
 ## Content leaked through an allowed field
 
@@ -69,15 +74,66 @@ honestly, so binding holds. Here the claim is decided by the detectors and forbi
 | `leak_aws_key` | AWS access-key-shaped token in an allowed field, request honestly wrapped | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | BOUND | `DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY` |
 | `leak_absolute_path` | Absolute filesystem path in an allowed field, request honestly wrapped | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | BOUND | `DETECTED_SENSITIVE:PATH_POSIX_ABSOLUTE` |
 
+## Conversation chain: model output and tool results
+
+A later turn carries the model's earlier reply (`MODEL_OUTPUT`) and the results of its tool calls
+(`TOOL_RESULT`) back into the prompt. The only way either gets into a prompt is
+`airlock assemble --prior-receipt R --response RESPONSE --response-adapter ADAPTER --prior-manifest M`,
+plus `--tool-result TOOL_USE_ID=PATH` for a tool result. Each row below is that chained assemble,
+then the same verify as every other row.
+
+Every file is committed: the replies (`fixtures/chain`, `fixtures/tamper_matrix/chain`), the tool
+artifacts beside them, and the prior manifest `fixtures/clean_telemetry_only/expected_manifest.json`.
+The receipt is built by the harness in the shape `airlock gate` writes. **A gate receipt is unsigned,
+and these were not written by a gate**, so these rows show what `assemble` and `verify` do with an
+admitted reply, not that a receipt is genuine. The hashes in the fixture are re-checked by the binary on
+every run: `assemble` refuses a reply that does not match its receipt, and a receipt that does not name
+the prior manifest.
+
+How to read them. A clean reply earns what the clean row at the top earns (STRICT_TELEMETRY_ONLY in
+TELEMETRY_ONLY mode, because the detectors screened the reply). A leak in the reply or in a tool result
+fails the boundary exactly as a leak in an allowed field does, and declaring a tool result's hash in the
+policy does not exempt it from the detectors. A tool result the policy does not declare is admitted, but
+the claim is capped at RAW_DOCUMENT_ABSENT. The cap shows in the TELEMETRY_ONLY `tr_undeclared` row
+(compare `tr_declared`); in ANNOTATED mode the ceiling is already RAW_DOCUMENT_ABSENT, so nothing shows
+there. The row has no finding, because the cap is carried by the manifest's strict reason, which this
+table does not show. The
+`mo_smuggled` and `tr_smuggled` rows, under "Request tampered after assembly", are the other half: a
+reply or tool result put into the request without being admitted is UNBOUND.
+
+| Case | Tamper | Mode | Exit | Claim | Binding | Findings |
+| ---- | ------ | ---- | ---- | ----- | ------- | -------- |
+| `mo_clean` | Model reply admitted through the chain, clean | ANNOTATED | 0 | RAW_DOCUMENT_ABSENT | BOUND | `derived_text_field_hit` |
+| `mo_pii` | SSN in the model's reply, admitted through the chain | ANNOTATED | 1 | BOUNDARY_FAILED | BOUND | `DETECTED_SENSITIVE:PII_US_SSN`, `derived_text_field_hit` |
+| `mo_html` | Raw HTML in the model's reply, admitted through the chain | ANNOTATED | 1 | BOUNDARY_FAILED | BOUND | `derived_text_field_hit`, `raw_html` |
+| `mo_aws_key` | AWS access-key-shaped token in the model's reply, admitted through the chain | ANNOTATED | 1 | BOUNDARY_FAILED | BOUND | `DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY`, `derived_text_field_hit` |
+| `tr_declared` | Tool result whose exact bytes the policy declares, clean reply | ANNOTATED | 0 | RAW_DOCUMENT_ABSENT | BOUND | `derived_text_field_hit` |
+| `tr_undeclared` | Tool result the policy does not declare (admitted, claim capped), clean reply | ANNOTATED | 0 | RAW_DOCUMENT_ABSENT | BOUND | `derived_text_field_hit` |
+| `tr_declared_pii` | Declared tool result that carries an SSN (declaring does not exempt it from the detectors), clean reply | ANNOTATED | 1 | BOUNDARY_FAILED | BOUND | `DETECTED_SENSITIVE:PII_US_SSN`, `derived_text_field_hit` |
+| `mo_clean` | Model reply admitted through the chain, clean | TELEMETRY_ONLY | 0 | STRICT_TELEMETRY_ONLY | BOUND | none |
+| `mo_pii` | SSN in the model's reply, admitted through the chain | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | BOUND | `DETECTED_SENSITIVE:PII_US_SSN` |
+| `mo_html` | Raw HTML in the model's reply, admitted through the chain | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | BOUND | `raw_html` |
+| `mo_aws_key` | AWS access-key-shaped token in the model's reply, admitted through the chain | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | BOUND | `DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY` |
+| `tr_declared` | Tool result whose exact bytes the policy declares, clean reply | TELEMETRY_ONLY | 0 | STRICT_TELEMETRY_ONLY | BOUND | none |
+| `tr_undeclared` | Tool result the policy does not declare (admitted, claim capped), clean reply | TELEMETRY_ONLY | 0 | RAW_DOCUMENT_ABSENT | BOUND | none |
+| `tr_declared_pii` | Declared tool result that carries an SSN (declaring does not exempt it from the detectors), clean reply | TELEMETRY_ONLY | 1 | BOUNDARY_FAILED | BOUND | `DETECTED_SENSITIVE:PII_US_SSN` |
+
 ## What this does not cover
 
 - **Short base64 is not flagged.** The blob detector's default minimum run is 512 characters, and at
   this revision the policy does not expose it (only `tabular_min_rows` is passed through). The
   `leak_base64_short` rows (96 characters) show it: they exit 0 and earn the claim
   (RAW_DOCUMENT_ABSENT, or STRICT_TELEMETRY_ONLY in TELEMETRY_ONLY mode). A base64 string under 512
-  characters in an allowed field crosses the boundary unflagged.
-- **Conversation-chain tampers.** MODEL_OUTPUT and TOOL_RESULT boundary classes (al-210) have not
-  landed, so no cell tests a changed or injected earlier turn. That is a gap, not a pass.
+  characters in an allowed field crosses the boundary unflagged. The same detectors screen model
+  output and tool results, so the gap should apply there too; no chain row tests it.
+- **Earlier turns.** The chain rows admit one reply, and its tool results, onto a fixed prior
+  manifest. Tampering with an earlier turn (a changed manifest, a swapped provenance file, a receipt
+  for another response, a broken chain of turns) is what `airlock chain verify` checks, and
+  `tests/chain_verify.rs` runs those cases; they are not cells here. A reply whose bytes differ from
+  its receipt is refused by `assemble` before any prompt exists (`tests/chain_model_output.rs`), so
+  there is no manifest to put in a row.
+- **Receipts are not authenticated.** A gate receipt is unsigned, and nothing in this matrix shows
+  that a receipt came from a gate.
 - **Other surfaces.** Manifest and signature tamper (`verify-manifest`), witness-chain tamper, the
   gate and `send` are not in this matrix.
 - **Other payloads.** Each row is what this binary did with one fabricated payload at the revision

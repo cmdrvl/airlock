@@ -14,6 +14,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use airlock::hash::blake3_hash;
+use airlock::manifest::AirlockManifest;
 use assert_cmd::Command;
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -92,6 +94,29 @@ fn apply_request_op(request: &mut Value, op: &Value) -> Result<(), String> {
                 .push(json!({"role": "user", "content": text}));
             Ok(())
         }
+        "append_assistant_message" => {
+            let text = op["text"]
+                .as_str()
+                .ok_or("append_assistant_message needs text")?;
+            request["messages"]
+                .as_array_mut()
+                .ok_or("request has no messages array")?
+                .push(json!({"role": "assistant", "content": text}));
+            Ok(())
+        }
+        "append_tool_message" => {
+            let text = op["text"]
+                .as_str()
+                .ok_or("append_tool_message needs text")?;
+            let id = op["tool_call_id"]
+                .as_str()
+                .ok_or("append_tool_message needs a tool_call_id")?;
+            request["messages"]
+                .as_array_mut()
+                .ok_or("request has no messages array")?
+                .push(json!({"role": "tool", "tool_call_id": id, "content": text}));
+            Ok(())
+        }
         other => Err(format!("unknown request op: {other}")),
     }
 }
@@ -103,6 +128,7 @@ struct Matrix {
     model: String,
     require_claim: String,
     leak_pointer: String,
+    chain: Value,
 }
 
 impl Matrix {
@@ -115,16 +141,19 @@ impl Matrix {
             model: text("model"),
             require_claim: text("require_claim"),
             leak_pointer: text("leak_pointer"),
+            chain: fixture["chain"].clone(),
         }
     }
 
-    /// `airlock assemble` over `input`; returns (prompt, provenance) paths inside `dir`.
+    /// `airlock assemble` over `input`, with `extra` arguments appended (the chain flags for a
+    /// chain_turn cell, none otherwise); returns (prompt, provenance) paths inside `dir`.
     fn assemble(
         &self,
         input: &Path,
         mode: &str,
         dir: &Path,
         stem: &str,
+        extra: &[String],
     ) -> Result<(PathBuf, PathBuf), String> {
         let prompt = dir.join(format!("{stem}.prompt.json"));
         let provenance = dir.join(format!("{stem}.provenance.json"));
@@ -141,6 +170,7 @@ impl Matrix {
             .arg("--provenance-out")
             .arg(&provenance)
             .arg("--no-witness")
+            .args(extra)
             .output()
             .map_err(|error| error.to_string())?;
         if output.status.code() != Some(0) {
@@ -155,6 +185,83 @@ impl Matrix {
 
     fn wrap(&self, prompt: &Path) -> Value {
         json!({"model": self.model, "messages": read_json(prompt)["messages"].clone()})
+    }
+
+    /// A chain_turn cell: `assemble` chained onto the committed prior manifest through a receipt
+    /// built here in the shape `airlock gate` writes, then the same verify as every other cell.
+    /// Mirrors the jq in tests/e2e_tamper_matrix.sh.
+    fn chain_turn(
+        &self,
+        ops: &[Value],
+        mode: &str,
+        dir: &Path,
+        stem: &str,
+    ) -> Result<Value, String> {
+        let text = |value: &Value, what: &str| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("fixture chain is missing {what}"))
+        };
+        let response_key = ops
+            .iter()
+            .find(|op| op["op"] == "admit_response")
+            .and_then(|op| op["response"].as_str())
+            .ok_or("a chain_turn case needs an admit_response op")?;
+        let response = &self.chain["responses"][response_key];
+        let response_file = text(&response["file"], &format!("responses.{response_key}.file"))?;
+        let response_hash = text(&response["hash"], &format!("responses.{response_key}.hash"))?;
+
+        let receipt_path = dir.join(format!("{stem}.receipt.json"));
+        let receipt = json!({
+            "gate_version": "airlock.gate.v1",
+            "mode": "strict-manifest",
+            "achieved_claim": "STRICT_TELEMETRY_ONLY",
+            "request_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+            "response_hash": response_hash,
+            "upstream_status": 200,
+            "blocked": false,
+            "findings": [],
+            "timestamp": "2026-11-25T00:00:00Z",
+            "matched_manifest_hash": self.chain["prior_manifest_hash"],
+        });
+        fs::write(
+            &receipt_path,
+            serde_json::to_vec(&receipt).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut extra = vec![
+            "--prior-receipt".to_owned(),
+            receipt_path.display().to_string(),
+            "--response".to_owned(),
+            repo(&response_file).display().to_string(),
+            "--response-adapter".to_owned(),
+            text(&self.chain["adapter"], "adapter")?,
+            "--prior-manifest".to_owned(),
+            repo(&text(&self.chain["prior_manifest"], "prior_manifest")?)
+                .display()
+                .to_string(),
+        ];
+        for op in ops.iter().filter(|op| op["op"] == "admit_tool_result") {
+            let key = op["artifact"]
+                .as_str()
+                .ok_or("admit_tool_result needs an artifact")?;
+            let file = text(
+                &self.chain["artifacts"][key]["file"],
+                &format!("artifacts.{key}.file"),
+            )?;
+            extra.push("--tool-result".to_owned());
+            extra.push(format!(
+                "{}={}",
+                text(&self.chain["tool_use_id"], "tool_use_id")?,
+                repo(&file).display()
+            ));
+        }
+
+        let (prompt, provenance) = self.assemble(&self.input, mode, dir, stem, &extra)?;
+        let request = self.wrap(&prompt);
+        self.verify(&prompt, &provenance, &request, dir, stem)
     }
 
     /// `airlock verify` on `request`; returns {exit, claim, binding, findings}.
@@ -232,9 +339,32 @@ fn the_fixture_gives_every_case_an_expectation_for_every_mode() {
         let id = case["id"].as_str().unwrap_or_default();
         assert!(seen.insert(id.to_owned()), "duplicate case id {id}");
         assert!(
-            matches!(case["site"].as_str(), Some("request" | "input_leak")),
+            matches!(
+                case["site"].as_str(),
+                Some("request" | "input_leak" | "chain_turn")
+            ),
             "case {id} has an unknown site"
         );
+        if case["site"] == "chain_turn" {
+            let ops = case["ops"].as_array().cloned().unwrap_or_default();
+            let response = ops
+                .first()
+                .and_then(|op| op["response"].as_str())
+                .unwrap_or_default();
+            assert!(
+                ops.first().is_some_and(|op| op["op"] == "admit_response")
+                    && fixture["chain"]["responses"][response].is_object(),
+                "chain_turn case {id} must start with an admit_response op naming a response in the fixture's chain block"
+            );
+            for op in ops.iter().skip(1) {
+                let artifact = op["artifact"].as_str().unwrap_or_default();
+                assert!(
+                    op["op"] == "admit_tool_result"
+                        && fixture["chain"]["artifacts"][artifact].is_object(),
+                    "chain_turn case {id}: every op after the first must be admit_tool_result naming an artifact in the fixture's chain block"
+                );
+            }
+        }
         if case["site"] == "input_leak" {
             assert!(
                 case["ops"][0]["op"] == "set_input" && case["ops"][0]["value"].is_string(),
@@ -262,6 +392,53 @@ fn the_fixture_gives_every_case_an_expectation_for_every_mode() {
     }
 }
 
+/// The chain constants are hashes of committed bytes. The bash harness cannot compute them and
+/// trusts them; here they are recomputed from the files with the library, so a file edited
+/// without its constant (or the reverse) fails `cargo test` and not only the cell that uses it.
+/// Which artifacts the policy declares is checked against the policy text for the same reason.
+#[test]
+fn the_chain_constants_are_the_hashes_of_the_files_they_name() {
+    let fixture = fixture();
+    let chain = &fixture["chain"];
+    for group in ["responses", "artifacts"] {
+        let entries = chain[group].as_object().cloned().unwrap_or_default();
+        assert!(!entries.is_empty(), "fixture chain.{group} is empty");
+        for (name, entry) in entries {
+            let file = entry["file"].as_str().unwrap_or_default();
+            let bytes = fs::read(repo(file)).unwrap_or_default();
+            assert!(
+                !bytes.is_empty(),
+                "chain.{group}.{name}: {file} is missing or empty"
+            );
+            assert_eq!(
+                entry["hash"].as_str().unwrap_or_default(),
+                blake3_hash(&bytes),
+                "chain.{group}.{name}: the committed hash is not the hash of {file}"
+            );
+        }
+    }
+
+    let prior =
+        fs::read(repo(chain["prior_manifest"].as_str().unwrap_or_default())).unwrap_or_default();
+    let prior: AirlockManifest = serde_json::from_slice(&prior)
+        .expect("the prior manifest named by the fixture must parse as a manifest");
+    assert_eq!(
+        chain["prior_manifest_hash"].as_str().unwrap_or_default(),
+        prior.hash(),
+        "chain.prior_manifest_hash is not the gate hash of the prior manifest"
+    );
+
+    let policy = fs::read_to_string(repo(fixture["policy"].as_str().unwrap_or_default()))
+        .unwrap_or_default();
+    for (name, entry) in chain["artifacts"].as_object().cloned().unwrap_or_default() {
+        assert_eq!(
+            policy.contains(entry["hash"].as_str().unwrap_or("no hash")),
+            entry["declared_in_policy"] == true,
+            "chain.artifacts.{name}: declared_in_policy disagrees with the matrix policy"
+        );
+    }
+}
+
 #[test]
 fn every_cell_matches_its_committed_expectation() {
     let fixture = fixture();
@@ -272,7 +449,13 @@ fn every_cell_matches_its_committed_expectation() {
 
     for mode in strings(&fixture["modes"]) {
         let (base_prompt, base_provenance) = matrix
-            .assemble(&matrix.input, &mode, dir.path(), &format!("base-{mode}"))
+            .assemble(
+                &matrix.input,
+                &mode,
+                dir.path(),
+                &format!("base-{mode}"),
+                &[],
+            )
             .expect("the honest assemble must succeed");
         let base_request = matrix.wrap(&base_prompt);
 
@@ -302,7 +485,9 @@ fn every_cell_matches_its_committed_expectation() {
                             let leaked = dir.path().join(format!("{stem}.input.json"));
                             fs::write(&leaked, serde_json::to_vec(&input).unwrap_or_default())
                                 .map_err(|error| error.to_string())
-                                .and_then(|()| matrix.assemble(&leaked, &mode, dir.path(), &stem))
+                                .and_then(|()| {
+                                    matrix.assemble(&leaked, &mode, dir.path(), &stem, &[])
+                                })
                                 .and_then(|(prompt, provenance)| {
                                     let request = matrix.wrap(&prompt);
                                     matrix.verify(&prompt, &provenance, &request, dir.path(), &stem)
@@ -311,6 +496,7 @@ fn every_cell_matches_its_committed_expectation() {
                         None => Err(format!("no value at {}", matrix.leak_pointer)),
                     }
                 }
+                Some("chain_turn") => matrix.chain_turn(&ops, &mode, dir.path(), &stem),
                 other => Err(format!("unknown site {other:?}")),
             };
 

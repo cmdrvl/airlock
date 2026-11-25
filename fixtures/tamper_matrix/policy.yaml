@@ -60,3 +60,8 @@ detectors:
   - tabular
   - blobs
   - paths
+declared_tool_results:
+  - artifact_hash: blake3:de065565e3e7dc131ce11b2ece4edae3ef1647057601682b55aa417984c9e82f
+    description: Lineage lookup result for family F-17 (fixtures/tamper_matrix/chain/tool_declared.txt)
+  - artifact_hash: blake3:20cfe51cf3a6598c4576b6420340c7d1258bc4ecd0b25e723012c3f88e41e176
+    description: Declared artifact that carries an SSN, to show that declaring does not exempt it from the detectors (fixtures/tamper_matrix/chain/tool_pii.txt)

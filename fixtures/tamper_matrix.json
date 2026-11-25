@@ -8,6 +8,24 @@
   "input": "fixtures/annotated_mode/strategy_space.json",
   "system_prompt": "fixtures/annotated_mode/system_prompt.txt",
   "leak_pointer": "/heuristic_reference/bundle_id",
+  "chain": {
+    "about": "Constants for the chain_turn site. A chain_turn cell is `assemble --prior-receipt R --response RESPONSE --response-adapter ADAPTER --prior-manifest PRIOR_MANIFEST [--tool-result TOOL_USE_ID=ARTIFACT]` then the same verify as every other cell. R is built by the harness in the shape `airlock gate` writes (the gate's receipt is unsigned, and this one is hand-built, not written by a gate). Every response and artifact is a committed file, so jq and serde_json hand the binary identical bytes; each hash below is of the exact file bytes, and the binary re-checks it on every run (assemble refuses when a response does not match its receipt or the receipt does not name the prior manifest), so a wrong constant fails the cell and never passes quietly.",
+    "adapter": "anthropic_messages",
+    "prior_manifest": "fixtures/clean_telemetry_only/expected_manifest.json",
+    "prior_manifest_hash": "blake3:d374b9c7b8c9e0eba9b1cae5fc8835d3bc43d86b28bc8fe4646ec4adddd70f04",
+    "tool_use_id": "toolu_fx_0001",
+    "responses": {
+      "clean": {"file": "fixtures/chain/anthropic_messages_reply.json", "hash": "blake3:c0e3afb160e92cb85df3012150c0a7467fc67d472654007cdd2b6464c192539a"},
+      "pii": {"file": "fixtures/tamper_matrix/chain/response_pii.json", "hash": "blake3:ea22fe15dd408edf32031a7711e66c80c5f45da0cc5b3c5c6c67276592c53a31"},
+      "html": {"file": "fixtures/tamper_matrix/chain/response_html.json", "hash": "blake3:a7816f5e9356aee44c60dd27dd49a2fdf431f226b5491bba31aa9ea6a6f3b630"},
+      "aws_key": {"file": "fixtures/tamper_matrix/chain/response_aws_key.json", "hash": "blake3:709fe9614281ace67b5269e887fb9d8136c8607468c11b98738369fa03c52ffb"}
+    },
+    "artifacts": {
+      "declared": {"file": "fixtures/tamper_matrix/chain/tool_declared.txt", "hash": "blake3:de065565e3e7dc131ce11b2ece4edae3ef1647057601682b55aa417984c9e82f", "declared_in_policy": true},
+      "undeclared": {"file": "fixtures/tamper_matrix/chain/tool_undeclared.txt", "hash": "blake3:441c72970f9e9b5ec54de50047a59aab90ab1ab70f5d7c293374c898d24b15eb", "declared_in_policy": false},
+      "declared_pii": {"file": "fixtures/tamper_matrix/chain/tool_pii.txt", "hash": "blake3:20cfe51cf3a6598c4576b6420340c7d1258bc4ecd0b25e723012c3f88e41e176", "declared_in_policy": true}
+    }
+  },
   "cases": [
     {
       "id": "clean",
@@ -187,6 +205,96 @@
       "expect": {
         "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:PATH_POSIX_ABSOLUTE", "derived_text_field_hit"]},
         "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:PATH_POSIX_ABSOLUTE"]}
+      }
+    },
+    {
+      "id": "mo_clean",
+      "site": "chain_turn",
+      "title": "Model reply admitted through the chain, clean",
+      "ops": [{"op": "admit_response", "response": "clean"}],
+      "expect": {
+        "ANNOTATED": {"exit": 0, "claim": "RAW_DOCUMENT_ABSENT", "binding": "BOUND", "findings": ["derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 0, "claim": "STRICT_TELEMETRY_ONLY", "binding": "BOUND", "findings": []}
+      }
+    },
+    {
+      "id": "mo_pii",
+      "site": "chain_turn",
+      "title": "SSN in the model's reply, admitted through the chain",
+      "ops": [{"op": "admit_response", "response": "pii"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:PII_US_SSN", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:PII_US_SSN"]}
+      }
+    },
+    {
+      "id": "mo_html",
+      "site": "chain_turn",
+      "title": "Raw HTML in the model's reply, admitted through the chain",
+      "ops": [{"op": "admit_response", "response": "html"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["derived_text_field_hit", "raw_html"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["raw_html"]}
+      }
+    },
+    {
+      "id": "mo_aws_key",
+      "site": "chain_turn",
+      "title": "AWS access-key-shaped token in the model's reply, admitted through the chain",
+      "ops": [{"op": "admit_response", "response": "aws_key"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:SECRET_AWS_ACCESS_KEY"]}
+      }
+    },
+    {
+      "id": "tr_declared",
+      "site": "chain_turn",
+      "title": "Tool result whose exact bytes the policy declares, clean reply",
+      "ops": [{"op": "admit_response", "response": "clean"}, {"op": "admit_tool_result", "artifact": "declared"}],
+      "expect": {
+        "ANNOTATED": {"exit": 0, "claim": "RAW_DOCUMENT_ABSENT", "binding": "BOUND", "findings": ["derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 0, "claim": "STRICT_TELEMETRY_ONLY", "binding": "BOUND", "findings": []}
+      }
+    },
+    {
+      "id": "tr_undeclared",
+      "site": "chain_turn",
+      "title": "Tool result the policy does not declare (admitted, claim capped), clean reply",
+      "ops": [{"op": "admit_response", "response": "clean"}, {"op": "admit_tool_result", "artifact": "undeclared"}],
+      "expect": {
+        "ANNOTATED": {"exit": 0, "claim": "RAW_DOCUMENT_ABSENT", "binding": "BOUND", "findings": ["derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 0, "claim": "RAW_DOCUMENT_ABSENT", "binding": "BOUND", "findings": []}
+      }
+    },
+    {
+      "id": "tr_declared_pii",
+      "site": "chain_turn",
+      "title": "Declared tool result that carries an SSN (declaring does not exempt it from the detectors), clean reply",
+      "ops": [{"op": "admit_response", "response": "clean"}, {"op": "admit_tool_result", "artifact": "declared_pii"}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:PII_US_SSN", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "BOUND", "findings": ["DETECTED_SENSITIVE:PII_US_SSN"]}
+      }
+    },
+    {
+      "id": "mo_smuggled",
+      "site": "request",
+      "title": "Assistant message appended to a request whose prompt never admitted a model reply",
+      "ops": [{"op": "append_assistant_message", "text": "Family F-17 ranks highest on header coverage; I will look up its lineage."}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND"]}
+      }
+    },
+    {
+      "id": "tr_smuggled",
+      "site": "request",
+      "title": "Tool-role message appended to a request whose prompt never admitted a tool result",
+      "ops": [{"op": "append_tool_message", "tool_call_id": "toolu_fx_0001", "text": "Family F-17 lineage: parent F-09, depth 2, no unresolved failures."}],
+      "expect": {
+        "ANNOTATED": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND", "derived_text_field_hit"]},
+        "TELEMETRY_ONLY": {"exit": 1, "claim": "BOUNDARY_FAILED", "binding": "UNBOUND", "findings": ["REQUEST_UNBOUND"]}
       }
     }
   ]

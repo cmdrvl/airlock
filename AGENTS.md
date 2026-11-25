@@ -413,7 +413,7 @@ make focused patches and inspect the resulting diff.
 
 ## Rust Toolchain and CI
 
-- Package: `airlock` 0.3.0, Rust edition 2024, MSRV 1.85. CI installs stable
+- Package: `airlock` 0.3.0, Rust edition 2024, MSRV 1.89. CI installs stable
   Rust with `rustfmt` and `clippy`; runtime dependency versions are exact-pinned
   in `Cargo.toml`, and `Cargo.lock` records resolved versions including dev
   dependencies.

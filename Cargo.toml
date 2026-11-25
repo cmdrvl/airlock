@@ -2,7 +2,7 @@
 name = "airlock"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Prove what crossed the model boundary"
 license = "MIT"
 

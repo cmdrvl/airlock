@@ -313,6 +313,7 @@ mod tests {
             params: json!({"boundary_mode": "ANNOTATED"}),
             stdout_hash: "blake3:stdout".to_string(),
             stdout_bytes: 128,
+            prev_hash: None,
         }
     }
 

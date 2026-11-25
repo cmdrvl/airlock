@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Validate tag matches Cargo.toml
         id: version
@@ -74,7 +74,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -125,7 +125,7 @@ jobs:
           fi
 
       - name: Upload release archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.target }}
           path: dist/airlock-${{ needs.verify-version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive_ext }}
@@ -142,10 +142,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download release archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist/archives
           pattern: release-*
@@ -219,7 +219,7 @@ jobs:
           '
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/archives/*.tar.gz
@@ -236,7 +236,7 @@ jobs:
 
       - name: Checkout Homebrew tap
         if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cmdrvl/homebrew-tap
           token: ${{ env.HOMEBREW_TAP_TOKEN }}

@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use jsonschema::validator_for;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tiny_http::{Response, Server};
 
 struct Origin {
@@ -90,14 +90,38 @@ fn start_strict_gate(
     witness_path: &Path,
     extra: &[&str],
 ) -> GateProcess {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_airlock"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_airlock"));
+    command
         .args(["gate", "--mode", "strict-manifest", "--upstream"])
         .arg(format!("http://{upstream}"))
         .args(["--listen", "127.0.0.1:0", "--manifest-dir"])
         .arg(manifest_dir)
         .arg("--out-dir")
         .arg(out_dir)
-        .args(extra)
+        .args(extra);
+    launch_gate(command, witness_path)
+}
+
+fn start_policy_proxy_gate(
+    upstream: SocketAddr,
+    policy: &Path,
+    out_dir: &Path,
+    witness_path: &Path,
+) -> GateProcess {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_airlock"));
+    command
+        .args(["gate", "--mode", "policy-proxy", "--upstream"])
+        .arg(format!("http://{upstream}"))
+        .args(["--listen", "127.0.0.1:0", "--policy"])
+        .arg(policy)
+        .arg("--out-dir")
+        .arg(out_dir);
+    launch_gate(command, witness_path)
+}
+
+/// Start the gate that `command` describes and wait for its "listening on" line.
+fn launch_gate(mut command: Command, witness_path: &Path) -> GateProcess {
+    let mut child = command
         .env("EPISTEMIC_WITNESS", witness_path)
         .env_remove("ALL_PROXY")
         .env_remove("HTTPS_PROXY")
@@ -746,4 +770,106 @@ fn policy_proxy_refuses_require_claim_at_startup() {
         stderr.contains("--require-claim only applies to strict-manifest mode"),
         "unexpected stderr: {stderr}"
     );
+}
+
+fn get_health(agent: &ureq::Agent, address: SocketAddr, path: &str) -> (u16, Value) {
+    let response = agent
+        .get(&format!("http://{address}{path}"))
+        .call()
+        .unwrap();
+    let status = response.status().as_u16();
+    let mut bytes = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[test]
+fn health_endpoint_reports_the_gate_without_forwarding_or_recording() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin();
+    let receipts_dir = temp.path().join("receipts");
+    let witness_path = temp.path().join("witness.jsonl");
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &receipts_dir,
+        &witness_path,
+        &[],
+    );
+    let agent = client();
+
+    let (status, health) = get_health(&agent, gate.address, "/airlock/health");
+    assert_eq!(status, 200);
+    assert_eq!(
+        health,
+        json!({
+            "status": "ok",
+            "gate_version": "airlock.gate.v1",
+            "mode": "strict-manifest",
+            "manifest_count": 1
+        })
+    );
+    // A query string does not take a request off the reserved path.
+    assert_eq!(
+        get_health(&agent, gate.address, "/airlock/health?probe=1").0,
+        200
+    );
+
+    // The path is reserved for every method: a POST that a manifest matches is answered
+    // with 405 and never forwarded.
+    let posted = agent
+        .post(&format!("http://{}/airlock/health", gate.address))
+        .header("Content-Type", "application/json")
+        .send(serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    assert_eq!(posted.status().as_u16(), 405);
+
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
+    assert_eq!(
+        std::fs::read_dir(&receipts_dir).unwrap().count(),
+        0,
+        "health checks write no receipts"
+    );
+    assert!(
+        std::fs::read_to_string(&witness_path)
+            .unwrap_or_default()
+            .is_empty(),
+        "health checks write no witness records"
+    );
+}
+
+#[test]
+fn policy_proxy_health_reports_the_enforced_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let origin = start_origin();
+    let policy =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/clean_telemetry_only/policy.yaml");
+    let gate = start_policy_proxy_gate(
+        origin.address,
+        &policy,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+    );
+
+    let (status, health) = get_health(&client(), gate.address, "/airlock/health");
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        health,
+        json!({
+            "status": "ok",
+            "gate_version": "airlock.gate.v1",
+            "mode": "policy-proxy",
+            "policy_id": "clean_telemetry_only"
+        })
+    );
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
 }

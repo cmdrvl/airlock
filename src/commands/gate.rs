@@ -346,7 +346,44 @@ fn load_strict_manifests(
     Ok(manifests)
 }
 
+/// The gate's own liveness endpoint. The path is reserved for every method, so a request to
+/// it is answered here and never forwarded upstream.
+const HEALTH_PATH: &str = "/airlock/health";
+
+fn is_health_path(url: &str) -> bool {
+    url.split('?').next() == Some(HEALTH_PATH)
+}
+
+/// `GET /airlock/health`: 200 with the mode and what the gate is enforcing. It writes no
+/// receipt and no witness record, so a supervisor can poll it freely.
+fn respond_health(request: Request, state: &GateState) {
+    if request.method() != &Method::Get {
+        return_json(
+            request,
+            StatusCode(405),
+            json!({"error":"airlock gate health accepts GET requests only"}),
+        );
+        return;
+    }
+    let mut body = json!({
+        "status": "ok",
+        "gate_version": "airlock.gate.v1",
+        "mode": mode_name(state.mode),
+    });
+    match state.mode {
+        GateMode::StrictManifest => body["manifest_count"] = json!(state.strict_manifests.len()),
+        GateMode::PolicyProxy => {
+            body["policy_id"] = json!(state.policy.as_ref().map(|policy| &policy.policy_id));
+        }
+    }
+    return_json(request, StatusCode(200), body);
+}
+
 fn handle_request(mut request: Request, state: &GateState) {
+    if is_health_path(request.url()) {
+        respond_health(request, state);
+        return;
+    }
     if request.method() != &Method::Post {
         return_json(
             request,

@@ -52,6 +52,24 @@ airlock gate --mode policy-proxy \
   --out-dir /var/lib/airlock/gate
 ```
 
+Strict-manifest mode can also require a minimum claim and cap the request body.
+`--require-claim` takes `RAW_DOCUMENT_ABSENT` or `STRICT_TELEMETRY_ONLY`; a
+request whose manifest claims less is denied. `--max-request-bytes` defaults to
+33554432 (32 MiB) in strict-manifest mode. Policy-proxy mode keeps its 4194304
+byte scan limit as the default and refuses a larger value at startup. Each
+in-flight request holds its body, and its canonical copy, in memory, so size the
+cap against up to 32 concurrent requests.
+
+```bash
+airlock gate --mode strict-manifest \
+  --manifest-dir /var/lib/airlock/manifests \
+  --require-claim STRICT_TELEMETRY_ONLY \
+  --max-request-bytes 8388608 \
+  --upstream https://api.openai.com \
+  --listen 127.0.0.1:8787 \
+  --out-dir /var/lib/airlock/gate
+```
+
 `--upstream` is an origin only (scheme and host, no path). The gate appends the
 request path it receives, so SDK base URLs keep their API prefix:
 
@@ -166,11 +184,41 @@ sudo -u agent curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
 
 # The gate accepts POST only: any other method gets 405.
 sudo -u agent curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/v1/models
+
+# Liveness: HTTP 200 with the mode and what the gate is enforcing.
+sudo -u agent curl -sS http://127.0.0.1:8787/airlock/health
 ```
+
+`GET /airlock/health` is answered by the gate itself: it contacts no upstream
+and writes no receipt or witness record, so a supervisor can poll it. The path
+is reserved for every method; a POST to it is a 405 and is never forwarded.
 
 A request denied by the gate leaves a receipt in `--out-dir` and a witness
 record; a request forwarded to the provider leaves a receipt with the response
 hash and upstream status.
+
+## 4. Read the refusals and receipts
+
+A refused request gets a JSON body (`airlock.gate_refusal.v1`) whose `code` says
+why:
+
+| Code | HTTP | Meaning |
+| ---- | ---- | ------- |
+| `E_GATE_DENIED` | 403 | Strict-manifest mode did not forward the request: no bound manifest matches its canonical hash, the manifest claims less than `--require-claim`, the body is unreadable, malformed or over `--max-request-bytes`, or the request target is invalid. |
+| `BOUNDARY_FAILED` | 403 | Policy-proxy mode found something in the request, or could not screen it. |
+| `UPSTREAM_UNAVAILABLE` | 502 | The gate admitted the request but the upstream could not be reached or did not answer within `--timeout-seconds`. |
+| `GATE_BUSY` | 503 | The gate already has 32 requests in flight. |
+
+Each proxied request leaves an `airlock.gate.v1` receipt in `--out-dir`: the
+request and response byte counts and hashes, the matched manifest, and, when a
+configured limit stopped the request, a `limit` object naming
+`max_request_bytes` or `timeout_seconds` with the configured value. Authorization
+and provider key headers are forwarded to the provider but never written to a
+receipt or witness record. To read a receipt:
+
+```sh
+airlock explain --manifest /var/lib/airlock/gate/RECEIPT.json
+```
 
 ## What this does not give you
 
@@ -180,3 +228,7 @@ hash and upstream status.
   proxy that the agent account can already reach on an allowed address.
 - A request the gate forwards is attested by its receipt; the firewall only
   guarantees that forwarded requests are the only ones that left.
+- If the upstream ends a response early, the receipt carries a
+  `GATE_STREAM_INTERRUPTED` finding, but the gate does not close the client's
+  connection: the client waits until its own timeout (known gap, tracked on
+  al-3pz as G14). Set a timeout in the agent's SDK.

@@ -120,6 +120,18 @@ supported achieved claim. The gate parses each request as JSON and hashes its ca
 After screening or a manifest match, it forwards those canonical JSON bytes so
 the upstream receives the content Airlock checked.
 
+A strict-manifest request the gate will not forward (no matching manifest, a
+manifest below `--require-claim`, an unreadable, malformed or oversized body, an
+invalid target) is refused with HTTP 403 and code `E_GATE_DENIED`; policy-proxy
+refusals keep `BOUNDARY_FAILED`. `--require-claim RAW_DOCUMENT_ABSENT|STRICT_TELEMETRY_ONLY`
+sets the lowest claim a matching manifest may carry (strict-manifest only).
+`--max-request-bytes` caps the request body: 32 MiB by default in strict-manifest
+mode, and policy-proxy mode keeps its 4 MiB scan limit and refuses a larger value.
+A tripped size cap or upstream timeout is recorded in the receipt's `limit`.
+`GET /airlock/health` answers 200 with the mode and what the gate enforces, and
+writes no receipt. See `docs/deploy/egress-firewall.md` for running the gate as
+the only route to a provider.
+
 The optional `--transport` declaration pins a provider adapter, or supplies
 the JSON pointers required by `generic_json`. Without it, the gate selects a
 provider adapter from each request's shape and refuses conflicting
@@ -127,9 +139,10 @@ provider-specific shapes.
 
 Allowed responses stream through the proxy while Airlock hashes the bytes. Gate
 receipts are written under `airlock-gate/` by default, and witness records
-include the gate mode, claim, and request/response hashes. Authorization and
-provider key headers are forwarded but never included in receipts or witness
-records. Set `--no-witness` to opt out of the local ledger.
+include the gate mode, claim, request/response hashes, and request/response
+byte counts. Authorization and provider key headers are forwarded but never
+included in receipts or witness records. Set `--no-witness` to opt out of the
+local ledger. `airlock explain --manifest <receipt>` describes a gate receipt.
 
 ### Doctor
 
@@ -348,6 +361,12 @@ airlock explain --manifest <PATH> [--json]
 `--json` emits `airlock.explain.v1`, including the achieved claim, boundary
 mode, manifest hash, proof hashes, blocked paths, findings, provenance summary,
 and next commands.
+
+`--manifest` also accepts an `airlock.gate.v1` gate receipt. The output then says
+what the gate did (denied, forwarded, forwarded with an incomplete response, or
+authorized but not delivered), the request and response sizes and hashes, the
+matched manifest, any limit that tripped, and why each finding was raised;
+`--json` emits `airlock.explain_gate.v1`.
 
 ### `airlock doctor`
 

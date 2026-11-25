@@ -141,3 +141,29 @@ fn firewall_rules_and_base_urls_name_the_gate_listen_address() {
         "doc mentions loopback ports {mentioned:?} but the gate listens on {port}"
     );
 }
+
+#[test]
+fn every_refusal_code_the_gate_schema_allows_has_a_row_in_the_doc() {
+    let schema_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas/airlock_gate.v1.schema.json");
+    let schema: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&schema_path).unwrap()).unwrap();
+    let codes: Vec<&str> = schema["$defs"]["refusal"]["properties"]["code"]["enum"]
+        .as_array()
+        .expect("the gate schema lists refusal codes")
+        .iter()
+        .map(|code| code.as_str().unwrap())
+        .collect();
+    assert!(
+        codes.len() >= 4,
+        "unexpectedly few refusal codes: {codes:?}"
+    );
+
+    let text = doc();
+    for code in codes {
+        assert!(
+            text.contains(&format!("| `{code}` |")),
+            "the refusal table in the doc has no row for `{code}`"
+        );
+    }
+}

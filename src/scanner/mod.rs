@@ -605,6 +605,8 @@ mod tests {
                 ClaimLevel::RawDocumentAbsent,
                 ClaimLevel::StrictTelemetryOnly,
             ],
+            extends: Vec::new(),
+            source_chain: Vec::new(),
         }
     }
 

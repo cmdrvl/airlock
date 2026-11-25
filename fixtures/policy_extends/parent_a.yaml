@@ -1,0 +1,12 @@
+policy_id: include_order
+version: airlock.v0
+allowed_keys:
+  - key_path: family_id
+    boundary_class: TELEMETRY
+forbidden_keys:
+  - html_path
+forbidden_patterns:
+  - pattern: <script
+    artifact_class: raw_script
+claim_levels:
+  - BOUNDARY_FAILED

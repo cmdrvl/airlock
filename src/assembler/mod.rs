@@ -148,14 +148,7 @@ fn validate_inputs(inputs: &[InputArtifact]) -> Result<(), RefusalEnvelope> {
 }
 
 fn hash_policy_content(policy: &AirlockPolicy) -> Result<String, RefusalEnvelope> {
-    let value = serde_json::to_value(policy).map_err(|error| {
-        RefusalEnvelope::internal(
-            "failed to serialize policy for deterministic hashing",
-            json!({ "error": error.to_string() }),
-        )
-    })?;
-
-    Ok(blake3_hash(&canonical_json_bytes(&sort_value(value))))
+    Ok(crate::policy::resolved_policy_hash(policy))
 }
 
 fn classify_rule(
@@ -422,6 +415,8 @@ mod tests {
                 ClaimLevel::RawDocumentAbsent,
                 ClaimLevel::StrictTelemetryOnly,
             ],
+            extends: Vec::new(),
+            source_chain: Vec::new(),
         }
     }
 

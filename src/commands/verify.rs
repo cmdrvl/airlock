@@ -9,7 +9,7 @@ use crate::assembler::PromptProvenance;
 use crate::cli::{VERIFY_PARTIAL, VERIFY_PASS, VerifyArgs};
 use crate::hash::blake3_hash;
 use crate::manifest::ManifestBuilder;
-use crate::output::{SOURCE_DATE_EPOCH_ENV, canonical_json_bytes, now_utc, sort_value};
+use crate::output::{SOURCE_DATE_EPOCH_ENV, canonical_json_bytes, now_utc};
 use crate::policy::{self, AirlockPolicy};
 use crate::refusal::RefusalEnvelope;
 use crate::scanner;
@@ -140,7 +140,7 @@ fn run_with_writers(
         .policy_hash(policy_hash.clone())
         .claim_levels_evaluated(policy.claim_levels.clone())
         .achieved_claim(verify_result.achieved_claim)
-        .upstream_artifact_inventory(upstream_inventory(&prompt_provenance))
+        .upstream_artifact_inventory(upstream_inventory(&prompt_provenance, &policy))
         .system_prompt_hash(system_prompt_hash)
         .prompt_payload_hash(prompt_payload_hash)
         .prompt_provenance(args.provenance.display().to_string(), &prompt_provenance)
@@ -294,8 +294,7 @@ fn read_json_bytes(
 }
 
 fn canonical_policy_hash(policy: &AirlockPolicy) -> String {
-    let value = serde_json::to_value(policy).expect("policy should serialize");
-    blake3_hash(&canonical_json_bytes(&sort_value(value)))
+    policy::resolved_policy_hash(policy)
 }
 
 fn system_prompt_hash(prompt_payload: &Value) -> Result<String, RefusalEnvelope> {
@@ -347,7 +346,10 @@ fn request_transport_metadata(
     ))
 }
 
-fn upstream_inventory(prompt_provenance: &PromptProvenance) -> Vec<UpstreamArtifact> {
+fn upstream_inventory(
+    prompt_provenance: &PromptProvenance,
+    policy: &AirlockPolicy,
+) -> Vec<UpstreamArtifact> {
     let mut inventory = BTreeMap::<String, UpstreamArtifact>::new();
 
     for record in &prompt_provenance.records {
@@ -357,6 +359,21 @@ fn upstream_inventory(prompt_provenance: &PromptProvenance) -> Vec<UpstreamArtif
                 path: record.source_path.clone(),
                 content_hash: record.source_artifact_hash.clone(),
                 artifact_class: boundary_class_label(record),
+                extends: None,
+            });
+    }
+
+    for source in &policy.source_chain {
+        inventory
+            .entry(format!(
+                "policy_source:{}:{}",
+                source.source_ref, source.content_hash
+            ))
+            .or_insert_with(|| UpstreamArtifact {
+                path: source.source_ref.clone(),
+                content_hash: source.content_hash.clone(),
+                artifact_class: "policy_source".to_string(),
+                extends: Some(source.extends.clone()),
             });
     }
 
@@ -418,6 +435,8 @@ mod tests {
                 ClaimLevel::RawDocumentAbsent,
                 ClaimLevel::StrictTelemetryOnly,
             ],
+            extends: Vec::new(),
+            source_chain: Vec::new(),
         }
     }
 

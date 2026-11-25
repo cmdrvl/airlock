@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::assembler::BoundaryClass;
 use crate::types::ClaimLevel;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AirlockPolicy {
     pub policy_id: String,
     pub version: String,
@@ -12,6 +12,18 @@ pub struct AirlockPolicy {
     pub forbidden_patterns: Vec<ForbiddenPattern>,
     pub derived_text_paths: Vec<String>,
     pub claim_levels: Vec<ClaimLevel>,
+    #[serde(skip)]
+    pub extends: Vec<String>,
+    #[serde(skip)]
+    pub source_chain: Vec<PolicySource>,
+}
+
+/// One file in a resolved policy's depth-first inheritance chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicySource {
+    pub source_ref: String,
+    pub extends: Vec<String>,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

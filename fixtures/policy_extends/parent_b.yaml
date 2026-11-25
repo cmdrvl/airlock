@@ -1,0 +1,12 @@
+allowed_keys:
+  - key_path: benchmark_summary.score
+    boundary_class: TELEMETRY
+forbidden_keys:
+  - pdf_path
+forbidden_patterns:
+  - pattern: secret-token
+    artifact_class: token
+derived_text_paths:
+  - benchmark_summary.description
+claim_levels:
+  - RAW_DOCUMENT_ABSENT

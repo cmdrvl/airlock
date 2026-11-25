@@ -1179,11 +1179,19 @@ fn main() -> std::process::ExitCode {
 ### Policy types
 
 Policy files are YAML, parsed with `serde_yaml` into strongly typed Rust
-structs (following the fingerprint `FingerprintDefinition` pattern):
+structs (following the fingerprint `FingerprintDefinition` pattern). A policy
+may declare `extends: [path-or-id, ...]`; references resolve relative to the
+declaring file (or its `rules/` directory for an id), in sorted depth-first
+order. Scalar fields are overridden by the child. Lists are stable unions;
+`forbidden_keys` and `forbidden_patterns` are monotonic and cannot be removed.
+The policy hash covers the resolved policy. When inheritance is used, the
+manifest upstream inventory includes each source file and its BLAKE3 hash.
+Cycles and missing sources are `E_BAD_POLICY` refusals.
 
 ```rust
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AirlockPolicy {
+    pub extends: Vec<String>,
     pub policy_id: String,
     pub version: String,
     pub allowed_keys: Vec<AllowRule>,
@@ -1490,8 +1498,8 @@ A manifest is a **commitment** to one boundary crossing:
    what did not, claim, signer, ledger inclusion.
 4. RFC 8785 canonicalization replaces the in-house canonical JSON, with a
    cross-check test against a second implementation.
-5. Policy `extends:` with deterministic merge and `policy_hash` over the
-   resolved policy (roadmap item 4).
+5. Policy `extends:` with deterministic merge, monotonic forbidden rules,
+   source hashes, and `policy_hash` over the resolved policy (landed).
 
 ### Phase B — put airlock on the wire (0.5)
 

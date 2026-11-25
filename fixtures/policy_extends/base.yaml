@@ -1,0 +1,14 @@
+policy_id: inherited_base
+version: airlock.v0
+allowed_keys:
+  - key_path: family_id
+    boundary_class: TELEMETRY
+forbidden_keys:
+  - html_path
+forbidden_patterns:
+  - pattern: <script
+    artifact_class: raw_script
+derived_text_paths: []
+claim_levels:
+  - BOUNDARY_FAILED
+  - RAW_DOCUMENT_ABSENT

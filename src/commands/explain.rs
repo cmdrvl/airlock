@@ -241,6 +241,7 @@ mod tests {
                     "blake3:2222222222222222222222222222222222222222222222222222222222222222"
                         .to_string(),
                 artifact_class: "strategy_space".to_string(),
+                extends: None,
             }],
             system_prompt_hash:
                 "blake3:3333333333333333333333333333333333333333333333333333333333333333"

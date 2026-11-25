@@ -432,6 +432,12 @@ claim_levels:
   - STRICT_TELEMETRY_ONLY
 ```
 
+Policies can also compose partial files with `extends: [path-or-id, ...]`.
+References resolve relative to the declaring policy; scalar values come from
+the child, while lists merge in stable order. Forbidden keys and patterns are
+monotonic. The resolved policy hash is independent of include order, and verify
+records each source file hash in the manifest's upstream artifact inventory.
+
 ## What Airlock Proves vs. What It Does Not
 
 ### Airlock proves
@@ -481,8 +487,7 @@ v0.3.0 is the current foundational release. Next:
 1. Seal integration with `pack` for immutable manifest bundles
 2. Register Airlock proofs in catalog
 3. Multiple adapter support beyond OpenAI chat completions
-4. Policy inheritance and composition
-5. Witness ledger rotation and archival
+4. Witness ledger rotation and archival
 
 The implementation-grade detail lives in
 [docs/airlock_plan.md](./docs/airlock_plan.md).

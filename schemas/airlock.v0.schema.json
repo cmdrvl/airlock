@@ -205,6 +205,13 @@
         "artifact_class": {
           "type": "string",
           "minLength": 1
+        },
+        "extends": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       },
       "required": [

@@ -141,6 +141,10 @@ pub struct UpstreamArtifact {
 
     /// Classification (e.g. "strategy_space", "heuristic", "system_prompt").
     pub artifact_class: String,
+
+    /// Direct policy inheritance references for a policy source artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extends: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -240,6 +244,7 @@ mod tests {
             path: "strategy_space.json".to_string(),
             content_hash: "blake3:abc123".to_string(),
             artifact_class: "strategy_space".to_string(),
+            extends: None,
         };
         let json = serde_json::to_string(&artifact).unwrap();
         let back: UpstreamArtifact = serde_json::from_str(&json).unwrap();

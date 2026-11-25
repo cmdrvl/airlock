@@ -542,6 +542,7 @@ mod tests {
                 path: "strategy_space.json".to_string(),
                 content_hash: sample_hash("strategy_space"),
                 artifact_class: "strategy_space".to_string(),
+                extends: None,
             }])
             .system_prompt_hash(sample_hash("system-prompt"))
             .prompt_payload_hash(prompt_payload_hash)
@@ -692,6 +693,7 @@ mod tests {
                 path: "strategy_space.json".to_string(),
                 content_hash: sample_hash("strategy_space"),
                 artifact_class: "strategy_space".to_string(),
+                extends: None,
             }])
             .system_prompt_hash(sample_hash("system-prompt"))
             .prompt_payload_hash(prompt_payload_hash)

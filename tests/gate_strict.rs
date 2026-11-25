@@ -5,8 +5,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -14,9 +14,25 @@ use jsonschema::validator_for;
 use serde_json::{Value, json};
 use tiny_http::{Response, Server};
 
+/// One request as the mock origin received it.
+struct Received {
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl Received {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
 struct Origin {
     address: SocketAddr,
     count: Arc<AtomicUsize>,
+    received: Arc<Mutex<Vec<Received>>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -46,15 +62,28 @@ fn start_origin_after(reply: Vec<u8>, delay: Duration) -> Origin {
     let server = Server::http("127.0.0.1:0").unwrap();
     let address = server.server_addr().to_ip().unwrap();
     let count = Arc::new(AtomicUsize::new(0));
+    let received = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
-    let (thread_count, thread_stop) = (Arc::clone(&count), Arc::clone(&stop));
+    let (thread_count, thread_received, thread_stop) =
+        (Arc::clone(&count), Arc::clone(&received), Arc::clone(&stop));
     let worker = thread::spawn(move || {
         while !thread_stop.load(Ordering::Acquire) {
-            let request = match server.recv_timeout(Duration::from_millis(50)) {
+            let mut request = match server.recv_timeout(Duration::from_millis(50)) {
                 Ok(Some(request)) => request,
                 Ok(None) => continue,
                 Err(_) => break,
             };
+            let headers = request
+                .headers()
+                .iter()
+                .map(|header| (header.field.to_string(), header.value.to_string()))
+                .collect();
+            let mut body = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut body);
+            thread_received
+                .lock()
+                .unwrap()
+                .push(Received { headers, body });
             thread_count.fetch_add(1, Ordering::AcqRel);
             let answer_at = Instant::now() + delay;
             while Instant::now() < answer_at && !thread_stop.load(Ordering::Acquire) {
@@ -66,6 +95,7 @@ fn start_origin_after(reply: Vec<u8>, delay: Duration) -> Origin {
     Origin {
         address,
         count,
+        received,
         stop,
         worker: Some(worker),
     }
@@ -74,6 +104,14 @@ fn start_origin_after(reply: Vec<u8>, delay: Duration) -> Origin {
 struct GateProcess {
     child: Child,
     address: SocketAddr,
+    /// Everything the gate has written to stderr so far, drained by a background thread.
+    stderr: Arc<Mutex<String>>,
+}
+
+impl GateProcess {
+    fn stderr_text(&self) -> String {
+        self.stderr.lock().unwrap().clone()
+    }
 }
 
 impl Drop for GateProcess {
@@ -130,16 +168,29 @@ fn launch_gate(mut command: Command, witness_path: &Path) -> GateProcess {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let stderr = child.stderr.take().unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
     let mut line = String::new();
-    BufReader::new(stderr).read_line(&mut line).unwrap();
+    stderr.read_line(&mut line).unwrap();
     let address = line
         .trim()
         .strip_prefix("airlock gate listening on ")
         .unwrap_or_else(|| panic!("gate did not start: {line}"))
         .parse()
         .unwrap();
-    GateProcess { child, address }
+    let log = Arc::new(Mutex::new(line));
+    let drain = Arc::clone(&log);
+    thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            let mut log = drain.lock().unwrap();
+            log.push_str(&line);
+            log.push('\n');
+        }
+    });
+    GateProcess {
+        child,
+        address,
+        stderr: log,
+    }
 }
 
 fn client() -> ureq::Agent {
@@ -1063,4 +1114,135 @@ fn response_cut_short_is_marked_interrupted_in_receipt_witness_and_explain() {
         explanation["reasons"][0]["explanation"],
         "the response stream ended before it completed"
     );
+}
+
+#[test]
+fn forwarded_request_keeps_end_user_headers_drops_hop_by_hop_and_sends_canonical_bytes() {
+    const AUTHORIZATION: &str = "Bearer sk-test-SECRET-AUTH-1234";
+    const API_KEY: &str = "SECRET-API-KEY-5678";
+    const PROXY_SECRET: &str = "c2VjcmV0LXByb3h5";
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin();
+    let receipts_dir = temp.path().join("receipts");
+    let witness_path = temp.path().join("witness.jsonl");
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &receipts_dir,
+        &witness_path,
+        &[],
+    );
+    let pretty = serde_json::to_vec_pretty(&request).unwrap();
+    let canonical = airlock::hash::jcs::canonicalize(&request).unwrap();
+    let canonical: &[u8] = canonical.as_ref();
+    assert_ne!(pretty, canonical, "test needs a non-canonical client body");
+
+    let response = client()
+        .post(&format!("http://{}/v1/chat/completions", gate.address))
+        .header("Content-Type", "application/json")
+        .header("Authorization", AUTHORIZATION)
+        .header("x-api-key", API_KEY)
+        .header("X-Trace-Id", "trace-42")
+        .header("OpenAI-Organization", "org-demo")
+        .header("Keep-Alive", "timeout=5")
+        .header("Proxy-Authorization", format!("Basic {PROXY_SECRET}"))
+        .header("TE", "trailers")
+        .header("Trailer", "Expires")
+        .header("Upgrade", "h2c")
+        .send(pretty)
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    drop(response);
+
+    {
+        let received = origin.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let upstream = &received[0];
+        // End-user headers go through untouched, credentials included.
+        assert_eq!(upstream.header("authorization"), Some(AUTHORIZATION));
+        assert_eq!(upstream.header("x-api-key"), Some(API_KEY));
+        assert_eq!(upstream.header("x-trace-id"), Some("trace-42"));
+        assert_eq!(upstream.header("openai-organization"), Some("org-demo"));
+        assert_eq!(upstream.header("content-type"), Some("application/json"));
+        // Hop-by-hop headers stop at the gate.
+        for name in [
+            "keep-alive",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "upgrade",
+            "transfer-encoding",
+        ] {
+            assert_eq!(upstream.header(name), None, "{name} must not be forwarded");
+        }
+        // The gate talks to the upstream as itself, with the length of what it sends.
+        assert_eq!(
+            upstream.header("host"),
+            Some(origin.address.to_string().as_str())
+        );
+        assert_eq!(
+            upstream.header("content-length"),
+            Some(canonical.len().to_string().as_str())
+        );
+        // What the manifest hash covers is what is sent: the canonical bytes, not the
+        // client's own formatting.
+        assert_eq!(upstream.body, canonical);
+    }
+
+    // None of the credentials reach anything the gate writes.
+    let (receipts, witness) = wait_for_recorded(&receipts_dir, &witness_path, 1);
+    let mut recorded = gate.stderr_text();
+    recorded.push_str(&std::fs::read_to_string(&witness_path).unwrap());
+    for path in receipt_paths(&receipts_dir) {
+        recorded.push_str(&std::fs::read_to_string(path).unwrap());
+    }
+    assert_eq!((receipts.len(), witness.len()), (1, 1));
+    for secret in ["SECRET-AUTH-1234", "SECRET-API-KEY-5678", PROXY_SECRET] {
+        assert!(
+            !recorded.contains(secret),
+            "{secret} leaked into the gate's stderr, receipts or witness"
+        );
+    }
+}
+
+#[test]
+fn bodies_the_gate_cannot_canonicalize_are_denied_and_it_keeps_serving() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin();
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+    let agent = client();
+    let deeply_nested = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+    let bodies: Vec<(&str, Vec<u8>)> = vec![
+        ("empty body", Vec::new()),
+        ("not json", b"{not json".to_vec()),
+        ("invalid utf-8", vec![0xff, 0xfe, 0x7b, 0x7d]),
+        ("json null", b"null".to_vec()),
+        ("json array", b"[1,2,3]".to_vec()),
+        ("json string", br#""a string""#.to_vec()),
+        ("deeply nested array", deeply_nested.into_bytes()),
+    ];
+
+    for (label, body) in &bodies {
+        let (status, refusal) = post(&agent, gate.address, body);
+        assert_eq!(status, 403, "{label}");
+        assert_eq!(refusal["code"], "E_GATE_DENIED", "{label}");
+    }
+    assert_eq!(
+        origin.count.load(Ordering::Acquire),
+        0,
+        "no hostile body may reach the origin"
+    );
+
+    // The gate is still up and still forwards what a manifest covers.
+    let (status, _) = post(&agent, gate.address, &serde_json::to_vec(&request).unwrap());
+    assert_eq!(status, 200);
+    assert_eq!(origin.count.load(Ordering::Acquire), 1);
 }

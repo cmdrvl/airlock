@@ -236,6 +236,30 @@ fn wait_for_receipts(directory: &Path, expected: usize) -> Vec<Value> {
     }
 }
 
+/// The gate sends a response first and writes that request's receipt and witness record after
+/// it, so a test that reads the ledger right after its last response can see fewer records than
+/// requests, and a test that has already dropped (killed) the gate has lost the rest. Waits
+/// until `expected` complete records are in the ledger and returns its text. The deadline is
+/// long because the full suite runs these gate tests alongside many other processes.
+fn wait_for_witness_records(path: &Path, expected: usize) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let complete = text
+            .lines()
+            .filter(|line| serde_json::from_str::<Value>(line).is_ok())
+            .count();
+        if complete >= expected {
+            return text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "gate wrote {complete} witness records, expected {expected}: {text}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn wait_for_nonempty_file(path: &Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -566,6 +590,9 @@ fn strict_manifest_mode_forwards_only_a_preverified_canonical_request_hash() {
         "REQUEST_MANIFEST_NOT_FOUND"
     );
     assert_eq!(origin.count.load(Ordering::Acquire), 2);
+    // One witness record per request, three in all. Wait for them before the gate is dropped
+    // (which kills it): the gate records after it has responded.
+    let witness_lines = wait_for_witness_records(&witness_path, 3);
     drop(gate);
     for _ in 0..2 {
         let (forwarded, auth) = origin
@@ -588,7 +615,6 @@ fn strict_manifest_mode_forwards_only_a_preverified_canonical_request_hash() {
             && receipt["achieved_claim"] == "STRICT_TELEMETRY_ONLY"
             && receipt["matched_manifest_hash"].as_str().is_some()
     }));
-    let witness_lines = std::fs::read_to_string(witness_path).unwrap();
     assert!(!witness_lines.contains("AKIAIOSFODNN7EXAMPLE"));
     assert!(
         witness_lines.lines().any(|line| {

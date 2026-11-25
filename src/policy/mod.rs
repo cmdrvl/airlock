@@ -148,9 +148,9 @@ fn resolve_policy_file(
     }
 
     stack.push(canonical_path.clone());
-    for source_ref in refs.iter().cloned() {
+    for source_ref in &refs {
         let source_path =
-            resolve_policy_reference(&canonical_path, &source_ref).ok_or_else(|| {
+            resolve_policy_reference(&canonical_path, source_ref).ok_or_else(|| {
                 RefusalEnvelope::bad_policy(
                     "extended policy source does not exist",
                     json!({

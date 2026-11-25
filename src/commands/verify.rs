@@ -260,6 +260,9 @@ pub(crate) struct RequestToVerify<'a> {
 pub(crate) struct Verified {
     pub(crate) manifest: AirlockManifest,
     pub(crate) not_crossed: Option<LoadedNotCrossed>,
+    /// The RFC 8785 canonical request: the exact bytes `request_payload_hash` covers and
+    /// `bytes_crossed` measures. `send` transmits this buffer and nothing else.
+    pub(crate) canonical_request: String,
 }
 
 /// The verification `airlock verify` writes a manifest from, shared with `airlock send` so a
@@ -385,6 +388,7 @@ pub(crate) fn verify_request(
     Ok(Verified {
         manifest,
         not_crossed,
+        canonical_request,
     })
 }
 

@@ -103,6 +103,7 @@ fn dispatch<W: Write, E: Write>(cli: Cli, stdout: &mut W, stderr: &mut E) -> u8 
     match cli.command {
         Some(Commands::Assemble(args)) => commands::assemble::run(args),
         Some(Commands::Verify(args)) => commands::verify::run(args),
+        Some(Commands::Send(args)) => commands::send::run(args),
         Some(Commands::Gate(args)) => commands::gate::run(args),
         Some(Commands::Keygen(args)) => commands::keygen::run(args),
         Some(Commands::VerifyManifest(args)) => commands::verify_manifest::run(args),

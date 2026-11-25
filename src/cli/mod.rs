@@ -45,6 +45,10 @@ pub enum Commands {
     Assemble(AssembleArgs),
     #[command(about = "Verify a prompt/request boundary and emit airlock_manifest.json")]
     Verify(VerifyArgs),
+    #[command(
+        about = "Verify an assembled prompt, then send it to a model endpoint and record what crossed"
+    )]
+    Send(SendArgs),
     #[command(about = "Generate the Ed25519 key pair that `verify` signs manifests with")]
     Keygen(KeygenArgs),
     #[command(
@@ -245,6 +249,68 @@ pub struct VerifyArgs {
     #[arg(
         long = "no-sign",
         help = "Write the manifest without an Ed25519 signature (for CI without a key). By default verify signs with the key from `airlock keygen` and refuses if there is none"
+    )]
+    pub no_sign: bool,
+
+    #[arg(long = "no-witness", help = "Skip ambient witness ledger recording")]
+    pub no_witness: bool,
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+#[command(
+    after_help = "Builds the request from the assembled prompt, verifies it, and POSTs exactly the bytes the manifest hashes. The manifest records what crossed: `transmission` says whether the request was sent, to which host, and what came back.\n\nThe request is sent only if the achieved claim is at least --require-claim, which defaults to RAW_DOCUMENT_ABSENT: a request that failed the boundary check is never sent unless you ask for BOUNDARY_FAILED.\n\nExit codes: 0 sent and a response was received (any HTTP status; read transmission.response_status), 1 claim below --require-claim and nothing was sent, 2 refusal (detail.sent says whether the body may have reached the endpoint).\n\nExample:\n  OPENAI_API_KEY=... airlock send --policy rules/tournament_baseline.yaml --prompt prompt_payload.json --provenance prompt_provenance.json --transport send_transport.json --request-out request.json --out airlock_manifest.json --response-out response.json"
+)]
+pub struct SendArgs {
+    #[arg(long, help = "Boundary policy YAML used during assembly")]
+    pub policy: PathBuf,
+
+    #[arg(long, help = "prompt_payload.json produced by airlock assemble")]
+    pub prompt: PathBuf,
+
+    #[arg(long, help = "prompt_provenance.json produced by airlock assemble")]
+    pub provenance: PathBuf,
+
+    #[arg(
+        long,
+        help = "Send transport JSON: adapter, model, url, api_key_env, and optionally params, headers, auth_header, timeout_seconds, max_response_bytes. The API key is read from the environment variable api_key_env and never stored"
+    )]
+    pub transport: PathBuf,
+
+    #[arg(
+        long,
+        visible_alias = "output",
+        help = "Path to write airlock_manifest.json"
+    )]
+    pub out: PathBuf,
+
+    #[arg(
+        long = "request-out",
+        help = "Path to write the exact request bytes that are sent (the manifest's replay_ref). Owner-only"
+    )]
+    pub request_out: PathBuf,
+
+    #[arg(
+        long = "response-out",
+        help = "Path to write the response body as received. Owner-only. Written only for a complete response"
+    )]
+    pub response_out: Option<PathBuf>,
+
+    #[arg(
+        long = "require-claim",
+        value_parser = parse_claim_level,
+        help = "Minimum claim to send at: BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT, or STRICT_TELEMETRY_ONLY. Default RAW_DOCUMENT_ABSENT"
+    )]
+    pub require_claim: Option<ClaimLevel>,
+
+    #[arg(
+        long = "not-crossed",
+        help = "Optional not_crossed.json from airlock assemble --not-crossed-out; its entries are copied into the manifest"
+    )]
+    pub not_crossed: Option<PathBuf>,
+
+    #[arg(
+        long = "no-sign",
+        help = "Write the manifest without an Ed25519 signature (for CI without a key). By default send signs with the key from `airlock keygen` and refuses if there is none"
     )]
     pub no_sign: bool,
 

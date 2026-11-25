@@ -394,6 +394,11 @@ airlock assemble \
   --boundary-mode <MODE>    # ANNOTATED (default) or TELEMETRY_ONLY
   --system-prompt <PATH>    # Optional system prompt file
   --not-crossed-out <PATH>  # Optional: write the inventory of input fields that did not cross
+  --prior-receipt <PATH>    # Chained turn: gate receipt that recorded the earlier response
+  --response <PATH>         # Chained turn: that response body, exactly as received
+  --response-adapter <NAME> # Chained turn: openai_responses or anthropic_messages
+  --prior-manifest <PATH>   # Chained turn: the earlier turn's manifest
+  --tool-result <ID=PATH>   # Chained turn, repeatable: a tool result answering a call in the response
   --no-witness              # Skip witness ledger recording
 ```
 
@@ -401,6 +406,42 @@ airlock assemble \
 field that did not reach the prompt: its path, the hash of the input artifact it
 came from, the hash of its value, and why it stayed behind. The values themselves
 are never written. Pass the file to `verify --not-crossed`.
+
+#### Chained turns
+
+A later turn of a conversation can carry the model's earlier reply. Pass
+`--prior-receipt`, `--response`, `--response-adapter` and `--prior-manifest`
+together (all four or none), and `--tool-result` only alongside them. `assemble`
+refuses (exit `2`, before it writes anything) unless the receipt records an
+admitted 2xx exchange, the receipt's `response_hash` is the hash of the
+`--response` bytes, and the hash of `--prior-manifest` is the receipt's
+`matched_manifest_hash`.
+
+The reply's text and tool calls enter the prompt under `prior_turn`, and prompt
+provenance records them as `MODEL_OUTPUT`. Each `--tool-result` enters as
+`TOOL_RESULT`: `PATH` is a UTF-8 text artifact embedded verbatim, and
+`TOOL_USE_ID` names the call in the response that it answers. Provenance also
+carries a chain link, the hash of the prior manifest and a `turn_index`, which
+`verify` copies into the manifest it writes. A manifest with a link is
+`airlock.v0.4` (see Manifest versions).
+
+What the claim does with an earlier turn:
+
+- Model output is scanned like any other text. Forbidden keys and patterns, and
+  an enforced detector hit anywhere in it, fail the boundary. It counts as
+  screened only if the policy enables a detector pack that is not warn-only and
+  no pack reported a hit in it. Unscreened model output caps the claim at
+  `RAW_DOCUMENT_ABSENT`, so a policy with no blocking detector pack never reaches
+  `STRICT_TELEMETRY_ONLY` on a chained turn.
+- A tool result keeps the strict claim reachable only if the policy's
+  `declared_tool_results` lists the blake3 hash of its exact bytes. An undeclared
+  tool result is still admitted, but caps the claim at `RAW_DOCUMENT_ABSENT`.
+  Declaring a result does not exempt it from the detector packs.
+
+The gate receipt is unsigned JSON. These checks show that the hashes of the
+response, the receipt and the prior manifest agree with each other. They do not
+show who wrote the receipt, so the link is only as strong as your custody of that
+file. `airlock chain verify` rechecks a whole conversation later.
 
 ### `airlock verify`
 
@@ -606,9 +647,65 @@ forge a signature. An `airlock.v0.2` manifest has no signature and is refused as
 One limit to know: `verify-manifest` checks the parsed JSON, so a manifest with a
 repeated object key is read as `serde_json` reads it (the last value wins) and is
 not rejected. `verify-manifest` records nothing in the witness ledger.
-`airlock gate` accepts `airlock.v0.2` and `airlock.v0.3` manifests and, in
-strict-manifest mode, checks a signed manifest's signature when a key is
+`airlock gate` accepts `airlock.v0.2`, `airlock.v0.3` and `airlock.v0.4` manifests
+and, in strict-manifest mode, checks a signed manifest's signature when a key is
 configured (see Egress gate above); it never requires one.
+
+### `airlock chain verify`
+
+Check the chain of turns that a manifest belongs to.
+
+```bash
+airlock chain verify <MANIFEST> --manifest-dir <DIR> [--receipt-dir <DIR>] [--pubkey <PATH>]
+```
+
+`<MANIFEST>` is the newest turn's `airlock_manifest.json`. `--manifest-dir` holds
+the earlier turns' manifests and their `prompt_provenance.json` files, all as
+`*.json` files directly in that directory. Files are matched by content: an earlier
+manifest is found by its hash and a provenance file by its hash, never by file
+name or by the `prompt_provenance_ref` a manifest records. Other files in the
+directory are ignored.
+
+`chain verify` goes back from `<MANIFEST>` one link at a time until it reaches a
+manifest with no `chain` member, which is the root (turn 0, any manifest version
+the binary reads). For each manifest it checks, in this order:
+
+1. the `chain` member agrees with the manifest's version (an `airlock.v0.4`
+   manifest has one, an earlier version has none). The root is checked this way too;
+2. with `--pubkey`, a signed manifest's signature holds. An unsigned manifest is
+   reported as `unsigned` and is not refused, and without `--pubkey` the report says
+   `not_checked`;
+3. the prior manifest that `chain.prior_manifest_hash` names is in the directory,
+   and `chain.turn_index` is one more than its index (1 after a manifest with no
+   link);
+4. the prompt provenance that the manifest names is in the directory and records
+   the same link, and its `MODEL_OUTPUT` records name exactly one response hash,
+   the response that turn admitted;
+5. with `--receipt-dir`, some gate receipt in that directory names the prior
+   manifest as its matched manifest and records that response hash. Without
+   `--receipt-dir` the receipts are not checked, and the report says so.
+
+Success exits `0` with one JSON line: `command`, `verified`, `manifest`,
+`turn_index`, `links` (one entry per chained turn, newest first: `turn_index`,
+`manifest_hash`, `file`, `prior_manifest_hash`, `response_hash`, `receipt_file`,
+and `checks` with the result of each step), `root`, `receipts_checked`,
+`signatures_checked` and `notes`. A chain that does not hold is a refusal (exit
+`2`, `E_BAD_MANIFEST`), not a negative result. `detail.reason` is one of
+`chain_shape`, `signature_invalid`, `prior_manifest_not_found`,
+`turn_index_mismatch`, `provenance_not_found`, `provenance_chain_mismatch`,
+`model_output_hash_missing`, `model_output_hash_ambiguous`, `receipt_not_found` or
+`receipt_response_mismatch`, together with the `turn_index` and `manifest_hash` of
+the manifest whose link failed. The manifest named on the command line can also be
+refused as `not_a_manifest` or `unsupported_manifest_version`. A missing file or
+directory is `E_MISSING_FILE`.
+
+**An unsigned receipt is not authenticated.** A gate receipt (`airlock.gate.v1`)
+carries no signature, so `chain verify` shows that the hashes of the manifests,
+provenance files and receipts agree with one another, not who produced any of them.
+Every successful report says so in `notes`. It does not re-run `verify` against the
+prompt and request files, and it does not compare a receipt's `request_hash`.
+`chain verify` is read-only: it writes nothing, records nothing in the witness
+ledger, and fetches nothing.
 
 ### `airlock doctor`
 
@@ -694,9 +791,9 @@ Flag precedence: `--describe` > `--schema` > `--version` > subcommand.
 
 | Code | Domain | Meaning |
 |------|--------|---------|
-| `0`  | positive | `VERIFY_PASS` — achieved claim meets or exceeds requirement; also a healthy `doctor`; also any `witness query\|last\|count`, including one with no matching records, and a `witness verify` whose chain holds; also a `send` whose exchange completed with a response (any HTTP status) |
+| `0`  | positive | `VERIFY_PASS` — achieved claim meets or exceeds requirement; also a healthy `doctor`; also any `witness query\|last\|count`, including one with no matching records, and a `witness verify` whose chain holds; also a `chain verify` whose links all hold; also a `send` whose exchange completed with a response (any HTTP status) |
 | `1`  | negative | `VERIFY_PARTIAL` — achieved claim is below `--require-claim` (for `send`, nothing was sent); also an unhealthy `doctor`; also `witness verify` reporting `CHAIN_BROKEN` or `HEAD_MISMATCH` |
-| `2`  | error | `REFUSAL` — structured error (bad input, missing file, etc.) or CLI usage error |
+| `2`  | error | `REFUSAL` — structured error (bad input, missing file, etc.) or CLI usage error; also a `chain verify` whose chain does not hold (`E_BAD_MANIFEST`, never exit `1`) |
 
 Refusals emit structured JSON to stdout with a `refusal.code` field
 (`E_BAD_POLICY`, `E_MISSING_FILE`, `E_BAD_INPUT`, `E_TRANSPORT`, etc.).
@@ -773,7 +870,7 @@ Airlock artifacts, not in operator memory.
 `airlock.v0.2` is the earlier manifest. `airlock.v0.3`, which `verify` and `send`
 now write, adds five members, none of which a v0.2 manifest may carry (the schema
 forbids it). Existing v0.2 manifests stay valid and unchanged, and `airlock gate` reads
-both versions.
+v0.2, v0.3 and v0.4 (below).
 
 | Member | Meaning |
 |--------|---------|
@@ -782,6 +879,17 @@ both versions.
 | `transmission` | Only a manifest written by `airlock send`. `sent` (true means the body **may** have reached the endpoint), `endpoint_host` (never the path, query or credentials), `request_bytes`, `request_hash`, and, when sent, `sent_at` and `latency_ms`. A completed exchange adds `response_status`, `response_hash` and `response_bytes` (all three or none). `error` is one of `CLAIM_BELOW_REQUIRED`, `CONNECT_FAILED` (both: not sent), `RESPONSE_TIMEOUT`, `RESPONSE_TOO_LARGE`, `TRANSPORT_ERROR` (sent, no complete response). `request_hash` is `request_payload_hash` and `request_bytes` is `bytes_crossed` |
 | `not_crossed` | Only when `verify` was given `--not-crossed`: one entry per input field that did not cross, with `path`, `source_artifact_hash`, `value_hash` and `reason` (`NOT_ALLOWED`, `FORBIDDEN_KEY`, `DERIVED_TEXT_EXCLUDED` or `SHADOWED_BY_EARLIER_INPUT`) |
 | `signature` | Absent under `--no-sign`. `{algorithm: "ed25519", public_key_fingerprint, value}` over the manifest without this member |
+
+`airlock.v0.4` is a v0.3 manifest with one more member, `chain`:
+`{prior_manifest_hash, turn_index}`. `verify` writes it only for a prompt that
+`assemble` chained (see Chained turns), and a v0.4 manifest must carry it. Every
+other manifest stays `airlock.v0.3`, byte-for-byte what v0.3 always wrote, and a
+v0.3 manifest may not carry a `chain` member. `prior_manifest_hash` is the hash of
+the earlier turn's manifest as the gate computes it: blake3 of the canonical JSON of
+the parsed manifest, signature included. `turn_index` is 1 after a manifest with no
+`chain` member and one more than the earlier manifest's index after that. The
+signature covers `chain` like any other member, so editing either value fails
+`verify-manifest`. `verify-manifest` checks v0.3 and v0.4 manifests alike.
 
 `value_hash` is `blake3` over the RFC 8785 canonical JSON of the value that stayed
 behind (an integer beyond 2^53, which that form refuses, hashes as its exact
@@ -831,6 +939,10 @@ claim_levels:
 # detectors_warn_only: [pii]
 # Optional repeated-row threshold for the tabular pack; defaults to 5.
 # tabular_min_rows: 5
+# Optional. Tool results (chained turns) whose exact bytes you vouch for.
+# declared_tool_results:
+#   - artifact_hash: blake3:<64 hex>   # blake3 of the tool result's exact bytes
+#     description: Lineage lookup result for family F-17
 ```
 
 Policies can also compose partial files with `extends: [path-or-id, ...]`.
@@ -843,6 +955,14 @@ rule id, JSON path, and matched-span hash, never the sensitive value. The
 resolved policy hash is independent of include order, and verify records each
 source file hash in the manifest's upstream artifact inventory. `explain --json`
 includes detector findings from the manifest.
+
+`declared_tool_results` applies only to chained turns (see Chained turns). A tool
+result passed to `assemble --tool-result` is declared when the blake3 hash of its
+exact bytes is listed there, and only then can the turn reach
+`STRICT_TELEMETRY_ONLY`. The list says that you vouch for those bytes; the
+detector packs and forbidden patterns still run over them, and a hit still fails
+the boundary. The hash is a local file's, so it says nothing about where the file
+came from.
 
 ## What Airlock Proves vs. What It Does Not
 
@@ -859,6 +979,9 @@ includes detector findings from the manifest.
   was (`transmission`, v0.3)
 - which input fields stayed behind and why, by hash, when `verify` was given the inventory (v0.3)
 - that a signed manifest has not changed since it was signed with a given key (`verify-manifest`)
+- for a chained turn: which earlier manifest it follows and which response bytes
+  it carried, by hash, and that those hashes agree with a gate receipt's
+  (`chain verify`, v0.4)
 
 ### Airlock does not prove
 
@@ -874,6 +997,12 @@ includes detector findings from the manifest.
   verifies, or that the response is correct
 - that a strict-manifest gate checked any signature: it does so only when a key
   is configured, and `GET /airlock/health` shows whether one was (`signature_key`)
+- who wrote a gate receipt: an `airlock.gate.v1` receipt is unsigned, so a chained
+  turn's link to its earlier response is only as strong as your custody of the
+  receipt and the response file. `assemble` and `chain verify` show that the hashes
+  agree, not that a gate produced them
+- that a tool result is true or came from the tool it names: `declared_tool_results`
+  records that you vouch for those bytes
 - that the witness ledger is complete or unaltered: the `prev_hash` chain
   (`airlock witness verify`) is a local tamper hint that misses removed tail
   entries and a ledger rewritten with recomputed hashes, unless you keep the

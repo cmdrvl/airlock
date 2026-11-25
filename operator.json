@@ -51,6 +51,11 @@
         { "name": "out", "flag": "--out", "aliases": ["--output"], "type": "file_path", "required": true, "description": "Path to write prompt_payload.json" },
         { "name": "provenance_out", "flag": "--provenance-out", "type": "file_path", "required": true, "description": "Path to write prompt_provenance.json" },
         { "name": "not_crossed_out", "flag": "--not-crossed-out", "type": "file_path", "description": "Optional path to write not_crossed.json (airlock.not_crossed.v1): every input field that did not cross the boundary, by path, source hash, value hash and reason; values are never stored" },
+        { "name": "prior_receipt", "flag": "--prior-receipt", "type": "file_path", "description": "Chained turn: the gate receipt (airlock.gate.v1) that recorded the earlier response. Must be an admitted 2xx exchange naming a matched manifest, and its response_hash must equal the hash of --response. The receipt is unsigned JSON, so this link is only as strong as the file's custody. Requires --response, --response-adapter and --prior-manifest" },
+        { "name": "response", "flag": "--response", "type": "file_path", "description": "Chained turn: the provider response body from the earlier turn, exactly as received (JSON, not a stream). Its text and tool calls enter the prompt as MODEL_OUTPUT under prior_turn" },
+        { "name": "response_adapter", "flag": "--response-adapter", "type": "string", "description": "Chained turn: the provider that produced --response, openai_responses or anthropic_messages" },
+        { "name": "prior_manifest", "flag": "--prior-manifest", "type": "file_path", "description": "Chained turn: the earlier turn's manifest. Its hash must equal the receipt's matched_manifest_hash. The new prompt's chain link records that hash and the next turn_index, and the manifest verify writes for it is airlock.v0.4" },
+        { "name": "tool_result", "flag": "--tool-result", "type": "string", "repeatable": true, "description": "Chained turn: a tool result answering a tool call in --response, as TOOL_USE_ID=PATH (PATH is a UTF-8 text artifact embedded verbatim as TOOL_RESULT). The strict claim needs the policy's declared_tool_results to list the blake3 hash of its exact bytes; an undeclared tool result is admitted but caps the claim at RAW_DOCUMENT_ABSENT" },
         { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
       ],
       "read_only": false,
@@ -102,12 +107,27 @@
     },
     {
       "name": "verify-manifest",
-      "description": "Check the Ed25519 signature on an airlock.v0.3 manifest. Exit 0 when valid; a refusal (exit 2) with reason unsigned, signature_mismatch, fingerprint_mismatch, unsupported_manifest_version, unsupported_algorithm or malformed_signature otherwise.",
+      "description": "Check the Ed25519 signature on an airlock.v0.3 or airlock.v0.4 manifest. Exit 0 when valid; a refusal (exit 2) with reason unsigned, signature_mismatch, fingerprint_mismatch, unsupported_manifest_version, unsupported_algorithm or malformed_signature otherwise.",
       "arguments": [
         { "name": "manifest", "type": "file_path", "position": 0, "required": true, "description": "airlock_manifest.json whose signature to check" }
       ],
       "options": [
         { "name": "pubkey", "flag": "--pubkey", "type": "file_path", "description": "Public key file (hex, as airlock keygen writes it); default ~/.cmdrvl/secrets/airlock/ed25519.pub" }
+      ],
+      "read_only": true,
+      "records_witness": false
+    },
+    {
+      "name": "chain",
+      "description": "Check the chain of turns a manifest belongs to. `chain verify` walks back from the given manifest to turn 0 (a manifest with no chain member) and checks every link: the chain member agrees with the manifest version; with --pubkey, a signed manifest's signature (unsigned is reported, not refused); the prior manifest named by prior_manifest_hash is in --manifest-dir and turn_index is one more than its index; the turn's prompt provenance is there, carries the same link and names exactly one admitted response hash; and with --receipt-dir, a gate receipt names that response and the prior manifest. Files in the directories are matched by content, never by name. Exit 0 with a JSON report when every link holds. A chain that does not hold is a refusal (exit 2, E_BAD_MANIFEST) with detail.reason one of chain_shape, signature_invalid, prior_manifest_not_found, turn_index_mismatch, provenance_not_found, provenance_chain_mismatch, model_output_hash_missing, model_output_hash_ambiguous, receipt_not_found or receipt_response_mismatch; the manifest on the command line can also be refused as not_a_manifest or unsupported_manifest_version. A gate receipt is unsigned: this shows that the hashes of the manifests, provenance files and receipts agree with one another, not who produced any of them. Read-only: writes nothing and records nothing in the witness ledger.",
+      "subcommands": ["verify"],
+      "arguments": [
+        { "name": "manifest", "type": "file_path", "position": 0, "required": true, "description": "verify only: airlock_manifest.json of the newest turn to check" }
+      ],
+      "options": [
+        { "name": "manifest_dir", "flag": "--manifest-dir", "type": "file_path", "required": true, "description": "verify only: directory holding the earlier turns' manifests and their prompt_provenance.json files (*.json files directly in it)" },
+        { "name": "receipt_dir", "flag": "--receipt-dir", "type": "file_path", "description": "verify only: directory of gate receipts. Without it the receipts are not checked, and the report says so" },
+        { "name": "pubkey", "flag": "--pubkey", "type": "file_path", "description": "verify only: public key file (hex, as airlock keygen writes it). Signed manifests in the chain are checked with it; without it signatures are not checked" }
       ],
       "read_only": true,
       "records_witness": false

@@ -145,6 +145,9 @@
         { "name": "protected_bloom", "flag": "--protected-bloom", "type": "file_path", "description": "Opaque BDBL v1 Bloom file exported by veil" },
         { "name": "listen", "flag": "--listen", "type": "socket_address", "description": "Loopback listener address; default 127.0.0.1:8787" },
         { "name": "timeout_seconds", "flag": "--timeout-seconds", "type": "integer", "description": "Upstream timeout from 1 to 600 seconds" },
+        { "name": "max_request_bytes", "flag": "--max-request-bytes", "type": "integer", "description": "Largest request body to read, in bytes: 1 to 1073741824; default 33554432 in strict-manifest mode, and policy-proxy mode defaults to and cannot exceed its 4194304 byte scan limit" },
+        { "name": "require_claim", "flag": "--require-claim", "type": "string", "description": "Strict-manifest mode only: lowest claim a matching manifest may carry (BOUNDARY_FAILED, RAW_DOCUMENT_ABSENT or STRICT_TELEMETRY_ONLY); a request whose manifest is weaker is denied" },
+        { "name": "upstream_proxy", "flag": "--upstream-proxy", "type": "url", "description": "Reach --upstream through this http or https proxy (no credentials, path, query or fragment; socks refused). Without it the gate connects directly and never reads ALL_PROXY, HTTPS_PROXY, HTTP_PROXY or NO_PROXY from its environment" },
         { "name": "out_dir", "flag": "--out-dir", "type": "directory_path", "description": "Gate receipt directory; default airlock-gate" },
         { "name": "no_witness", "flag": "--no-witness", "type": "flag", "description": "Skip ambient witness ledger recording" }
       ],

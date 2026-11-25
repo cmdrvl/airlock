@@ -85,11 +85,34 @@ first, and the rules below name the IPv4 address the gate listens on.
 
 ### Proxy environment variables
 
-The gate's upstream client reads `ALL_PROXY`, `HTTPS_PROXY` and `NO_PROXY` from
-**its own environment**. If any of them is set for the gate account, the gate
-sends upstream traffic to that proxy, not to the provider, and the firewall must
-allow the proxy instead. Start the gate with those variables unset unless you
-mean to chain it behind a proxy.
+The gate's upstream client **never reads** `ALL_PROXY`, `HTTPS_PROXY`,
+`HTTP_PROXY` or `NO_PROXY` (or their lowercase spellings) from its environment. A
+variable left set for the gate account does not redirect provider traffic: the
+gate connects to the `--upstream` host directly, so the firewall rule for the
+gate account names the provider, not whatever proxy a shell profile exports. If
+one of the proxy variables is set and non-empty, the gate says so on stderr at
+startup, naming the variable and never printing its value, so an operator who
+expected the variable to take effect is told it did not.
+
+To chain the gate behind a proxy, say so explicitly:
+
+```sh
+airlock gate --mode strict-manifest --manifest-dir ./verified-manifests \
+  --upstream https://api.openai.com \
+  --upstream-proxy http://egress-proxy.internal.example:3128
+```
+
+`--upstream-proxy` takes an `http` or `https` proxy URL with no credentials,
+path, query or fragment. Anything else, including a `socks5` URL (the client is
+built without SOCKS support) or a URL with `user:password@`, stops the gate at
+startup with a refusal that names the flag. Credentials are refused because the
+URL sits on the command line and is printed at startup. The firewall must then
+allow the gate account to reach that proxy, and only that proxy, instead of the
+provider. The proxy sees the provider's hostname and the size and timing of the
+traffic, and the gate asks it for a `CONNECT` tunnel, so for an `https` upstream
+the TLS session runs end to end through it and it cannot read the request. It can refuse or drop traffic,
+which the gate reports as an upstream failure, and the proxy is outside what
+Airlock verifies.
 
 ## 2a. Narrow profile (recommended): confine the agent account
 

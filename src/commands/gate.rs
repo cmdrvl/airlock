@@ -88,6 +88,14 @@ pub fn run(args: GateArgs) -> u8 {
             return REFUSAL;
         }
     };
+    let upstream_proxy = match args.upstream_proxy.as_deref().map(validate_upstream_proxy) {
+        None => None,
+        Some(Ok(proxy)) => Some(proxy),
+        Some(Err(message)) => {
+            let _ = writeln!(stderr, "airlock gate: {message}");
+            return REFUSAL;
+        }
+    };
     let max_request_bytes = match effective_max_request_bytes(args.mode, args.max_request_bytes) {
         Ok(bytes) => bytes,
         Err(message) => {
@@ -210,7 +218,10 @@ pub fn run(args: GateArgs) -> u8 {
     }
 
     let timeout = Duration::from_secs(args.timeout_seconds);
+    // Set explicitly in both cases: ureq's default reads ALL_PROXY, HTTPS_PROXY, HTTP_PROXY and
+    // NO_PROXY, which would send provider traffic to whatever proxy the gate's environment names.
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        .proxy(upstream_proxy.as_ref().map(|(_, proxy)| proxy.clone()))
         .timeout_global(Some(timeout))
         .timeout_connect(Some(timeout))
         .timeout_recv_response(Some(timeout))
@@ -249,6 +260,22 @@ pub fn run(args: GateArgs) -> u8 {
     let active = Arc::new(AtomicUsize::new(0));
     let bound_address = server.server_addr().to_ip().unwrap_or(listen);
     let _ = writeln!(stderr, "airlock gate listening on {bound_address}");
+    match &upstream_proxy {
+        Some((url, _)) => {
+            let _ = writeln!(
+                stderr,
+                "airlock gate: upstream requests go through the proxy {url}"
+            );
+        }
+        None => {
+            for name in proxy_variables_in_environment() {
+                let _ = writeln!(
+                    stderr,
+                    "airlock gate: {name} is set and is ignored: the gate connects to the upstream directly; pass --upstream-proxy to use a proxy"
+                );
+            }
+        }
+    }
     if state.mode == GateMode::StrictManifest {
         match &state.signature_key_fingerprint {
             Some(fingerprint) => {
@@ -331,6 +358,45 @@ fn validate_upstream(value: &str) -> Result<String, &'static str> {
         }
     }
     Ok(value.trim_end_matches('/').to_owned())
+}
+
+/// The proxy `--upstream-proxy` names, as the trimmed URL for the startup line and the ureq proxy
+/// to give the upstream client. Only http and https proxies are taken: ureq's socks support is not
+/// compiled in, and an unsupported scheme would otherwise fail on the first request instead of at
+/// startup. Credentials are refused for the same reason as in `--upstream`: they would sit on the
+/// command line, and the startup line prints this URL.
+fn validate_upstream_proxy(value: &str) -> Result<(String, ureq::Proxy), &'static str> {
+    let (scheme, rest) = value
+        .split_once("://")
+        .ok_or("--upstream-proxy must be an absolute http or https URL")?;
+    if !matches!(scheme, "https" | "http") || rest.is_empty() || rest.contains(['?', '#', '@']) {
+        return Err(
+            "--upstream-proxy must be an http or https proxy URL without credentials, query, or fragment",
+        );
+    }
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.is_empty() || rest[authority.len()..].chars().any(|ch| ch != '/') {
+        return Err("--upstream-proxy must not contain a path");
+    }
+    let proxy = ureq::Proxy::new(value).map_err(|_| "--upstream-proxy is not a valid proxy URL")?;
+    Ok((value.trim_end_matches('/').to_owned(), proxy))
+}
+
+/// Proxy variables set in the gate's environment. The upstream client never reads them; the
+/// names (never the values, which can carry credentials) are listed at startup so an operator
+/// who relied on them is told.
+fn proxy_variables_in_environment() -> Vec<&'static str> {
+    [
+        "ALL_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "all_proxy",
+        "https_proxy",
+        "http_proxy",
+    ]
+    .into_iter()
+    .filter(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+    .collect()
 }
 
 /// The public key signed manifests are checked against, or `None` when no key is configured

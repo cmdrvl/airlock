@@ -101,6 +101,13 @@ pub struct GateArgs {
     #[arg(long, help = "Provider base URL to which requests are forwarded")]
     pub upstream: String,
 
+    #[arg(
+        long = "upstream-proxy",
+        value_name = "URL",
+        help = "Reach --upstream through this http or https proxy (for example http://127.0.0.1:3128; no credentials, path or query). Without it the gate connects directly: it never reads ALL_PROXY, HTTPS_PROXY, HTTP_PROXY or NO_PROXY from its environment"
+    )]
+    pub upstream_proxy: Option<String>,
+
     #[arg(long, help = "Boundary policy required by policy-proxy mode")]
     pub policy: Option<PathBuf>,
 

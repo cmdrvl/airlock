@@ -2,7 +2,7 @@
 //! local mock origin: what is denied, with which refusal code, and what is recorded.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -173,13 +173,30 @@ fn start_policy_proxy_gate(
     launch_gate(command, witness_path)
 }
 
-/// Start the gate that `command` describes and wait for its "listening on" line.
+/// Every spelling of the proxy variables an HTTP client library may read.
+const PROXY_VARIABLES: [&str; 8] = [
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "all_proxy",
+    "https_proxy",
+    "http_proxy",
+    "no_proxy",
+];
+
+/// Start the gate that `command` describes and wait for its "listening on" line. The proxy
+/// variables of whoever runs the tests are removed so that no test depends on them; a test
+/// that sets one on `command` on purpose keeps it.
 fn launch_gate(mut command: Command, witness_path: &Path) -> GateProcess {
+    for name in PROXY_VARIABLES {
+        let set_by_the_test = command.get_envs().any(|(key, _)| key == name);
+        if !set_by_the_test {
+            command.env_remove(name);
+        }
+    }
     let mut child = command
         .env("EPISTEMIC_WITNESS", witness_path)
-        .env_remove("ALL_PROXY")
-        .env_remove("HTTPS_PROXY")
-        .env_remove("NO_PROXY")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -1908,4 +1925,277 @@ fn bytes_crossed_is_the_number_of_bytes_the_origin_receives() {
     let received = origin.received.lock().unwrap();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].body.len() as u64, manifest["bytes_crossed"]);
+}
+
+/// A stand-in HTTP proxy. It records the request line of every request that reaches it and
+/// answers each with a fixed JSON body, so a test can tell whether, and where, the gate sent
+/// its upstream request.
+struct RecordingProxy {
+    address: SocketAddr,
+    connections: Arc<AtomicUsize>,
+    request_lines: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for RecordingProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+const PROXY_REPLY: &[u8] = br#"{"via":"proxy"}"#;
+
+fn start_recording_proxy() -> RecordingProxy {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let request_lines = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (thread_connections, thread_lines, thread_stop) = (
+        Arc::clone(&connections),
+        Arc::clone(&request_lines),
+        Arc::clone(&stop),
+    );
+    let worker = thread::spawn(move || {
+        while !thread_stop.load(Ordering::Acquire) {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(_) => break,
+            };
+            thread_connections.fetch_add(1, Ordering::AcqRel);
+            let _ = stream.set_nonblocking(false);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            // One connection can carry a CONNECT and then the request tunnelled through it, which
+            // is how an HTTP client library uses a proxy; the proxy answers the second itself.
+            loop {
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+                    break;
+                }
+                thread_lines
+                    .lock()
+                    .unwrap()
+                    .push(request_line.trim_end().to_owned());
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; content_length];
+                let _ = reader.read_exact(&mut body);
+                if request_line.starts_with("CONNECT ") {
+                    let _ = stream.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+                    let _ = stream.flush();
+                    continue;
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    PROXY_REPLY.len()
+                );
+                let _ = stream.write_all(PROXY_REPLY);
+                let _ = stream.flush();
+                break;
+            }
+        }
+    });
+    RecordingProxy {
+        address,
+        connections,
+        request_lines,
+        stop,
+        worker: Some(worker),
+    }
+}
+
+/// Wait for the proxy to have been asked `expected` times; the gate's request arrives on the
+/// proxy's own thread, so a read straight after the response can come first.
+fn proxy_connections(proxy: &RecordingProxy, expected: usize) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && proxy.connections.load(Ordering::Acquire) < expected {
+        thread::sleep(Duration::from_millis(10));
+    }
+    proxy.connections.load(Ordering::Acquire)
+}
+
+#[test]
+fn the_gate_ignores_proxy_environment_variables_and_connects_to_the_upstream() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin();
+    let proxy = start_recording_proxy();
+    let proxy_url = format!("http://{}", proxy.address);
+    let mut command = strict_gate_command(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &[],
+    );
+    // Every spelling points at the proxy, and one carries credentials the gate must never print.
+    for name in PROXY_VARIABLES
+        .into_iter()
+        .filter(|name| !name.eq_ignore_ascii_case("NO_PROXY"))
+    {
+        command.env(name, &proxy_url);
+    }
+    command.env(
+        "HTTPS_PROXY",
+        format!("http://user:s3cr3t-token@{}", proxy.address),
+    );
+    let gate = launch_gate(command, &temp.path().join("witness.jsonl"));
+
+    let (status, body) = post(
+        &client(),
+        gate.address,
+        &serde_json::to_vec(&request).unwrap(),
+    );
+
+    assert_eq!(status, 200);
+    assert_eq!(body, json!({"ok": true}), "the reply came from the origin");
+    assert_eq!(origin.count.load(Ordering::Acquire), 1);
+    assert_eq!(
+        proxy_connections(&proxy, 1),
+        0,
+        "the gate sent upstream traffic to a proxy named only in its environment"
+    );
+    assert!(wait_for_stderr(&gate, "ALL_PROXY is set and is ignored"));
+    assert!(wait_for_stderr(&gate, "HTTPS_PROXY is set and is ignored"));
+    assert!(
+        !gate.stderr_text().contains("s3cr3t-token"),
+        "a proxy variable's value, which can carry credentials, was printed"
+    );
+}
+
+#[test]
+fn upstream_proxy_flag_sends_the_upstream_request_through_that_proxy() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin();
+    let proxy = start_recording_proxy();
+    let receipts_dir = temp.path().join("receipts");
+    let witness_path = temp.path().join("witness.jsonl");
+    let proxy_url = format!("http://{}", proxy.address);
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &receipts_dir,
+        &witness_path,
+        &["--upstream-proxy", &proxy_url],
+    );
+
+    let (status, body) = post(
+        &client(),
+        gate.address,
+        &serde_json::to_vec(&request).unwrap(),
+    );
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        body,
+        json!({"via": "proxy"}),
+        "the reply came from the proxy"
+    );
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
+    assert_eq!(proxy_connections(&proxy, 1), 1);
+    let lines = proxy.request_lines.lock().unwrap().clone();
+    assert_eq!(
+        lines,
+        [
+            format!("CONNECT {} HTTP/1.1", origin.address),
+            "POST /v1/chat/completions HTTP/1.1".to_owned(),
+        ],
+        "the proxy is asked to connect to the upstream, then the request goes through it"
+    );
+    assert!(wait_for_stderr(
+        &gate,
+        &format!("upstream requests go through the proxy {proxy_url}")
+    ));
+    let (receipts, _) = wait_for_recorded(&receipts_dir, &witness_path, 1);
+    assert_eq!(receipts[0]["upstream_status"], 200);
+    assert_eq!(receipts[0]["response_bytes"], PROXY_REPLY.len());
+}
+
+#[test]
+fn upstream_proxy_flag_wins_over_a_proxy_environment() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin();
+    let chosen = start_recording_proxy();
+    let hostile = start_recording_proxy();
+    let chosen_url = format!("http://{}", chosen.address);
+    let mut command = strict_gate_command(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &["--upstream-proxy", &chosen_url],
+    );
+    for name in ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"] {
+        command.env(name, format!("http://{}", hostile.address));
+    }
+    let gate = launch_gate(command, &temp.path().join("witness.jsonl"));
+
+    let (status, body) = post(
+        &client(),
+        gate.address,
+        &serde_json::to_vec(&request).unwrap(),
+    );
+
+    assert_eq!(status, 200);
+    assert_eq!(body, json!({"via": "proxy"}));
+    assert_eq!(proxy_connections(&chosen, 1), 1);
+    assert_eq!(
+        hostile.connections.load(Ordering::Acquire),
+        0,
+        "the environment was read even though --upstream-proxy was given"
+    );
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn the_gate_refuses_to_start_on_an_upstream_proxy_it_cannot_use() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, _) = bound_manifest_dir(temp.path());
+    let upstream: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    for bad in [
+        "socks5://127.0.0.1:1080",
+        "http://user:s3cr3t-token@127.0.0.1:3128",
+        "127.0.0.1:3128",
+        "ftp://127.0.0.1:21",
+        "http://127.0.0.1:3128/path",
+        "http://127.0.0.1:3128?x=1",
+        "http://",
+    ] {
+        let stderr = gate_refuses_to_start(strict_gate_command(
+            upstream,
+            &manifest_dir,
+            &temp.path().join("receipts"),
+            &["--upstream-proxy", bad],
+        ));
+        // The gate's own refusal, not clap's "unexpected argument" for a flag it does not know.
+        assert!(
+            stderr.contains("airlock gate: --upstream-proxy "),
+            "{bad}: the gate did not refuse the proxy itself: {stderr}"
+        );
+        assert!(
+            !stderr.contains("s3cr3t-token"),
+            "{bad}: the refusal printed the credential"
+        );
+    }
 }

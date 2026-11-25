@@ -190,6 +190,13 @@ A tripped size cap or upstream timeout is recorded in the receipt's `limit`.
 writes no receipt. See `docs/deploy/egress-firewall.md` for running the gate as
 the only route to a provider.
 
+The gate connects to `--upstream` directly. It does not read `ALL_PROXY`,
+`HTTPS_PROXY`, `HTTP_PROXY` or `NO_PROXY` from its environment, so a variable left
+set for the gate account cannot send provider traffic somewhere the firewall rule
+does not name. To go through a proxy, pass `--upstream-proxy http://host:port`
+(`http` or `https`, no credentials, path, query or fragment; `socks5` is refused at
+startup). The proxy is outside what Airlock verifies.
+
 The optional `--transport` declaration pins a provider adapter, or supplies
 the JSON pointers required by `generic_json`. Without it, the gate selects a
 provider adapter from each request's shape and refuses conflicting
@@ -806,7 +813,7 @@ Refusals emit structured JSON to stdout with a `refusal.code` field
 | `HOME` (or `USERPROFILE`) | Where the signing key pair lives, `~/.cmdrvl/secrets/airlock/`. `keygen`, `verify` and `verify-manifest` refuse when it is unset or empty; there is no relative-path fallback. |
 | `SOURCE_DATE_EPOCH` | Unix seconds. Pins the `verify` manifest `timestamp`, so identical inputs produce a byte-identical manifest. A set but malformed value is an `E_BAD_INPUT` refusal (exit 2, `detail.env`/`value`/`expected`), never a silent fallback to the clock. Witness records keep the real wall clock. |
 | the variable named by `api_key_env` | `send` reads its API key from here, only into a request header. A transport file naming an unset or empty variable is refused before anything is written. |
-| `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` (and lowercase) | `send` honours these like any HTTP client. The manifest records the endpoint host, not the proxy. |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` (and lowercase) | `send` honours these like any HTTP client. The manifest records the endpoint host, not the proxy. `gate` never reads them: it connects to `--upstream` directly unless you pass `--upstream-proxy`, and names any of them that is set, never its value, on stderr at startup. |
 | `NO_COLOR`, `TERM=dumb` | Airlock does not colorize output. No surface emits an ANSI escape when piped, with or without these set, and `NO_COLOR` wins over `CLICOLOR_FORCE` (regression-tested). |
 
 ## Transport adapters

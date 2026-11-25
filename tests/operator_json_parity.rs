@@ -3,9 +3,10 @@
 //! definitions, which is how `airlock chain` and five `assemble` flags went undeclared (al-210).
 //!
 //! Commands are compared by name for the whole CLI. Flags are compared, in both directions, only
-//! for the commands in `FLAG_CHECKED`. `verify`, `send` (`--not-crossed-out`) and `gate`
-//! (`--max-request-bytes`, `--require-claim`) already lack flags that exist in the CLI; that older
-//! gap is not al-210's, so it is left visible here rather than listed as an exception.
+//! for the commands in `FLAG_CHECKED`. `verify` and `send` (`--not-crossed-out`) already lack
+//! flags that exist in the CLI; that older gap is not yet closed, so it is left visible here
+//! rather than listed as an exception. `gate` was in the same state until al-3pz declared its
+//! three missing flags and added it to the list.
 
 use std::collections::BTreeSet;
 
@@ -17,7 +18,7 @@ const OPERATOR_JSON: &str = include_str!("../operator.json");
 
 /// Commands whose declared flags must be exactly the CLI's. `chain` is checked through its
 /// `verify` subcommand, whose flags `operator.json` lists on the `chain` entry.
-const FLAG_CHECKED: [&str; 2] = ["assemble", "chain"];
+const FLAG_CHECKED: [&str; 3] = ["assemble", "chain", "gate"];
 
 fn operator() -> Value {
     serde_json::from_str(OPERATOR_JSON).expect("operator.json is valid JSON")

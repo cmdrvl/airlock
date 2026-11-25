@@ -26,6 +26,7 @@
             "E_BAD_MANIFEST",
             "E_MISSING_FILE",
             "E_WITNESS_ERROR",
+            "E_TRANSPORT",
             "E_INTERNAL"
           ]
         },

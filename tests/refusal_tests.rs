@@ -45,6 +45,11 @@ fn sample_envelopes() -> Vec<(RefusalCode, RefusalEnvelope, Option<&'static str>
             Some("airlock witness query --help"),
         ),
         (
+            RefusalCode::ETransport,
+            RefusalEnvelope::transport("connect failed", json!({"sent": false})),
+            Some("airlock send --help"),
+        ),
+        (
             RefusalCode::EInternal,
             RefusalEnvelope::internal("unexpected state", json!({"phase": "test"})),
             None,

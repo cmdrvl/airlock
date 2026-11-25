@@ -237,7 +237,8 @@ fn test_top_level_capabilities_json_is_the_describe_contract() {
         .iter()
         .map(|refusal| refusal["code"].as_str().unwrap())
         .collect();
-    assert_eq!(refusals.len(), 9);
+    assert_eq!(refusals.len(), 10);
+    assert!(refusals.contains(&"E_TRANSPORT"));
     assert!(refusals.iter().all(|code| code.starts_with("E_")));
 }
 

@@ -28,6 +28,8 @@ pub enum RefusalCode {
     EMissingFile,
     #[serde(rename = "E_WITNESS_ERROR")]
     EWitnessError,
+    #[serde(rename = "E_TRANSPORT")]
+    ETransport,
     #[serde(rename = "E_INTERNAL")]
     EInternal,
 }
@@ -43,6 +45,7 @@ impl RefusalCode {
             Self::EBadManifest => "E_BAD_MANIFEST",
             Self::EMissingFile => "E_MISSING_FILE",
             Self::EWitnessError => "E_WITNESS_ERROR",
+            Self::ETransport => "E_TRANSPORT",
             Self::EInternal => "E_INTERNAL",
         }
     }
@@ -182,6 +185,17 @@ impl RefusalEnvelope {
         )
     }
 
+    /// `airlock send` could not complete the exchange. `detail.sent` says whether the request
+    /// may have reached the endpoint.
+    pub fn transport(message: impl Into<String>, detail: Value) -> Self {
+        Self::new(
+            RefusalCode::ETransport,
+            message,
+            detail,
+            Some("airlock send --help"),
+        )
+    }
+
     pub fn internal(message: impl Into<String>, detail: Value) -> Self {
         Self::new(RefusalCode::EInternal, message, detail, None::<String>)
     }
@@ -203,6 +217,7 @@ mod tests {
             (RefusalCode::EBadManifest, "\"E_BAD_MANIFEST\""),
             (RefusalCode::EMissingFile, "\"E_MISSING_FILE\""),
             (RefusalCode::EWitnessError, "\"E_WITNESS_ERROR\""),
+            (RefusalCode::ETransport, "\"E_TRANSPORT\""),
             (RefusalCode::EInternal, "\"E_INTERNAL\""),
         ];
 

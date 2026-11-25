@@ -115,11 +115,81 @@ pub struct AirlockManifest {
     /// same as an empty list: an empty list says nothing was left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_crossed: Option<Vec<NotCrossedEntry>>,
+    /// What `airlock send` did with the request. From v0.3, and only on a manifest `send`
+    /// wrote: `verify` never writes it. Absent says nothing about whether the request was
+    /// sent. When present, `sent: true` goes with `attestation: transmitted` and `sent: false`
+    /// with `self_attested`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transmission: Option<Transmission>,
     /// Ed25519 signature over this manifest with the `signature` member removed. From v0.3,
     /// and only when `verify` was not run with `--no-sign`. Set by [`crate::signing::sign`],
     /// never by the builder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<ManifestSignature>,
+}
+
+/// What `airlock send` did with a request. Only the request body is attested: headers are not.
+///
+/// `sent` is `false` only when the body was certainly never written to a connection (the claim
+/// fell short, the URL was unusable, or no connection was made). A failure after connecting
+/// that cannot rule the write out is recorded as `sent: true` with no response and an `error`:
+/// the manifest over-reports what may have crossed rather than under-reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Transmission {
+    pub sent: bool,
+    /// Host (and port, when not the scheme's default) of the endpoint. Never the path, query or
+    /// credentials.
+    pub endpoint_host: String,
+    /// Length of the request body, which is `bytes_crossed`.
+    pub request_bytes: u64,
+    /// `blake3:{64 hex}` of the bytes handed to the connection, which is `request_payload_hash`.
+    pub request_hash: String,
+    /// When the request was handed to the connection. Present when `sent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<String>,
+    /// Milliseconds from handing over the request to the end of the response, or to the failure.
+    /// Present when `sent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    /// The HTTP status of the response. The three response members are all present or all absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_status: Option<u16>,
+    /// `blake3:{64 hex}` of the response body as received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_bytes: Option<u64>,
+    /// Why there is no complete response, or why nothing was sent. Absent on a clean exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<TransmissionError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TransmissionError {
+    /// The achieved claim was below `--require-claim`; nothing was sent.
+    ClaimBelowRequired,
+    /// No connection was made (bad URL, DNS, refused, no route); nothing was sent.
+    ConnectFailed,
+    /// The request was sent and no response arrived in time.
+    ResponseTimeout,
+    /// The response was larger than the cap and was not read to the end.
+    ResponseTooLarge,
+    /// The request may have been sent and the exchange failed for another reason.
+    TransportError,
+}
+
+impl TransmissionError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransmissionError::ClaimBelowRequired => "CLAIM_BELOW_REQUIRED",
+            TransmissionError::ConnectFailed => "CONNECT_FAILED",
+            TransmissionError::ResponseTimeout => "RESPONSE_TIMEOUT",
+            TransmissionError::ResponseTooLarge => "RESPONSE_TOO_LARGE",
+            TransmissionError::TransportError => "TRANSPORT_ERROR",
+        }
+    }
 }
 
 /// The signature recorded in a signed manifest. It does not embed the public key: the
@@ -458,6 +528,7 @@ impl ManifestBuilder {
             bytes_crossed: Some(bytes_crossed),
             attestation: Some(attestation),
             not_crossed: self.not_crossed,
+            transmission: None,
             signature: None,
         })
     }

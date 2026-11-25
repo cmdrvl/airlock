@@ -176,6 +176,7 @@
     { "code": "E_BAD_MANIFEST", "message": "airlock_manifest.json is malformed", "action": "Re-run `airlock verify` to regenerate the manifest" },
     { "code": "E_MISSING_FILE", "message": "A required file does not exist", "action": "Create or correct the path" },
     { "code": "E_WITNESS_ERROR", "message": "The witness ledger could not be read or queried", "action": "Check EPISTEMIC_WITNESS and the ledger path, or use `--no-witness`" },
+    { "code": "E_TRANSPORT", "message": "airlock send could not complete the exchange with the endpoint", "action": "Read refusal.detail.sent: false means the request body was never written, true means it may have reached the endpoint; the manifest at --out records which" },
     { "code": "E_INTERNAL", "message": "Unexpected internal state", "action": "Report this with the refusal detail" }
   ],
   "env_vars": [

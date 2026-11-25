@@ -104,7 +104,7 @@
       "minimum": 0
     },
     "attestation": {
-      "description": "airlock.v0.3 and later. verify writes self_attested; transmitted and gated are reserved for send and gate receipts.",
+      "description": "airlock.v0.3 and later. verify writes self_attested. send writes transmitted when it sent the request and self_attested when it did not; see transmission. gated is reserved for gate receipts.",
       "type": "string",
       "enum": [
         "self_attested",
@@ -118,6 +118,9 @@
       "items": {
         "$ref": "#/$defs/notCrossedEntry"
       }
+    },
+    "transmission": {
+      "$ref": "#/$defs/transmission"
     },
     "signature": {
       "description": "airlock.v0.3 and later, absent when verify ran with --no-sign. Ed25519 signature over the canonical JSON of this manifest with the signature member removed. The public key is not embedded: public_key_fingerprint names the signer and `airlock verify-manifest` is given the key.",
@@ -179,8 +182,100 @@
               "required": [
                 "signature"
               ]
+            },
+            {
+              "required": [
+                "transmission"
+              ]
             }
           ]
+        }
+      }
+    },
+    {
+      "description": "A manifest that says it was transmitted carries the transmission, and it says sent.",
+      "if": {
+        "required": [
+          "attestation"
+        ],
+        "properties": {
+          "attestation": {
+            "const": "transmitted"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "transmission"
+        ],
+        "properties": {
+          "transmission": {
+            "properties": {
+              "sent": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "A transmission that sent the request goes with attestation transmitted.",
+      "if": {
+        "required": [
+          "transmission"
+        ],
+        "properties": {
+          "transmission": {
+            "required": [
+              "sent"
+            ],
+            "properties": {
+              "sent": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "attestation"
+        ],
+        "properties": {
+          "attestation": {
+            "const": "transmitted"
+          }
+        }
+      }
+    },
+    {
+      "description": "A transmission that did not send the request goes with attestation self_attested: nothing was transmitted.",
+      "if": {
+        "required": [
+          "transmission"
+        ],
+        "properties": {
+          "transmission": {
+            "required": [
+              "sent"
+            ],
+            "properties": {
+              "sent": {
+                "const": false
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "attestation"
+        ],
+        "properties": {
+          "attestation": {
+            "const": "self_attested"
+          }
         }
       }
     }
@@ -213,6 +308,185 @@
     "blake3Hash": {
       "type": "string",
       "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "transmission": {
+      "description": "airlock.v0.3 and later, only on a manifest airlock send wrote. What send did with the request; only the body is attested, not headers. sent is false only when the body was certainly never written; a failure after connecting is sent true with no response and an error.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sent": {
+          "type": "boolean"
+        },
+        "endpoint_host": {
+          "description": "Host, and port when not the scheme's default. Never the path, query or credentials.",
+          "type": "string",
+          "minLength": 1
+        },
+        "request_bytes": {
+          "description": "Length of the request body; equals bytes_crossed.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "request_hash": {
+          "description": "blake3 of the bytes handed to the connection; equals request_payload_hash.",
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "sent_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "response_status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "response_hash": {
+          "description": "blake3 of the response body as received.",
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "response_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error": {
+          "type": "string",
+          "enum": [
+            "CLAIM_BELOW_REQUIRED",
+            "CONNECT_FAILED",
+            "RESPONSE_TIMEOUT",
+            "RESPONSE_TOO_LARGE",
+            "TRANSPORT_ERROR"
+          ]
+        }
+      },
+      "required": [
+        "sent",
+        "endpoint_host",
+        "request_bytes",
+        "request_hash"
+      ],
+      "dependentRequired": {
+        "response_status": [
+          "response_hash",
+          "response_bytes"
+        ],
+        "response_hash": [
+          "response_status",
+          "response_bytes"
+        ],
+        "response_bytes": [
+          "response_status",
+          "response_hash"
+        ]
+      },
+      "allOf": [
+        {
+          "description": "A request that was sent records when and how long.",
+          "if": {
+            "properties": {
+              "sent": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "sent_at",
+              "latency_ms"
+            ]
+          },
+          "else": {
+            "description": "A request that was not sent has no time, no response, and says why.",
+            "required": [
+              "error"
+            ],
+            "properties": {
+              "error": {
+                "enum": [
+                  "CLAIM_BELOW_REQUIRED",
+                  "CONNECT_FAILED"
+                ]
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "sent_at"
+                  ]
+                },
+                {
+                  "required": [
+                    "latency_ms"
+                  ]
+                },
+                {
+                  "required": [
+                    "response_status"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "A sent request either got a response or says why not, never both and never neither.",
+          "if": {
+            "properties": {
+              "sent": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "oneOf": [
+              {
+                "required": [
+                  "response_status"
+                ],
+                "not": {
+                  "required": [
+                    "error"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "error"
+                ],
+                "not": {
+                  "required": [
+                    "response_status"
+                  ]
+                },
+                "properties": {
+                  "error": {
+                    "enum": [
+                      "RESPONSE_TIMEOUT",
+                      "TRANSPORT_ERROR"
+                    ]
+                  }
+                }
+              },
+              {
+                "required": [
+                  "error",
+                  "response_status"
+                ],
+                "properties": {
+                  "error": {
+                    "const": "RESPONSE_TOO_LARGE"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
     },
     "boundaryMode": {
       "type": "string",

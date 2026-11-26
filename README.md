@@ -49,14 +49,14 @@ brew install cmdrvl/tap/airlock
 ### From Source
 
 ```bash
-cargo install --git https://github.com/cmdrvl/airlock --tag v0.3.0
+cargo install --git https://github.com/cmdrvl/airlock --tag v0.4.0
 ```
 
 ### Verify
 
 ```bash
 airlock --version
-# airlock 0.3.0
+# airlock 0.4.0
 ```
 
 ## Quick Start
@@ -1098,12 +1098,11 @@ evidence patterns, and real model-boundary sensitivity.
 
 ## Roadmap
 
-v0.3.0 is the current foundational release. Next:
+v0.4.0 is the current release; see [CHANGELOG.md](./CHANGELOG.md). Next:
 
 1. Seal integration with `pack` for immutable manifest bundles
 2. Register Airlock proofs in catalog
-3. Multiple adapter support beyond OpenAI chat completions
-4. Witness ledger rotation and archival
+3. Witness ledger rotation and archival
 
 The implementation-grade detail lives in
 [docs/airlock_plan.md](./docs/airlock_plan.md).

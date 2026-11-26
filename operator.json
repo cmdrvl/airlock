@@ -1,7 +1,7 @@
 {
   "schema_version": "operator.v1",
   "name": "airlock",
-  "tool_version": "0.3.0",
+  "tool_version": "0.4.0",
   "contract_version": "1.0.0",
   "description": "Boundary attestation primitive. Proves what crossed the model boundary, which upstream artifacts influenced it, and what claim level was earned. `assemble` builds a deterministic prompt payload plus prompt provenance, `verify` checks a model request against the policy and emits an airlock manifest, `explain` summarizes a manifest, and `witness` queries the local receipt ledger. `doctor`, `capabilities` and `robot-docs` are read-only discovery surfaces.",
   "repository": "https://github.com/cmdrvl/airlock",

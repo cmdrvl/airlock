@@ -21,8 +21,8 @@
 //! - `fixture_success_args` (R-001 resolved / R-008 / R-017): airlock's success
 //!   commands write their artifacts to `--out` paths and the macro takes static
 //!   argument slices, so parallel generated tests would share one output path.
-//!   `--no-witness` suppression and witness-failure non-fatality are covered by
-//!   `tests/cli_tests.rs` against per-test temp dirs.
+//!   Recording by default and `--no-witness` suppression are covered through the real
+//!   binary by `tests/witness_default.rs`, against per-test temp dirs.
 
 use spine_rules::golden_rules_suite;
 

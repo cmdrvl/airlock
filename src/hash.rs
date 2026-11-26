@@ -1,19 +1,16 @@
-pub mod jcs;
-
 use std::path::Path;
 
+use cmdrvl_core::jcs::{self, JcsError};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-
-use self::jcs::JcsError;
 
 /// Hash a JSON value as `blake3(JCS(value))` with RFC 8785 canonicalization.
 ///
 /// This is the computation a third party reproduces with any conforming JCS library:
 /// canonicalize, then BLAKE3 the UTF-8 bytes. Integers outside ±2^53, which RFC 8785 cannot
-/// represent interoperably, are refused instead of hashed (see [`jcs::canonicalize`]).
+/// represent interoperably, are refused instead of hashed (see [`jcs::to_string`]).
 pub fn jcs_blake3_hash(value: &Value) -> Result<String, JcsError> {
-    Ok(blake3_hash(jcs::canonicalize(value)?.as_bytes()))
+    Ok(blake3_hash(jcs::to_string(value)?.as_bytes()))
 }
 
 /// Compute a BLAKE3 hash of the given bytes.

@@ -463,9 +463,7 @@ fn the_server_receives_exactly_the_bytes_the_manifest_hashes() {
     let parsed: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(parsed["model"], "gpt-5");
     assert_eq!(
-        airlock::hash::jcs::canonicalize(&parsed)
-            .unwrap()
-            .as_bytes(),
+        cmdrvl_core::jcs::to_string(&parsed).unwrap().as_bytes(),
         request.body.as_slice()
     );
 

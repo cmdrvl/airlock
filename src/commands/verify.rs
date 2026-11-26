@@ -12,7 +12,7 @@ use crate::assembler::{
     NOT_CROSSED_VERSION, NotCrossedEntry, NotCrossedInventory, PromptProvenance,
 };
 use crate::cli::{VERIFY_PARTIAL, VERIFY_PASS, VerifyArgs};
-use crate::hash::{blake3_hash, jcs, jcs_blake3_hash};
+use crate::hash::{blake3_hash, jcs_blake3_hash};
 use crate::manifest::{AirlockManifest, Attestation, ManifestBuilder};
 use crate::output::{SOURCE_DATE_EPOCH_ENV, now_utc};
 use crate::policy::{self, AirlockPolicy};
@@ -306,7 +306,7 @@ pub(crate) fn verify_request(
     })?;
     // One canonicalization feeds both the hash and bytes_crossed, so the recorded length is by
     // construction the length of the bytes that request_payload_hash covers.
-    let canonical_request = jcs::canonicalize(request_value).map_err(|error| {
+    let canonical_request = cmdrvl_core::jcs::to_string(request_value).map_err(|error| {
         RefusalEnvelope::bad_request(
             format!("request payload cannot be hashed as RFC 8785 canonical JSON: {error}"),
             error.detail(),

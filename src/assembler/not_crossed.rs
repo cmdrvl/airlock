@@ -8,8 +8,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use cmdrvl_core::jcs;
+
 use super::{InputArtifact, join_array_path, join_object_path, value_at_path};
-use crate::hash::{blake3_hash, jcs};
+use crate::hash::blake3_hash;
 use crate::types::BoundaryMode;
 
 pub const NOT_CROSSED_VERSION: &str = "airlock.not_crossed.v1";
@@ -225,8 +227,7 @@ impl Walk<'_> {
 }
 
 fn value_hash(value: &Value) -> String {
-    let canonical =
-        jcs::canonicalize(value).unwrap_or_else(|_| jcs::canonicalize_exact_integers(value));
+    let canonical = jcs::to_string(value).unwrap_or_else(|_| jcs::to_string_exact_integers(value));
     blake3_hash(canonical.as_bytes())
 }
 

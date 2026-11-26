@@ -9,7 +9,7 @@ use crate::assembler::{
 };
 use crate::chain::{ChainLink, check_receipt, link_to_prior_manifest};
 use crate::cli::{AssembleArgs, VERIFY_PASS};
-use crate::hash::{blake3_hash, jcs};
+use crate::hash::blake3_hash;
 use crate::policy::{hash_policy, load_policy};
 use crate::refusal::{RefusalCode, RefusalEnvelope};
 use crate::witness::{self, WitnessInput, WitnessRecord};
@@ -70,7 +70,7 @@ fn run_with_writers(
     // The prompt payload hash is recomputed by `verify` (and by third parties) as
     // blake3(RFC 8785 JCS(payload)); refuse here a payload JCS cannot represent interoperably
     // rather than write a prompt and provenance that `verify` would later refuse.
-    let prompt_bytes = match jcs::canonicalize(&assembly.prompt_payload) {
+    let prompt_bytes = match cmdrvl_core::jcs::to_string(&assembly.prompt_payload) {
         Ok(text) => text.into_bytes(),
         Err(error) => {
             return RefusalEnvelope::bad_input(

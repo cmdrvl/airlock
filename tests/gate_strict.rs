@@ -453,7 +453,7 @@ fn forwarded_and_denied_requests_record_byte_counts_in_receipt_and_witness() {
     // A matched request sent in pretty-printed (non-canonical) form: the byte count must be
     // what the client sent, not the canonical bytes the gate forwards.
     let pretty = serde_json::to_vec_pretty(&request).unwrap();
-    let canonical = airlock::hash::jcs::canonicalize(&request).unwrap();
+    let canonical = cmdrvl_core::jcs::to_string(&request).unwrap();
     assert_ne!(pretty.len(), canonical.len(), "test needs distinct sizes");
     let unmatched = br#"{"messages":[]}"#;
     let malformed = b"{not json";
@@ -1177,7 +1177,7 @@ fn forwarded_request_keeps_end_user_headers_drops_hop_by_hop_and_sends_canonical
         &[],
     );
     let pretty = serde_json::to_vec_pretty(&request).unwrap();
-    let canonical = airlock::hash::jcs::canonicalize(&request).unwrap();
+    let canonical = cmdrvl_core::jcs::to_string(&request).unwrap();
     let canonical: &[u8] = canonical.as_ref();
     assert_ne!(pretty, canonical, "test needs a non-canonical client body");
 

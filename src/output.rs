@@ -80,10 +80,10 @@ pub fn sort_value(v: Value) -> Value {
 ///
 /// Total: it never fails, so it is safe on any value. Integers outside ±2^53, which RFC 8785
 /// cannot represent, are written as exact decimal digits here; code that claims a hash is
-/// recomputable by a third party must call [`crate::hash::jcs::canonicalize`] (or
+/// recomputable by a third party must call [`cmdrvl_core::jcs::to_string`] (or
 /// [`crate::hash::jcs_blake3_hash`]) instead, which refuses them.
 pub fn canonical_json(v: &Value) -> String {
-    crate::hash::jcs::canonicalize_exact_integers(v)
+    cmdrvl_core::jcs::to_string_exact_integers(v)
 }
 
 /// Serialize a JSON value to RFC 8785 canonical JSON bytes (for hashing).

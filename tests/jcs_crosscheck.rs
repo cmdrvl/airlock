@@ -12,7 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use airlock::hash::jcs::{canonicalize, serialize_f64};
+// al-9ir: the canonicalizer is cmdrvl-core's; the local names are kept so the rest is untouched.
+use cmdrvl_core::jcs::{format_f64 as serialize_f64, to_string as canonicalize};
 use serde_json::{Map, Number, Value};
 
 fn python() -> Option<String> {

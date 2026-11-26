@@ -12,11 +12,14 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use airlock::hash::jcs::{
-    MAX_INTERCHANGE_INTEGER, canonicalize, canonicalize_exact_integers, serialize_f64,
-};
 use airlock::hash::{blake3_hash, jcs_blake3_hash};
 use airlock::output::{canonical_json, canonical_json_bytes, sort_value};
+// al-9ir: the canonicalizer is cmdrvl-core's; the local names are kept so the vectors and
+// expected values below are untouched.
+use cmdrvl_core::jcs::{
+    MAX_INTERCHANGE_INTEGER, format_f64 as serialize_f64, to_string as canonicalize,
+    to_string_exact_integers as canonicalize_exact_integers,
+};
 use serde_json::{Number, Value, json};
 
 fn fixture(path: &str) -> PathBuf {

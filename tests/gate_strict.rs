@@ -1117,9 +1117,8 @@ fn response_cut_short_is_marked_interrupted_in_receipt_witness_and_explain() {
     let witness_path = temp.path().join("witness.jsonl");
     let gate = start_strict_gate(upstream, &manifest_dir, &receipts_dir, &witness_path, &[]);
 
-    // The client's view of the cut-off response does not matter here, only what was recorded.
-    // The gate does not end this client's response when the upstream cuts it short: the
-    // request stays open until the client gives up (al-3pz G14), so the client runs on its own
+    // The client's view of the cut-off response does not matter here, only what was recorded
+    // (what the client sees is pinned by the G14 tests below), so the client runs on its own
     // thread and this test reads what the gate recorded instead of waiting on it.
     let url = format!("http://{}/v1/chat/completions", gate.address);
     let body = serde_json::to_vec(&request).unwrap();
@@ -3122,4 +3121,464 @@ fn chained_turns_found_through_the_ledger_are_still_held_to_what_the_gate_forwar
     assert_eq!(post(&client(), gate.address, &world.body(0)).0, 200);
     assert_eq!(post(&client(), gate.address, &world.body(1)).0, 200);
     assert_eq!(origin.count.load(Ordering::Acquire), 2);
+}
+
+// --- what a client sees of a response the upstream cuts short (al-3pz G14) ---------------------
+//
+// The gate relays a response as it arrives. If the upstream ends it early, the client must be told
+// now, by a response that cannot be mistaken for a complete one, instead of waiting for its own
+// timeout. These tests read the gate's response with a raw socket and a strict chunked parser, and
+// with a real client library, so what is pinned is what a client sees and not how the gate wrote it.
+
+/// One response as a raw HTTP client saw it.
+struct RawResponse {
+    status: u16,
+    /// Header names lower-cased.
+    headers: Vec<(String, String)>,
+    /// The body bytes that arrived before the body ended or failed to parse.
+    body: Vec<u8>,
+    /// Why the body could not be read to its proper end, if it could not.
+    body_error: Option<String>,
+    /// When the response head had been read, from the start of the request.
+    head_at: Duration,
+    /// When the first piece of the body arrived, from the start of the request.
+    first_body_byte_at: Option<Duration>,
+    finished_at: Duration,
+}
+
+impl RawResponse {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// POST `body` to the gate over a raw socket, speaking `version` ("HTTP/1.1" or "HTTP/1.0"), and
+/// read the response strictly: a chunked body must be well formed to count as ended. `patience`
+/// bounds every read, so a gate that never answers makes this return an error and not hang.
+fn raw_post(
+    address: SocketAddr,
+    version: &str,
+    body: &[u8],
+    patience: Duration,
+) -> Result<RawResponse, String> {
+    raw_post_with(address, version, "", body, patience)
+}
+
+/// [`raw_post`] with `extra_headers` (each line ending in CRLF) added to the request.
+fn raw_post_with(
+    address: SocketAddr,
+    version: &str,
+    extra_headers: &str,
+    body: &[u8],
+    patience: Duration,
+) -> Result<RawResponse, String> {
+    let started = Instant::now();
+    let mut stream =
+        std::net::TcpStream::connect(address).map_err(|error| format!("connect: {error}"))?;
+    stream.set_read_timeout(Some(patience)).unwrap();
+    let head = format!(
+        "POST /v1/chat/completions {version}\r\nHost: gate\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|()| stream.write_all(body))
+        .map_err(|error| format!("send: {error}"))?;
+    let mut reader = BufReader::new(stream);
+
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|error| format!("no response head within {patience:?}: {error}"))?;
+    let status: u16 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .ok_or_else(|| format!("bad status line {line:?}"))?;
+    let mut headers = Vec::new();
+    loop {
+        line.clear();
+        reader
+            .read_line(&mut line)
+            .map_err(|error| format!("reading headers: {error}"))?;
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            break;
+        }
+        let (name, value) = trimmed
+            .split_once(':')
+            .ok_or_else(|| format!("bad header line {trimmed:?}"))?;
+        headers.push((name.to_ascii_lowercase(), value.trim().to_owned()));
+    }
+    let chunked = headers
+        .iter()
+        .any(|(name, value)| name == "transfer-encoding" && value.contains("chunked"));
+
+    let mut response = RawResponse {
+        status,
+        headers,
+        body: Vec::new(),
+        body_error: None,
+        head_at: started.elapsed(),
+        first_body_byte_at: None,
+        finished_at: Duration::ZERO,
+    };
+    if chunked {
+        read_chunked_strictly(&mut reader, started, &mut response);
+    } else if let Err(error) = reader.read_to_end(&mut response.body) {
+        response.body_error = Some(format!("reading an unframed body: {error}"));
+    }
+    response.finished_at = started.elapsed();
+    Ok(response)
+}
+
+fn read_chunked_strictly(
+    reader: &mut BufReader<std::net::TcpStream>,
+    started: Instant,
+    response: &mut RawResponse,
+) {
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                response.body_error = Some("the connection ended inside a chunked body".to_owned());
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                response.body_error = Some(format!("timed out or failed reading a chunk: {error}"));
+                return;
+            }
+        }
+        let size_text = line
+            .trim_end_matches("\r\n")
+            .split(';')
+            .next()
+            .unwrap_or("");
+        let valid = !size_text.is_empty()
+            && size_text.chars().all(|c| c.is_ascii_hexdigit())
+            && line.ends_with("\r\n");
+        let Some(size) = valid
+            .then(|| usize::from_str_radix(size_text, 16).ok())
+            .flatten()
+        else {
+            response.body_error = Some(format!("invalid chunk size line {line:?}"));
+            return;
+        };
+        if size == 0 {
+            // The trailer: nothing, then a blank line.
+            let mut trailer = String::new();
+            if reader.read_line(&mut trailer).is_err() || trailer != "\r\n" {
+                response.body_error = Some(format!("bad chunked trailer {trailer:?}"));
+            }
+            return;
+        }
+        let mut chunk = vec![0; size];
+        if let Err(error) = reader.read_exact(&mut chunk) {
+            response.body_error = Some(format!("a chunk ended early: {error}"));
+            return;
+        }
+        response.first_body_byte_at.get_or_insert(started.elapsed());
+        response.body.extend_from_slice(&chunk);
+        let mut end = [0u8; 2];
+        if reader.read_exact(&mut end).is_err() || &end != b"\r\n" {
+            response.body_error = Some("a chunk was not followed by CRLF".to_owned());
+            return;
+        }
+    }
+}
+
+/// An origin that sends its response head, waits `lead`, sends `first`, waits `pause`, then sends
+/// `second`, as a chunked body.
+fn start_slow_chunked_origin(
+    lead: Duration,
+    first: &'static [u8],
+    pause: Duration,
+    second: &'static [u8],
+) -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        let mut body = vec![0; content_length];
+        let _ = reader.read_exact(&mut body);
+        let chunk = |bytes: &[u8]| {
+            let mut framed = format!("{:x}\r\n", bytes.len()).into_bytes();
+            framed.extend_from_slice(bytes);
+            framed.extend_from_slice(b"\r\n");
+            framed
+        };
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        );
+        let _ = stream.flush();
+        thread::sleep(lead);
+        let _ = stream.write_all(&chunk(first));
+        let _ = stream.flush();
+        thread::sleep(pause);
+        let _ = stream.write_all(&chunk(second));
+        let _ = stream.write_all(b"0\r\n\r\n");
+        let _ = stream.flush();
+    });
+    address
+}
+
+#[test]
+fn a_client_sees_a_protocol_error_at_once_when_the_upstream_cuts_a_response_short() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let upstream = start_truncating_origin();
+    let gate = start_strict_gate(
+        upstream,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+
+    let response = raw_post(
+        gate.address,
+        "HTTP/1.1",
+        &serde_json::to_vec(&request).unwrap(),
+        Duration::from_secs(4),
+    )
+    .expect("the client should get the response head");
+
+    assert_eq!(response.status, 200);
+    // What the upstream sent before it stopped reaches the client...
+    assert_eq!(response.body, b"0123456789");
+    // ...and the client is told, by a body that cannot be read as complete, not left to wait.
+    let error = response
+        .body_error
+        .as_deref()
+        .expect("a cut-off body must not look complete");
+    assert!(error.contains("invalid chunk size"), "{error}");
+    assert!(
+        response.finished_at < Duration::from_secs(3),
+        "the client waited {:?}",
+        response.finished_at
+    );
+}
+
+#[test]
+fn a_client_library_fails_at_once_when_the_upstream_cuts_a_response_short() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let upstream = start_truncating_origin();
+    let gate = start_strict_gate(
+        upstream,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+    let url = format!("http://{}/v1/chat/completions", gate.address);
+
+    let started = Instant::now();
+    let outcome = client()
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .send(serde_json::to_vec(&request).unwrap())
+        .map_err(|error| error.to_string())
+        .and_then(|response| {
+            let mut body = Vec::new();
+            response
+                .into_body()
+                .into_reader()
+                .read_to_end(&mut body)
+                .map(|_| body)
+                .map_err(|error| error.to_string())
+        });
+
+    assert!(
+        outcome.is_err(),
+        "a cut-off response was handed to the client as a complete body: {outcome:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "the client waited {:?} before it was told",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_complete_response_is_relayed_as_a_well_formed_chunked_body() {
+    // Larger than one read of the upstream body, so it crosses several chunks.
+    let reply: Vec<u8> = (0..150_000u32).map(|n| b'a' + (n % 26) as u8).collect();
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin_replying(reply.clone());
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+
+    let response = raw_post(
+        gate.address,
+        "HTTP/1.1",
+        &serde_json::to_vec(&request).unwrap(),
+        Duration::from_secs(10),
+    )
+    .unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body_error, None);
+    assert_eq!(response.body, reply);
+    assert_eq!(response.header("transfer-encoding"), Some("chunked"));
+    assert_eq!(response.header("content-length"), None);
+}
+
+#[test]
+fn a_response_with_no_body_is_relayed_without_chunked_framing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin_answering(vec![(204, Vec::new())], Duration::ZERO);
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+
+    // `Connection: close` makes the gate end the connection after the response, so whatever
+    // follows the head is read to its end: a 204 must have nothing after it.
+    let response = raw_post_with(
+        gate.address,
+        "HTTP/1.1",
+        "Connection: close\r\n",
+        &serde_json::to_vec(&request).unwrap(),
+        Duration::from_secs(10),
+    )
+    .unwrap();
+
+    assert_eq!(response.status, 204);
+    assert_eq!(response.header("transfer-encoding"), None);
+    assert_eq!(response.body_error, None);
+    assert_eq!(response.body, b"");
+}
+
+#[test]
+fn an_http_1_0_client_still_gets_its_whole_response() {
+    let reply = b"{\"ok\":true,\"for\":\"an old client\"}".to_vec();
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let origin = start_origin_replying(reply.clone());
+    let gate = start_strict_gate(
+        origin.address,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+
+    let response = raw_post(
+        gate.address,
+        "HTTP/1.0",
+        &serde_json::to_vec(&request).unwrap(),
+        Duration::from_secs(10),
+    )
+    .unwrap();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body_error, None);
+    assert_eq!(response.body, reply);
+    assert_eq!(response.header("transfer-encoding"), None);
+}
+
+#[test]
+fn a_response_head_reaches_the_client_before_the_first_body_byte() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let lead = Duration::from_millis(1500);
+    // The upstream answers at once and then takes a long time to produce anything.
+    let upstream =
+        start_slow_chunked_origin(lead, b"data: late\n\n", Duration::ZERO, b"data: later\n\n");
+    let gate = start_strict_gate(
+        upstream,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+
+    let response = raw_post(
+        gate.address,
+        "HTTP/1.1",
+        &serde_json::to_vec(&request).unwrap(),
+        Duration::from_secs(10),
+    )
+    .unwrap();
+
+    assert_eq!(response.body_error, None);
+    assert!(
+        response.head_at < lead / 2,
+        "the response head arrived after {:?}: the gate held it until the first body byte",
+        response.head_at
+    );
+    assert!(
+        response.first_body_byte_at.unwrap() >= lead,
+        "the first body byte arrived after {:?}",
+        response.first_body_byte_at
+    );
+}
+
+#[test]
+fn a_streamed_body_reaches_the_client_as_it_arrives_and_not_when_it_ends() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_dir, request) = bound_manifest_dir(temp.path());
+    let pause = Duration::from_millis(1500);
+    let upstream = start_slow_chunked_origin(
+        Duration::ZERO,
+        b"data: first\n\n",
+        pause,
+        b"data: second\n\n",
+    );
+    let gate = start_strict_gate(
+        upstream,
+        &manifest_dir,
+        &temp.path().join("receipts"),
+        &temp.path().join("witness.jsonl"),
+        &[],
+    );
+
+    let response = raw_post(
+        gate.address,
+        "HTTP/1.1",
+        &serde_json::to_vec(&request).unwrap(),
+        Duration::from_secs(10),
+    )
+    .unwrap();
+
+    assert_eq!(response.body_error, None);
+    assert_eq!(response.body, b"data: first\n\ndata: second\n\n");
+    let first = response.first_body_byte_at.expect("a first chunk");
+    assert!(
+        first < pause / 2,
+        "the first event arrived after {first:?}: the gate held it until the stream ended"
+    );
+    assert!(
+        response.finished_at >= pause,
+        "the whole stream finished after {:?}",
+        response.finished_at
+    );
 }

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use tiny_http::{HTTPVersion, Header, Method, Request, Response, Server, StatusCode};
 
 use crate::adapter::{self, PartKind, TransportDeclaration};
 use crate::assembler::PromptProvenance;
@@ -1227,8 +1227,7 @@ fn forward_request(request: Request, state: &GateState, body: &[u8], admitted: A
         digest: Arc::clone(&digest),
         exchange,
     };
-    let proxy_response = Response::new(StatusCode(status), response_headers, reader, None, None);
-    let response_result = request.respond(proxy_response);
+    let response_result = relay_response(request, status, response_headers, reader);
     let (response_hash, response_bytes) = {
         let digest = digest.lock().expect("response digest poisoned");
         (
@@ -1273,6 +1272,92 @@ fn forward_request(request: Request, state: &GateState, body: &[u8], admitted: A
         },
         if completed { VERIFY_PASS } else { REFUSAL },
     );
+}
+
+/// What the gate writes where a client's chunked parser expects the next chunk-size line when the
+/// upstream's body fails after the response head has gone out. 'G' is not a hex digit, so any
+/// conformant client rejects the response there and now, instead of reading it as complete or
+/// waiting for a chunk that will never come.
+const ABORT_CHUNK: &[u8] = b"G\r\n";
+
+/// Send the upstream's response to the client, writing the response framing itself so that it can
+/// do two things the listener's own `respond` cannot (al-3pz G14): send each piece of the body as
+/// it arrives (the listener flushes only when the whole response has been written, which holds a
+/// streamed reply until it ends), and tell the client at once when the upstream body fails.
+///
+/// That second part matters because the listener cannot close a client's connection from here. A
+/// failed `respond` returns an error with the response still in its buffer, so a client waits for
+/// its own timeout, or is handed a truncated body that looks complete. Here, when the upstream
+/// body fails after the head is out, the gate writes [`ABORT_CHUNK`] and flushes, and returns the
+/// error so the receipt records `GATE_STREAM_INTERRUPTED`.
+///
+/// Two kinds of response still go through `respond`: one to an HTTP/1.0 client, which cannot be
+/// sent a chunked body, and a 204 or 304, which must carry neither a body nor a
+/// `Transfer-Encoding`. For an HTTP/1.0 client a failed upstream still leaves the connection
+/// waiting. Only POST requests reach this point.
+fn relay_response(
+    request: Request,
+    status: u16,
+    headers: Vec<Header>,
+    mut body: impl Read,
+) -> io::Result<()> {
+    if *request.http_version() < HTTPVersion(1, 1) || matches!(status, 204 | 304) {
+        return request.respond(Response::new(StatusCode(status), headers, body, None, None));
+    }
+    let mut writer = request.into_writer();
+    let mut head = format!(
+        "HTTP/1.1 {status} {}\r\n",
+        StatusCode(status).default_reason_phrase()
+    );
+    // Header values come from `http::HeaderValue`, which cannot hold a CR or an LF, so none can
+    // end the head early. The upstream's own Content-Length and Transfer-Encoding were dropped
+    // by the caller, so the framing written below is the only framing.
+    for header in &headers {
+        head.push_str(&format!("{}: {}\r\n", header.field, header.value));
+    }
+    head.push_str("Transfer-Encoding: chunked\r\n\r\n");
+    if let Err(error) = writer
+        .write_all(head.as_bytes())
+        .and_then(|()| writer.flush())
+    {
+        return ignore_client_closing(error);
+    }
+
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let read = match body.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) => {
+                let _ = writer.write_all(ABORT_CHUNK).and_then(|()| writer.flush());
+                return Err(error);
+            }
+        };
+        let sent = write!(writer, "{read:x}\r\n")
+            .and_then(|()| writer.write_all(&buffer[..read]))
+            .and_then(|()| writer.write_all(b"\r\n"))
+            .and_then(|()| writer.flush());
+        if let Err(error) = sent {
+            return ignore_client_closing(error);
+        }
+    }
+    writer
+        .write_all(b"0\r\n\r\n")
+        .and_then(|()| writer.flush())
+        .or_else(ignore_client_closing)
+}
+
+/// A client that went away while the response was being written is not an error the gate can do
+/// anything about. The listener's own `respond` treats these four kinds of failure the same way.
+fn ignore_client_closing(error: io::Error) -> io::Result<()> {
+    match error.kind() {
+        ErrorKind::BrokenPipe
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::ConnectionRefused
+        | ErrorKind::ConnectionReset => Ok(()),
+        _ => Err(error),
+    }
 }
 
 /// The upstream did not give the gate a response: HTTP 502, with the limit recorded when the

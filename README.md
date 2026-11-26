@@ -244,7 +244,12 @@ the JSON pointers required by `generic_json`. Without it, the gate selects a
 provider adapter from each request's shape and refuses conflicting
 provider-specific shapes.
 
-Allowed responses stream through the proxy while Airlock hashes the bytes. Gate
+Allowed responses stream through the proxy while Airlock hashes the bytes: an
+HTTP/1.1 client gets each piece as it arrives (a server-sent-event stream is not
+held until it ends), and if the upstream cuts a response short the client's
+chunked body ends in a malformed chunk, so it reports a protocol error and does
+not read a partial reply as complete. An HTTP/1.0 client gets the whole
+response at the end instead. Gate
 receipts are written under `airlock-gate/` by default, and witness records
 include the gate mode, claim, request/response hashes, and request/response
 byte counts. Authorization and provider key headers are forwarded but never

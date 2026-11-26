@@ -345,6 +345,10 @@ airlock explain --manifest /var/lib/airlock/gate/RECEIPT.json
 - A request the gate forwards is attested by its receipt; the firewall only
   guarantees that forwarded requests are the only ones that left.
 - If the upstream ends a response early, the receipt carries a
-  `GATE_STREAM_INTERRUPTED` finding, but the gate does not close the client's
-  connection: the client waits until its own timeout (known gap, tracked on
-  al-3pz as G14). Set a timeout in the agent's SDK.
+  `GATE_STREAM_INTERRUPTED` finding. An HTTP/1.1 client is told at once: the
+  gate has already sent what arrived, and it ends the chunked body with a
+  malformed chunk, so a conformant client reports a protocol error and does not
+  read the body as complete. An HTTP/1.0 client cannot be sent a chunked body;
+  for it the gate still holds the whole response until the upstream finishes,
+  and a response the upstream cuts short leaves it waiting until its own
+  timeout. Set a timeout in the agent's SDK. (al-3pz G14.)

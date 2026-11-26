@@ -1,0 +1,16 @@
+{
+  "control_id": "AIR-OP-028",
+  "decision_band": "ESCALATE",
+  "summary": {
+    "positions_checked": 412,
+    "failed_rules": 1,
+    "pareto_driver_share": 0.996
+  },
+  "risk_metrics": {
+    "dscr_breaches": 1,
+    "delinquency_60d_plus": 0.018
+  },
+  "client_ssn": "123-45-6789",
+  "raw_document": "<table><tr><td>Confidential Counterparty Ledger</td><td>$42,500,000</td></tr></table>",
+  "raw_ledger_rows": "account,client,ssn,balance\nA-101,Acme Holdings,123-45-6789,42500000\n"
+}

@@ -1,0 +1,32 @@
+policy_id: finos_air_op_028_agent_egress
+version: airlock.v0
+allowed_keys:
+  - key_path: control_id
+    description: FINOS CALM control identifier
+    boundary_class: TELEMETRY
+  - key_path: decision_band
+    description: Deterministic assessment band
+    boundary_class: TELEMETRY
+  - key_path: summary
+    description: Redacted aggregate counts
+    boundary_class: TELEMETRY
+  - key_path: risk_metrics
+    description: Redacted portfolio risk ratios
+    boundary_class: TELEMETRY
+forbidden_keys:
+  - raw_document
+  - raw_ledger_rows
+  - client_ssn
+  - api_key
+forbidden_patterns:
+  - pattern: "\\b[0-9]{3}-[0-9]{2}-[0-9]{4}\\b"
+    description: US SSN pattern must never cross the wire
+    artifact_class: pii_us_ssn
+  - pattern: "<[a-z][^>]*>"
+    description: Raw HTML markup must not cross the wire
+    artifact_class: raw_html
+derived_text_paths: []
+claim_levels:
+  - BOUNDARY_FAILED
+  - RAW_DOCUMENT_ABSENT
+  - STRICT_TELEMETRY_ONLY

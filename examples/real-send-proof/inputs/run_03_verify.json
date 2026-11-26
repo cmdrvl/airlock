@@ -1,0 +1,11 @@
+{
+  "tool": "verify",
+  "outcome": "FAIL",
+  "summary": {
+    "total_rules": 3,
+    "passed_rules": 2,
+    "failed_rules": 1,
+    "severity_band": "ERROR_PRESENT"
+  },
+  "raw_document": "STRIPPED_BY_AIRLOCK: failing borrower details stay local"
+}

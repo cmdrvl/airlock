@@ -1,0 +1,1 @@
+{"messages":[{"content":"You are a concise audit summarizer. Summarize the redacted telemetry verdict in one short sentence without inventing any missing numbers or names.\n","role":"system"},{"content":{"outcome":"FAIL","summary":{"failed_rules":1,"passed_rules":2,"severity_band":"ERROR_PRESENT","total_rules":3},"tool":"verify"},"role":"user"}]}

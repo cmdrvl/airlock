@@ -1,0 +1,11 @@
+{
+  "tool": "assess",
+  "outcome": "ESCALATE",
+  "decision_band": "ESCALATE",
+  "matched_rule": "leaked_CANARY_SECRET_9941_ssn_123-45-6789",
+  "risk_factors": [
+    {
+      "code": "VERIFY_FAIL"
+    }
+  ]
+}

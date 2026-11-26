@@ -1,0 +1,11 @@
+{
+  "tool": "redline",
+  "outcome": "CHANGES_FOUND",
+  "summary": {
+    "total_hunks": 6,
+    "semantic_hunks": 4,
+    "formatting_only_hunks": 2,
+    "numeric_changed_hunks": 2
+  },
+  "raw_document": "STRIPPED_BY_AIRLOCK: full filing html stays local"
+}

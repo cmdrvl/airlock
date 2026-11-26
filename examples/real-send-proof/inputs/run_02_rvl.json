@@ -1,0 +1,12 @@
+{
+  "tool": "rvl",
+  "outcome": "REAL_CHANGE",
+  "summary": {
+    "numeric_cells_checked": 18,
+    "numeric_cells_changed": 6,
+    "top_2_share": 0.996
+  },
+  "raw_rows": [
+    "STRIPPED_BY_AIRLOCK: raw rows stay local"
+  ]
+}

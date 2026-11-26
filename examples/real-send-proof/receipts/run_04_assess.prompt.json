@@ -1,0 +1,1 @@
+{"messages":[{"content":"You are a concise audit summarizer. Summarize the redacted telemetry verdict in one short sentence without inventing any missing numbers or names.\n","role":"system"},{"content":{"decision_band":"ESCALATE","matched_rule":"verify_fail_escalate","outcome":"ESCALATE","risk_factors":[{"code":"VERIFY_FAIL"}],"tool":"assess"},"role":"user"}]}

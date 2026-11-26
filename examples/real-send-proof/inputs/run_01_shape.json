@@ -1,0 +1,12 @@
+{
+  "tool": "shape",
+  "outcome": "COMPATIBLE",
+  "summary": {
+    "columns_common": 11,
+    "overlap_ratio": 1.0,
+    "rows_old": 7,
+    "rows_new": 7,
+    "key_overlap": 6
+  },
+  "raw_document": "STRIPPED_BY_AIRLOCK: private loan schedule never crosses"
+}

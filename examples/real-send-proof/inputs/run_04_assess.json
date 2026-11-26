@@ -1,0 +1,11 @@
+{
+  "tool": "assess",
+  "outcome": "ESCALATE",
+  "decision_band": "ESCALATE",
+  "matched_rule": "verify_fail_escalate",
+  "risk_factors": [
+    {
+      "code": "VERIFY_FAIL"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+policy_id: spine_receipt_summary_v1
+version: airlock.v0
+allowed_keys:
+  - key_path: tool
+    description: Spine tool name
+    boundary_class: TELEMETRY
+  - key_path: outcome
+    description: Deterministic tool outcome
+    boundary_class: TELEMETRY
+  - key_path: decision_band
+    description: Assess decision band
+    boundary_class: TELEMETRY
+  - key_path: matched_rule
+    description: Matched policy rule identifier
+    boundary_class: TELEMETRY
+  - key_path: summary
+    description: Redacted aggregate counts and shares
+    boundary_class: TELEMETRY
+  - key_path: risk_factors
+    description: Redacted risk factor codes
+    boundary_class: TELEMETRY
+forbidden_keys:
+  - raw_document
+  - raw_rows
+  - borrower_ssn
+  - api_key
+forbidden_patterns:
+  - pattern: "CANARY_SECRET_[0-9]+"
+    description: Planted canary secret must never cross the model boundary
+    artifact_class: canary_secret
+  - pattern: "\\b[0-9]{3}-[0-9]{2}-[0-9]{4}\\b"
+    description: US SSN pattern must never cross the model boundary
+    artifact_class: pii_us_ssn
+  - pattern: "<[a-z][^>]*>"
+    description: Raw HTML markup must never cross the model boundary
+    artifact_class: raw_html
+derived_text_paths: []
+claim_levels:
+  - BOUNDARY_FAILED
+  - RAW_DOCUMENT_ABSENT
+  - STRICT_TELEMETRY_ONLY

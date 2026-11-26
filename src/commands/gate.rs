@@ -111,6 +111,7 @@ pub fn run(args: GateArgs) -> u8 {
     };
 
     let mut signature_key_fingerprint = None;
+    let mut witness_lookup_report = None;
     let (policy, transport, policy_hash, scanner, strict_manifests, chain) = match args.mode {
         GateMode::PolicyProxy => {
             if args.manifest_dir.is_some() {
@@ -131,6 +132,13 @@ pub fn run(args: GateArgs) -> u8 {
                 let _ = writeln!(
                     stderr,
                     "airlock gate: --require-claim only applies to strict-manifest mode"
+                );
+                return REFUSAL;
+            }
+            if args.witness_lookup {
+                let _ = writeln!(
+                    stderr,
+                    "airlock gate: --witness-lookup only applies to strict-manifest mode"
                 );
                 return REFUSAL;
             }
@@ -204,13 +212,28 @@ pub fn run(args: GateArgs) -> u8 {
                     return REFUSAL;
                 }
             };
-            let library = match load_strict_manifests(directory, signature_key.as_ref()) {
+            let mut library = match load_strict_manifests(directory, signature_key.as_ref()) {
                 Ok(library) => library,
                 Err(message) => {
                     let _ = writeln!(stderr, "airlock gate: {message}");
                     return REFUSAL;
                 }
             };
+            // The ledger is a second place to look for manifests. What it finds goes into the
+            // same library, through the same checks, and is matched the same way.
+            if args.witness_lookup {
+                match locate_through_witness(
+                    &witness::default_witness_path(),
+                    signature_key.as_ref(),
+                    &mut library,
+                ) {
+                    Ok(report) => witness_lookup_report = Some(report),
+                    Err(message) => {
+                        let _ = writeln!(stderr, "airlock gate: {message}");
+                        return REFUSAL;
+                    }
+                }
+            }
             signature_key_fingerprint = signature_key.as_ref().map(signing::fingerprint);
             (
                 None,
@@ -294,6 +317,21 @@ pub fn run(args: GateArgs) -> u8 {
             stderr,
             "airlock gate: {found} forwarded exchange(s) read back from the receipts in {}",
             state.out_dir.display()
+        );
+    }
+    if let Some(report) = &witness_lookup_report {
+        for (path, reason) in &report.skipped {
+            let _ = writeln!(
+                stderr,
+                "airlock gate: witness lookup skipped {path}: {reason}"
+            );
+        }
+        let _ = writeln!(
+            stderr,
+            "airlock gate: witness lookup: {} manifest(s) located through {}, {} skipped",
+            report.located,
+            report.ledger.display(),
+            report.skipped.len()
         );
     }
     match &upstream_proxy {
@@ -466,6 +504,7 @@ fn configured_signature_key(explicit: Option<&Path>) -> Result<Option<VerifyingK
 
 /// What the strict-manifest directory holds: the manifests a request body can match, and every
 /// manifest and provenance file's chain link for the check of a chained turn.
+#[derive(Default)]
 struct StrictLibrary {
     index: BTreeMap<String, StrictManifestEntry>,
     chain: ChainIndex,
@@ -476,8 +515,7 @@ fn load_strict_manifests(
     signature_key: Option<&VerifyingKey>,
 ) -> Result<StrictLibrary, String> {
     let entries = fs::read_dir(directory).map_err(|_| "strict-manifest directory is unreadable")?;
-    let mut manifests = BTreeMap::new();
-    let mut chain = ChainIndex::default();
+    let mut library = StrictLibrary::default();
     for entry in entries {
         let entry = entry.map_err(|_| "strict-manifest directory could not be read")?;
         let path = entry.path();
@@ -490,90 +528,190 @@ fn load_strict_manifests(
             return Err("strict-manifest directory contains a non-regular JSON entry".to_owned());
         }
         let bytes = fs::read(&path).map_err(|_| "strict-manifest entry is unreadable")?;
-        // A prompt provenance file (the other half of a chained turn, which `airlock chain
-        // verify` reads from the same directory) has no manifest_version. It is indexed for the
-        // chain check and is never a manifest a request can match. Any other file without a
-        // manifest_version is no more welcome than it ever was.
-        let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
-        if value.get("manifest_version").is_none() {
-            let provenance: PromptProvenance = serde_json::from_value(value)
-                .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
-            chain.add_provenance(&provenance);
-            continue;
-        }
-        let manifest: AirlockManifest = serde_json::from_slice(&bytes)
-            .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
-        if !crate::manifest::is_supported_manifest_version(&manifest.manifest_version) {
-            return Err(
-                "strict-manifest directory contains an unsupported manifest version".to_owned(),
-            );
-        }
-        // v0.3 and v0.4 require the fields v0.2 never had; the schema says so and the gate agrees.
-        if crate::manifest::has_v0_3_members(&manifest.manifest_version)
-            && (manifest.bytes_crossed.is_none() || manifest.attestation.is_none())
-        {
-            return Err(format!(
-                "strict-manifest directory contains a {} manifest without bytes_crossed and attestation",
-                manifest.manifest_version.trim_start_matches("airlock.")
-            ));
-        }
-        // A v0.4 manifest must carry a valid chain link and no other version may carry one. The
-        // gate re-hashes the parsed manifest to stamp matched_manifest_hash into receipts, so a
-        // member the loader accepted without checking would be a member nobody had verified.
-        if let Some(reason) = manifest.chain_shape_error() {
-            return Err(format!(
-                "strict-manifest directory contains a malformed {} manifest: {reason}",
-                manifest.manifest_version.trim_start_matches("airlock.")
-            ));
-        }
-        // A manifest that carries a signature is checked when a key is configured. An unsigned
-        // one is accepted either way: a signature is never required.
-        if let Some(key) = signature_key
-            && manifest.signature.is_some()
-        {
-            signing::verify_value(&value, key).map_err(|failure| {
-                format!(
-                    "strict-manifest entry {} has a signature that does not verify: {failure}; refusing to start",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                )
-            })?;
-        }
-        // Every manifest takes part in the chain check, bound or not: a link may name a prior
-        // manifest the gate would not itself forward, and the check then says so.
-        let manifest_hash = manifest.hash();
-        chain.add_manifest(
-            manifest_hash.clone(),
-            manifest.chain.clone(),
-            manifest.prompt_provenance_hash.clone(),
-        );
-        if !matches!(
-            manifest.achieved_claim,
-            ClaimLevel::RawDocumentAbsent | ClaimLevel::StrictTelemetryOnly
-        ) || manifest.binding_status != crate::types::BindingStatus::Bound
-        {
-            continue;
-        }
-        let key = manifest.request_payload_hash.clone();
-        let value = StrictManifestEntry {
-            achieved_claim: manifest.achieved_claim,
-            manifest_hash,
-        };
-        manifests
-            .entry(key)
-            .and_modify(|prior: &mut StrictManifestEntry| {
-                if value.achieved_claim == ClaimLevel::StrictTelemetryOnly
-                    && prior.achieved_claim == ClaimLevel::RawDocumentAbsent
-                {
-                    *prior = value.clone();
-                }
-            })
-            .or_insert(value);
+        index_strict_file(
+            &bytes,
+            &path.file_name().unwrap_or_default().to_string_lossy(),
+            signature_key,
+            &mut library,
+        )?;
     }
-    Ok(StrictLibrary {
-        index: manifests,
-        chain,
-    })
+    Ok(library)
+}
+
+/// Take one file into the library: a manifest a request may match, or the prompt provenance of a
+/// chained turn. Every file reaches the library through here, whether it was found in
+/// `--manifest-dir` or located through the witness ledger, so both get the same checks.
+/// `name` is how a refusal refers to the file.
+fn index_strict_file(
+    bytes: &[u8],
+    name: &str,
+    signature_key: Option<&VerifyingKey>,
+    library: &mut StrictLibrary,
+) -> Result<(), String> {
+    // A prompt provenance file (the other half of a chained turn, which `airlock chain
+    // verify` reads from the same directory) has no manifest_version. It is indexed for the
+    // chain check and is never a manifest a request can match. Any other file without a
+    // manifest_version is no more welcome than it ever was.
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
+    if value.get("manifest_version").is_none() {
+        let provenance: PromptProvenance = serde_json::from_value(value)
+            .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
+        library.chain.add_provenance(&provenance);
+        return Ok(());
+    }
+    let manifest: AirlockManifest = serde_json::from_slice(bytes)
+        .map_err(|_| "strict-manifest directory contains an invalid Airlock manifest")?;
+    if !crate::manifest::is_supported_manifest_version(&manifest.manifest_version) {
+        return Err(
+            "strict-manifest directory contains an unsupported manifest version".to_owned(),
+        );
+    }
+    // v0.3 and v0.4 require the fields v0.2 never had; the schema says so and the gate agrees.
+    if crate::manifest::has_v0_3_members(&manifest.manifest_version)
+        && (manifest.bytes_crossed.is_none() || manifest.attestation.is_none())
+    {
+        return Err(format!(
+            "strict-manifest directory contains a {} manifest without bytes_crossed and attestation",
+            manifest.manifest_version.trim_start_matches("airlock.")
+        ));
+    }
+    // A v0.4 manifest must carry a valid chain link and no other version may carry one. The
+    // gate re-hashes the parsed manifest to stamp matched_manifest_hash into receipts, so a
+    // member the loader accepted without checking would be a member nobody had verified.
+    if let Some(reason) = manifest.chain_shape_error() {
+        return Err(format!(
+            "strict-manifest directory contains a malformed {} manifest: {reason}",
+            manifest.manifest_version.trim_start_matches("airlock.")
+        ));
+    }
+    // A manifest that carries a signature is checked when a key is configured. An unsigned
+    // one is accepted either way: a signature is never required.
+    if let Some(key) = signature_key
+        && manifest.signature.is_some()
+    {
+        signing::verify_value(&value, key).map_err(|failure| {
+            format!(
+                "strict-manifest entry {name} has a signature that does not verify: {failure}; refusing to start"
+            )
+        })?;
+    }
+    // Every manifest takes part in the chain check, bound or not: a link may name a prior
+    // manifest the gate would not itself forward, and the check then says so.
+    let manifest_hash = manifest.hash();
+    library.chain.add_manifest(
+        manifest_hash.clone(),
+        manifest.chain.clone(),
+        manifest.prompt_provenance_hash.clone(),
+    );
+    if !matches!(
+        manifest.achieved_claim,
+        ClaimLevel::RawDocumentAbsent | ClaimLevel::StrictTelemetryOnly
+    ) || manifest.binding_status != crate::types::BindingStatus::Bound
+    {
+        return Ok(());
+    }
+    let key = manifest.request_payload_hash.clone();
+    let value = StrictManifestEntry {
+        achieved_claim: manifest.achieved_claim,
+        manifest_hash,
+    };
+    library
+        .index
+        .entry(key)
+        .and_modify(|prior: &mut StrictManifestEntry| {
+            if value.achieved_claim == ClaimLevel::StrictTelemetryOnly
+                && prior.achieved_claim == ClaimLevel::RawDocumentAbsent
+            {
+                *prior = value.clone();
+            }
+        })
+        .or_insert(value);
+    Ok(())
+}
+
+/// What a `--witness-lookup` found, for the startup log.
+struct WitnessLookupReport {
+    ledger: PathBuf,
+    /// Manifest files loaded through the ledger.
+    located: usize,
+    /// Files the ledger named that were not loaded, each with the reason.
+    skipped: Vec<(String, &'static str)>,
+}
+
+/// Find manifests through the witness ledger (`--witness-lookup`). The ledger is a LOCATOR and
+/// nothing more: `airlock verify` records where it wrote a manifest and the hash of the bytes it
+/// wrote, and a file the ledger names is loaded only if it still hashes to one of those. Whoever
+/// can append to the ledger and write the file it names can add a manifest this way, exactly as
+/// whoever can write `--manifest-dir` can; the gate does not check the ledger's `prev_hash` chain.
+///
+/// A file that is gone, changed since `verify` wrote it, or not a manifest is skipped and named.
+/// A ledger that cannot be read stops the gate (the operator asked for it, so starting without it
+/// would hide that nothing was looked up), and so does a file whose bytes are what `verify` wrote
+/// but which the loader refuses, as it would in `--manifest-dir`. A request still matches only a
+/// loaded manifest's own `request_payload_hash`: the ledger decides which files are read, never
+/// which request is admitted.
+fn locate_through_witness(
+    ledger: &Path,
+    signature_key: Option<&VerifyingKey>,
+    library: &mut StrictLibrary,
+) -> Result<WitnessLookupReport, String> {
+    let records =
+        witness::query_at(ledger, &witness::WitnessFilters::default()).map_err(|error| {
+            format!(
+                "witness ledger {} cannot be used for --witness-lookup: {error}; refusing to start",
+                ledger.display()
+            )
+        })?;
+    // Group by the path a verify record names. A path that was written more than once has a record
+    // for each; its file is judged against all of them, not against whichever the ledger lists
+    // last (its timestamps are whole seconds), so only what the file holds now has to match.
+    let mut by_path: BTreeMap<&str, Vec<&WitnessRecord>> = BTreeMap::new();
+    for record in &records {
+        if record.command != "verify" {
+            continue;
+        }
+        if let Some(path) = record.params.get("manifest_path").and_then(Value::as_str) {
+            by_path.entry(path).or_default().push(record);
+        }
+    }
+    let mut report = WitnessLookupReport {
+        ledger: ledger.to_path_buf(),
+        located: 0,
+        skipped: Vec::new(),
+    };
+    for (path, named) in by_path {
+        let Ok(bytes) = fs::read(path) else {
+            report.skipped.push((path.to_owned(), "unreadable"));
+            continue;
+        };
+        let hash = blake3_hash(&bytes);
+        let Some(record) = named.iter().find(|record| record.stdout_hash == hash) else {
+            report
+                .skipped
+                .push((path.to_owned(), "changed since airlock verify wrote it"));
+            continue;
+        };
+        let is_manifest = serde_json::from_slice::<Value>(&bytes)
+            .is_ok_and(|value| value.get("manifest_version").is_some());
+        if !is_manifest {
+            report.skipped.push((path.to_owned(), "not a manifest"));
+            continue;
+        }
+        index_strict_file(&bytes, path, signature_key, library)
+            .map_err(|message| format!("{message} (found through the witness ledger)"))?;
+        report.located += 1;
+        // A chained turn is checked against its prompt provenance. The chain index keys a
+        // provenance by its own hash, so a file that is not the one a manifest names is never
+        // consulted; a provenance that cannot be read here makes the chain check refuse that turn.
+        if let Some(provenance_path) = record.params.get("provenance_path").and_then(Value::as_str)
+            && let Ok(bytes) = fs::read(provenance_path)
+            && let Ok(provenance) = serde_json::from_slice::<PromptProvenance>(&bytes)
+        {
+            library.chain.add_provenance(&provenance);
+        }
+    }
+    Ok(report)
 }
 
 /// The gate's own liveness endpoint. The path is reserved for every method, so a request to

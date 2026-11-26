@@ -306,6 +306,11 @@ file in `--manifest-dir` beside its manifest. Anyone who can write `--out-dir` c
 add an exchange there (a gate receipt is unsigned), so give it to the gate account
 alone, like the rest of the gate's state. See the README, under `airlock gate`.
 
+`--witness-lookup` makes the gate read the witness ledger at startup to find manifests
+`airlock verify` wrote outside `--manifest-dir`. Whoever can append to that ledger and
+write the file it names can add a manifest, so the ledger and those files need the same
+custody as `--manifest-dir`.
+
 ## 4. Read the refusals and receipts
 
 A refused request gets a JSON body (`airlock.gate_refusal.v1`) whose `code` says

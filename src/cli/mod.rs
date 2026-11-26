@@ -130,6 +130,12 @@ pub struct GateArgs {
     pub pubkey: Option<PathBuf>,
 
     #[arg(
+        long = "witness-lookup",
+        help = "Strict-manifest mode: also load the manifests `airlock verify` recorded in the witness ledger (EPISTEMIC_WITNESS, or the default ledger). A manifest file is loaded only if it still hashes to the output hash its record carries, and a request still matches only by its canonical request hash"
+    )]
+    pub witness_lookup: bool,
+
+    #[arg(
         long = "protected-bloom",
         help = "Opaque BDBL v1 Bloom filter exported by veil"
     )]

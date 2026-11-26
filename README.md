@@ -224,6 +224,21 @@ same request bytes the gate uses one of them (the stronger claim, else whichever
 read first) and checks the chain only for that one; and the gate holds about 200
 bytes in memory per exchange it has seen.
 
+`--witness-lookup` (strict-manifest only) lets the gate also find manifests through
+the witness ledger, the file `airlock verify` and the gate both append to
+(`EPISTEMIC_WITNESS`, or the default ledger). `verify` records the absolute paths of
+the manifest it wrote and of the prompt provenance it read. At startup the gate reads
+the ledger and loads a file a record names only if the file's bytes still hash to
+that record's output hash. The file then passes the same checks as one in
+`--manifest-dir`, and a request still matches only by its canonical hash against a
+loaded manifest's own `request_payload_hash`: the ledger says where to look, never
+which request to admit. A file that is gone, changed since `verify` wrote it, or not a
+manifest is skipped and named on stderr; a ledger that cannot be read stops the gate.
+A record written before this version names no path and is ignored. The ledger is a
+locator, not a source of trust: whoever can append to it and write the file it names
+can add a manifest, as whoever can write `--manifest-dir` can, and the gate does not
+check the ledger's `prev_hash` chain.
+
 The optional `--transport` declaration pins a provider adapter, or supplies
 the JSON pointers required by `generic_json`. Without it, the gate selects a
 provider adapter from each request's shape and refuses conflicting

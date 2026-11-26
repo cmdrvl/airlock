@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -164,6 +165,11 @@ fn run_with_writers(
             "boundary_mode": boundary_mode,
             "require_claim": args.require_claim,
             "achieved_claim": manifest.achieved_claim,
+            // Where the manifest and its prompt provenance are, as absolute paths, so that
+            // `airlock gate --witness-lookup` can find them. The ledger only says where to look:
+            // the gate loads a file only if it still hashes to this record's stdout_hash.
+            "manifest_path": absolute_path(&args.out),
+            "provenance_path": absolute_path(&args.provenance),
         }),
         blake3_hash(manifest_json.as_bytes()),
         manifest_json.len(),
@@ -176,6 +182,15 @@ fn run_with_writers(
         exit_code,
         stderr,
     )
+}
+
+/// `path` as an absolute path string, or null when it cannot be made one (it then names nothing
+/// a later reader could open). Resolves symlinks, so it is the file itself.
+fn absolute_path(path: &Path) -> Value {
+    fs::canonicalize(path)
+        .ok()
+        .and_then(|resolved| resolved.to_str().map(str::to_owned))
+        .map_or(Value::Null, Value::String)
 }
 
 /// The instant a manifest is stamped with: the fixed one `SOURCE_DATE_EPOCH` names, else now.
@@ -794,6 +809,40 @@ mod tests {
         assert!(args.out.exists());
         assert!(ledger_path.exists());
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn verify_records_where_its_manifest_and_provenance_are_for_the_gate_to_find() {
+        let dir = tempdir().unwrap();
+        let ledger_path = dir.path().join("witness.jsonl");
+        let (args, _) = setup_clean_case(&dir, BoundaryMode::TelemetryOnly);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_writers(args.clone(), &ledger_path, &mut stdout, &mut stderr);
+
+        assert_eq!(exit_code, VERIFY_PASS);
+        let records = witness::query_at(&ledger_path, &witness::WitnessFilters::default()).unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        for (member, written) in [
+            ("manifest_path", &args.out),
+            ("provenance_path", &args.provenance),
+        ] {
+            let recorded = record.params[member].as_str().unwrap();
+            assert!(Path::new(recorded).is_absolute(), "{member}: {recorded}");
+            assert_eq!(
+                recorded,
+                std::fs::canonicalize(written).unwrap().to_str().unwrap(),
+                "{member}"
+            );
+        }
+        // The file the record names holds exactly the bytes its stdout_hash covers: that is what
+        // lets a reader of the ledger tell the file is still what verify wrote.
+        let manifest_bytes =
+            std::fs::read(record.params["manifest_path"].as_str().unwrap()).unwrap();
+        assert_eq!(blake3_hash(&manifest_bytes), record.stdout_hash);
+        assert_eq!(manifest_bytes, stdout);
     }
 
     #[test]

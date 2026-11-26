@@ -2279,21 +2279,34 @@ struct ChainWorld {
     lib: PathBuf,
     /// The receipts `assemble` was given: not a gate's `--out-dir`.
     receipts: PathBuf,
+    /// When set, `verify` records each manifest it writes in this witness ledger.
+    ledger: Option<PathBuf>,
     requests: Vec<Value>,
 }
 
 impl ChainWorld {
     /// `turns` turns, numbered from 0. Turn `n` follows turn `n - 1` and its reply.
     fn build(turns: usize) -> ChainWorld {
+        ChainWorld::build_recording(turns, false)
+    }
+
+    /// As `build`, with `verify` recording in the world's own witness ledger.
+    fn build_with_ledger(turns: usize) -> ChainWorld {
+        ChainWorld::build_recording(turns, true)
+    }
+
+    fn build_recording(turns: usize, record_in_ledger: bool) -> ChainWorld {
         let dir = tempfile::tempdir().unwrap();
         let lib = dir.path().join("lib");
         let receipts = dir.path().join("receipts");
         std::fs::create_dir(&lib).unwrap();
         std::fs::create_dir(&receipts).unwrap();
+        let ledger = record_in_ledger.then(|| dir.path().join("ledger.jsonl"));
         let mut world = ChainWorld {
             dir,
             lib,
             receipts,
+            ledger,
             requests: Vec::new(),
         };
         for turn in 0..turns {
@@ -2383,8 +2396,15 @@ impl ChainWorld {
             .arg("--request")
             .arg(&request_path)
             .arg("--out")
-            .arg(self.manifest(turn))
-            .arg("--no-witness");
+            .arg(self.manifest(turn));
+        match &self.ledger {
+            Some(ledger) => {
+                verify.env("EPISTEMIC_WITNESS", ledger);
+            }
+            None => {
+                verify.arg("--no-witness");
+            }
+        }
         self.run(&format!("verify {stem}"), &mut verify);
 
         // The gate forwards only a bound manifest; fail here, in the builder, if it is not one.
@@ -2712,4 +2732,394 @@ fn gate_refuses_to_start_when_a_file_in_the_manifest_dir_is_neither_manifest_nor
     ));
 
     assert!(stderr.contains("invalid Airlock manifest"), "{stderr}");
+}
+
+// --- the witness ledger as a place to find manifests (al-3pz G8) -----------------------------
+//
+// `airlock verify` records where its manifest went. `gate --witness-lookup` reads that ledger as
+// a LOCATOR: a file it names is loaded only if it still hashes to the output hash the record
+// carries, and the request match is the same exact canonical-hash match as ever. The ledger never
+// admits a request by itself.
+
+const NOTHING_LOCATED: &str = "witness lookup: 0 manifest(s) located";
+
+/// `airlock verify` of a fixture with witness recording ON: its manifest goes to `out` and its
+/// record to `ledger`. Returns the request body the manifest binds.
+fn verify_fixture_into_ledger(fixture: &str, out: &Path, ledger: &Path) -> Value {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(fixture);
+    let output = Command::new(env!("CARGO_BIN_EXE_airlock"))
+        .args(["verify", "--no-sign", "--policy"])
+        .arg(root.join("policy.yaml"))
+        .arg("--prompt")
+        .arg(root.join("expected_prompt_payload.json"))
+        .arg("--provenance")
+        .arg(root.join("expected_prompt_provenance.json"))
+        .arg("--request")
+        .arg(root.join("request.json"))
+        .arg("--out")
+        .arg(out)
+        .env("EPISTEMIC_WITNESS", ledger)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "verify of {fixture}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    read_json_file(&root.join("request.json"))
+}
+
+/// A strict gate whose manifest directory is EMPTY, so any manifest it knows came from the ledger
+/// (or from nowhere). The ledger is also the gate's own witness file, as `launch_gate` makes it.
+fn ledger_gate(
+    upstream: SocketAddr,
+    work: &Path,
+    ledger: &Path,
+    out_name: &str,
+    lookup: bool,
+) -> GateProcess {
+    let manifest_dir = work.join("empty-manifest-dir");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    let extra: &[&str] = if lookup { &["--witness-lookup"] } else { &[] };
+    start_strict_gate(upstream, &manifest_dir, &work.join(out_name), ledger, extra)
+}
+
+fn assert_manifest_not_found(status: u16, refusal: &Value) {
+    assert_eq!(status, 403, "{refusal}");
+    assert_eq!(refusal["code"], "E_GATE_DENIED", "{refusal}");
+    assert_eq!(
+        refusal["findings"][0]["rule_id"], "REQUEST_MANIFEST_NOT_FOUND",
+        "{refusal}"
+    );
+}
+
+#[test]
+fn a_manifest_outside_the_manifest_dir_is_matched_only_when_the_gate_is_told_to_look() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = temp.path().join("ledger.jsonl");
+    let elsewhere = temp.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let manifest = elsewhere.join("airlock_manifest.json");
+    let request = verify_fixture_into_ledger("clean_telemetry_only", &manifest, &ledger);
+    let body = serde_json::to_vec(&request).unwrap();
+
+    // Told to look: the request is forwarded, against that manifest.
+    let origin = start_origin();
+    let gate = ledger_gate(origin.address, temp.path(), &ledger, "out-looking", true);
+    assert!(
+        wait_for_stderr(&gate, "witness lookup: 1 manifest(s) located"),
+        "{}",
+        gate.stderr_text()
+    );
+    let (status, reply) = post(&client(), gate.address, &body);
+    assert_eq!(status, 200, "{reply}");
+    let (receipts, _) = wait_for_recorded(&temp.path().join("out-looking"), &ledger, 1);
+    assert_eq!(
+        receipts[0]["matched_manifest_hash"],
+        manifest_gate_hash(&manifest)
+    );
+    drop(gate);
+
+    // Not told to: the same ledger, the same empty directory, and nothing is found.
+    let origin = start_origin();
+    let gate = ledger_gate(origin.address, temp.path(), &ledger, "out-blind", false);
+    let (status, refusal) = post(&client(), gate.address, &body);
+    assert_manifest_not_found(status, &refusal);
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
+    assert!(
+        !gate.stderr_text().contains("witness lookup"),
+        "{}",
+        gate.stderr_text()
+    );
+}
+
+#[test]
+fn a_file_changed_after_verify_wrote_it_is_not_loaded() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = temp.path().join("ledger.jsonl");
+    let manifest = temp.path().join("airlock_manifest.json");
+    let request = verify_fixture_into_ledger("clean_telemetry_only", &manifest, &ledger);
+    // One byte of whitespace: still a manifest that parses and means the same thing, but no longer
+    // the bytes verify wrote.
+    let mut bytes = std::fs::read(&manifest).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(&manifest, bytes).unwrap();
+
+    let origin = start_origin();
+    let gate = ledger_gate(origin.address, temp.path(), &ledger, "out", true);
+    assert!(
+        wait_for_stderr(&gate, "witness lookup: 0 manifest(s) located"),
+        "{}",
+        gate.stderr_text()
+    );
+    let log = gate.stderr_text();
+    assert!(
+        log.contains(&format!(
+            "witness lookup skipped {}: changed since airlock verify wrote it",
+            std::fs::canonicalize(&manifest).unwrap().display()
+        )),
+        "{log}"
+    );
+    assert!(log.contains("1 skipped"), "{log}");
+
+    let (status, refusal) = post(
+        &client(),
+        gate.address,
+        &serde_json::to_vec(&request).unwrap(),
+    );
+    assert_manifest_not_found(status, &refusal);
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn the_ledger_never_loosens_the_match() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = temp.path().join("ledger.jsonl");
+    let elsewhere = temp.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let first = verify_fixture_into_ledger("annotated_mode", &elsewhere.join("a.json"), &ledger);
+    let second =
+        verify_fixture_into_ledger("clean_telemetry_only", &elsewhere.join("b.json"), &ledger);
+    let origin = start_origin();
+    let gate = ledger_gate(origin.address, temp.path(), &ledger, "out", true);
+    assert!(
+        wait_for_stderr(&gate, "witness lookup: 2 manifest(s) located"),
+        "{}",
+        gate.stderr_text()
+    );
+
+    // Both verified requests are forwarded: they were found.
+    for request in [&first, &second] {
+        let (status, reply) = post(
+            &client(),
+            gate.address,
+            &serde_json::to_vec(request).unwrap(),
+        );
+        assert_eq!(status, 200, "{reply}");
+    }
+    // A request that is not exactly one of them is not: one extra member changes its canonical hash.
+    for request in [&first, &second] {
+        let mut altered = request.clone();
+        altered["metadata"] = json!({"one_more_member": true});
+        let (status, refusal) = post(
+            &client(),
+            gate.address,
+            &serde_json::to_vec(&altered).unwrap(),
+        );
+        assert_manifest_not_found(status, &refusal);
+    }
+    assert_eq!(origin.count.load(Ordering::Acquire), 2);
+    drop(gate);
+
+    // A record that names a request's hash among its inputs but no manifest file (the shape of a
+    // record from before verify wrote paths) finds nothing: the hash alone admits nothing.
+    let old_ledger = temp.path().join("old-ledger.jsonl");
+    let old_manifest = temp.path().join("old-manifest.json");
+    verify_fixture_into_ledger(
+        "clean_telemetry_only",
+        &old_manifest,
+        &temp.path().join("scratch-ledger.jsonl"),
+    );
+    let request_hash = read_json_file(&old_manifest)["request_payload_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let record = airlock::witness::WitnessRecord::new(
+        "verify",
+        "VERIFIED",
+        0,
+        vec![airlock::witness::WitnessRecord::input(
+            "request.json",
+            request_hash,
+        )],
+        json!({"boundary_mode": "TELEMETRY_ONLY"}),
+        airlock::hash::blake3_hash(&std::fs::read(&old_manifest).unwrap()),
+        1,
+    );
+    std::fs::write(&old_ledger, record.to_jsonl_line()).unwrap();
+    let origin = start_origin();
+    let gate = ledger_gate(origin.address, temp.path(), &old_ledger, "out-old", true);
+    assert!(
+        wait_for_stderr(&gate, NOTHING_LOCATED),
+        "{}",
+        gate.stderr_text()
+    );
+    let (status, refusal) = post(
+        &client(),
+        gate.address,
+        &serde_json::to_vec(&second).unwrap(),
+    );
+    assert_manifest_not_found(status, &refusal);
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn an_overwritten_manifest_is_loaded_when_its_bytes_match_a_record_for_that_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = temp.path().join("ledger.jsonl");
+    let manifest = temp.path().join("airlock_manifest.json");
+    // Two verifies to one path: the ledger has a record for each, and only the second describes
+    // the file as it is now.
+    let older = verify_fixture_into_ledger("annotated_mode", &manifest, &ledger);
+    let newer = verify_fixture_into_ledger("clean_telemetry_only", &manifest, &ledger);
+    let origin = start_origin();
+    let gate = ledger_gate(origin.address, temp.path(), &ledger, "out", true);
+
+    assert!(
+        wait_for_stderr(&gate, "witness lookup: 1 manifest(s) located"),
+        "{}",
+        gate.stderr_text()
+    );
+    assert!(
+        !gate.stderr_text().contains("witness lookup skipped"),
+        "an older record for the same path is not a skipped manifest: {}",
+        gate.stderr_text()
+    );
+    let (status, reply) = post(
+        &client(),
+        gate.address,
+        &serde_json::to_vec(&newer).unwrap(),
+    );
+    assert_eq!(status, 200, "{reply}");
+    // What the file held before is gone, and so is the right to send it.
+    let (status, refusal) = post(
+        &client(),
+        gate.address,
+        &serde_json::to_vec(&older).unwrap(),
+    );
+    assert_manifest_not_found(status, &refusal);
+}
+
+#[test]
+fn gate_refuses_witness_lookup_in_policy_proxy_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_airlock"));
+    command
+        .args([
+            "gate",
+            "--mode",
+            "policy-proxy",
+            "--upstream",
+            "https://api.openai.com",
+            "--policy",
+        ])
+        .arg(fixture_root().join("policy.yaml"))
+        .arg("--witness-lookup")
+        .arg("--out-dir")
+        .arg(temp.path().join("receipts"));
+
+    let stderr = gate_refuses_to_start(command);
+
+    assert!(
+        stderr.contains("--witness-lookup only applies to strict-manifest mode"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn an_unreadable_ledger_stops_the_gate_and_a_missing_one_does_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let empty = temp.path().join("empty-manifest-dir");
+    std::fs::create_dir(&empty).unwrap();
+
+    // A ledger line that is not a witness record: the operator asked for the ledger, so a gate that
+    // started without it would hide that the lookup found nothing.
+    let corrupt = temp.path().join("corrupt.jsonl");
+    std::fs::write(&corrupt, "this is not a witness record\n").unwrap();
+    let mut command = strict_gate_command(
+        "127.0.0.1:9".parse().unwrap(),
+        &empty,
+        &temp.path().join("out-corrupt"),
+        &["--witness-lookup"],
+    );
+    command.env("EPISTEMIC_WITNESS", &corrupt);
+    let stderr = gate_refuses_to_start(command);
+    assert!(
+        stderr.contains("witness ledger") && stderr.contains("invalid witness record on line 1"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("refusing to start"), "{stderr}");
+
+    // No ledger at all is a ledger with no records.
+    let missing = temp.path().join("never-written.jsonl");
+    let gate = ledger_gate(
+        "127.0.0.1:9".parse().unwrap(),
+        temp.path(),
+        &missing,
+        "out-missing",
+        true,
+    );
+    assert!(
+        wait_for_stderr(&gate, NOTHING_LOCATED),
+        "{}",
+        gate.stderr_text()
+    );
+}
+
+#[test]
+fn a_record_that_names_a_file_that_is_not_a_manifest_is_skipped() {
+    let temp = tempfile::tempdir().unwrap();
+    let provenance = temp.path().join("prompt_provenance.json");
+    std::fs::copy(
+        fixture_root().join("expected_prompt_provenance.json"),
+        &provenance,
+    )
+    .unwrap();
+    // The bytes match the record, so only what the file IS can turn it away.
+    let record = airlock::witness::WitnessRecord::new(
+        "verify",
+        "VERIFIED",
+        0,
+        Vec::new(),
+        json!({"manifest_path": std::fs::canonicalize(&provenance).unwrap()}),
+        airlock::hash::blake3_hash(&std::fs::read(&provenance).unwrap()),
+        1,
+    );
+    let ledger = temp.path().join("ledger.jsonl");
+    std::fs::write(&ledger, record.to_jsonl_line()).unwrap();
+
+    let gate = ledger_gate(
+        "127.0.0.1:9".parse().unwrap(),
+        temp.path(),
+        &ledger,
+        "out",
+        true,
+    );
+
+    assert!(
+        wait_for_stderr(&gate, NOTHING_LOCATED),
+        "{}",
+        gate.stderr_text()
+    );
+    let log = gate.stderr_text();
+    assert!(log.contains("not a manifest"), "{log}");
+    assert!(log.contains("1 skipped"), "{log}");
+}
+
+#[test]
+fn chained_turns_found_through_the_ledger_are_still_held_to_what_the_gate_forwarded() {
+    // Both turns' manifests and prompt provenance are outside the gate's manifest directory and
+    // known to it only through the ledger. The chain check needs the provenance, so this also shows
+    // that verify's `provenance_path` is followed.
+    let world = ChainWorld::build_with_ledger(2);
+    let ledger = world.ledger.clone().unwrap();
+    let origin = chain_origin(2);
+    let gate = ledger_gate(origin.address, world.dir.path(), &ledger, "out", true);
+    assert!(
+        wait_for_stderr(&gate, "witness lookup: 2 manifest(s) located"),
+        "{}",
+        gate.stderr_text()
+    );
+
+    // The gate has forwarded nothing yet, so turn 1 is refused, as it is for a manifest in the directory.
+    let (status, refusal) = post(&client(), gate.address, &world.body(1));
+    assert_chain_denied(status, &refusal, "REQUEST_CHAIN_RESPONSE_NOT_FORWARDED");
+    assert_eq!(origin.count.load(Ordering::Acquire), 0);
+
+    // Turn 0 goes through; then turn 1 is admitted by the same gate.
+    assert_eq!(post(&client(), gate.address, &world.body(0)).0, 200);
+    assert_eq!(post(&client(), gate.address, &world.body(1)).0, 200);
+    assert_eq!(origin.count.load(Ordering::Acquire), 2);
 }

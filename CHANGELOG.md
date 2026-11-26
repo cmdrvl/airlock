@@ -79,9 +79,13 @@ verified manifest covers its exact bytes. The detail for each item is in
 
 These are limits of what was checked, not promises that they hold.
 
-- **Linux egress is unproven.** The firewall rules for Linux in
-  `docs/deploy/egress-firewall.md` have never been run by a test. Only the
-  macOS Seatbelt recipe has, on macOS, for network egress only.
+- **Egress enforcement is proven on one platform only.** Only the macOS
+  Seatbelt recipe in `docs/deploy/egress-firewall.md` has been run by a test,
+  on macOS, for network egress only. The Linux nftables rules and the macOS
+  `pf` rules are examples that no Airlock test runs. A Linux Landlock
+  (network rules, kernel 6.7 or later) or network-namespace sandbox is named
+  as the intended mechanism, but no recipe is given because none has been
+  run.
 - **No run against a real provider endpoint yet.** The gate and `send` are
   tested against local origins and mock servers. A run against a real
   endpoint is still to do.
@@ -93,7 +97,14 @@ These are limits of what was checked, not promises that they hold.
   trusted inputs: whoever can write them can add a manifest. The gate does not
   check the ledger's `prev_hash` chain.
 - **The gate listens on loopback over plain HTTP.** There is no TLS listener
-  and no remote listener.
+  and no remote listener (there is no `--allow-remote` option); that is
+  deliberate, because the loopback-only listener is a security boundary.
+- **The gate never verifies a request itself.** A strict-manifest request with
+  no matching verified manifest is refused (`E_GATE_DENIED`); there is no
+  `gate.allow_unbound` policy field and no inline `verify` fallback, because
+  that would lower what a forwarded request proves.
+- **The gate runs on `tiny_http` and `ureq`, one thread per request, with at
+  most 32 in flight.** A planned rebuild on `asupersync` was not done.
 - **The firewall recipes constrain one host.** They do not stop anything
   running as the gate's own account or as root, and say nothing about other
   machines or a proxy the agent account can already reach.

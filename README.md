@@ -1120,6 +1120,8 @@ If README and plan disagree, the plan wins.
 
 MIT
 
+For the full toolchain guide, see the [Agent Operator Guide](https://github.com/cmdrvl/.github/blob/main/profile/AGENT_PROMPT.md). Run `airlock --describe` for this tool's machine-readable contract.
+
 ---
 
 *`airlock` is part of the open-source toolchain from the [CMD+RVL](https://cmdrvl.com) lineage and AI enablement practice. MIT-licensed. Contributions welcome from any practice or stack.*
